@@ -1,0 +1,104 @@
+{
+  "device": {
+    "id": "1",
+    "name": "小米手机 14 Pro",
+    "model": "Xiaomi 14 Pro",
+    "os": "Android 14",
+    "battery": 85,
+    "status": "online",
+    "lastActive": "5分钟前",
+    "network": "wifi",
+    "locked": true,
+    "tempUnlock": null
+  },
+  "features": {
+    "lockScreen": {
+      "enabled": true,
+      "locked": true
+    },
+    "tempUnlock": {
+      "enabled": true,
+      "unlockTime": null
+    },
+    "timePlan": {
+      "enabled": true,
+      "dailyLimit": 180,
+      "usedToday": 45
+    },
+    "appLimit": {
+      "enabled": true,
+      "apps": {
+        "抖音": 15,
+        "游戏": 30,
+        "微信": 120
+      }
+    },
+    "appAudit": {
+      "enabled": true,
+      "pendingApps": []
+    },
+    "webBlock": {
+      "enabled": true,
+      "blockedUrls": [
+        "gambling.com",
+        "adult.com",
+        "baidu.com"
+      ]
+    },
+    "screenMonitor": {
+      "enabled": false
+    },
+    "remoteHelp": {
+      "enabled": false
+    },
+    "callSms": {
+      "enabled": false
+    },
+    "remotePhoto": {
+      "enabled": false
+    },
+    "remoteRecord": {
+      "enabled": false
+    },
+    "videoRecord": {
+      "enabled": false
+    },
+    "audioRecord": {
+      "enabled": false
+    }
+  },
+  "locations": [
+    {
+      "id": "1",
+      "address": "北京市朝阳区望京SOHO",
+      "time": "5分钟前",
+      "type": "other"
+    },
+    {
+      "id": "2",
+      "address": "北京市海淀区中关村第一小学",
+      "time": "3小时前",
+      "type": "school"
+    },
+    {
+      "id": "3",
+      "address": "北京市朝阳区望京西园四区",
+      "time": "昨天 18:30",
+      "type": "home"
+    }
+  ],
+  "safeZones": [
+    {
+      "id": "1",
+      "name": "家",
+      "address": "望京西园四区",
+      "type": "home"
+    },
+    {
+      "id": "2",
+      "name": "学校",
+      "address": "中关村第一小学",
+      "type": "school"
+    }
+  ]
+}

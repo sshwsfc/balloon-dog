@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogHeader, DialogTitle, DialogContent, DialogFooter } from '@/components/ui/dialog'
 import { toast } from 'sonner'
-import { Shield, Clock, Lock, MapPin, Smartphone, Eye, Camera, Mic, Video, Phone, MessageSquare, ChevronRight, Battery, Wifi, Play, Pause, Check, X } from 'lucide-react'
+import { Shield, Clock, Lock, MapPin, Smartphone, Eye, Camera, Mic, Video, Phone, ChevronRight, Battery, Wifi, Play, Pause, Check, X, BookOpen } from 'lucide-react'
 import { api } from '@/services/api'
 
 const basicFeatures = [
@@ -17,6 +18,7 @@ const basicFeatures = [
 ]
 
 const advancedFeatures = [
+  { id: 'quizUnlock', icon: BookOpen, name: '答题解锁', desc: '通过答题获得使用时长', color: 'text-amber-500', bg: 'bg-amber-50' },
   { id: 'screenMonitor', icon: Eye, name: '同屏监控', desc: '实时查看屏幕内容', color: 'text-indigo-500', bg: 'bg-indigo-50' },
   { id: 'remoteHelp', icon: Smartphone, name: '远程协助', desc: '远程操作帮助', color: 'text-pink-500', bg: 'bg-pink-50' },
   { id: 'callSms', icon: Phone, name: '电话短信', desc: '查看通话和短信', color: 'text-teal-500', bg: 'bg-teal-50' },
@@ -44,6 +46,7 @@ function FeatureItem({ feature, onClick, status }: { feature: typeof basicFeatur
 }
 
 export function HomePage() {
+  const navigate = useNavigate()
   const [device, setDevice] = useState<any>(null)
   const [features, setFeatures] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -344,7 +347,7 @@ export function HomePage() {
               const isRecording = recordingState[feature.id] === 'recording'
               return (
                 <div key={feature.id}>
-                  <div 
+                  <div
                     className="flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors cursor-pointer"
                     onClick={() => {
                       if (feature.id === 'screenMonitor' || feature.id === 'remoteHelp' || feature.id === 'callSms') {
@@ -353,6 +356,8 @@ export function HomePage() {
                         handleTakePhoto()
                       } else if (feature.id === 'videoRecord' || feature.id === 'remoteRecord') {
                         handleToggleRecording(feature.id === 'videoRecord' ? 'video' : 'audio')
+                      } else if (feature.id === 'quizUnlock') {
+                        navigate('/quiz-unlock')
                       }
                     }}
                   >
@@ -367,13 +372,13 @@ export function HomePage() {
                       <div className="flex-1">
                         <div className="font-medium text-gray-900">{feature.name}</div>
                         <div className="text-xs text-gray-400 mt-0.5">
-                          {isRecording ? '录制中...' : features[feature.id].enabled ? '已开启' : '未开启'}
+                          {isRecording ? '录制中...' : features[feature.id]?.enabled ? '已开启' : '未开启'}
                         </div>
                       </div>
                     </div>
                     <div className="w-10 h-6 rounded-full relative cursor-pointer" onClick={() => handleToggleFeature(feature.id)}>
-                      <div className={`absolute w-5 h-5 rounded-full top-0.5 transition-all ${features[feature.id].enabled ? 'right-0.5 bg-[#07c160]' : 'left-0.5 bg-gray-300'}`} />
-                      <div className={`w-full h-full rounded-full ${features[feature.id].enabled ? 'bg-green-100' : 'bg-gray-200'}`} />
+                      <div className={`absolute w-5 h-5 rounded-full top-0.5 transition-all ${features[feature.id]?.enabled ? 'right-0.5 bg-[#07c160]' : 'left-0.5 bg-gray-300'}`} />
+                      <div className={`w-full h-full rounded-full ${features[feature.id]?.enabled ? 'bg-green-100' : 'bg-gray-200'}`} />
                     </div>
                   </div>
                   {feature.id !== advancedFeatures[advancedFeatures.length - 1].id && (

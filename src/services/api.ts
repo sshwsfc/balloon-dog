@@ -1,4 +1,22 @@
-const API_BASE = 'http://localhost:3000/api'
+const API_BASE = 'http://' + location.hostname + ':3000/api'
+
+let currentToken: string | null = null
+
+export const setAuthToken = (token: string | null) => {
+  currentToken = token
+  if (token) {
+    localStorage.setItem('auth_token', token)
+  } else {
+    localStorage.removeItem('auth_token')
+  }
+}
+
+export const getAuthToken = () => {
+  if (!currentToken) {
+    currentToken = localStorage.getItem('auth_token')
+  }
+  return currentToken
+}
 
 export interface Device {
   id: string
@@ -30,29 +48,25 @@ export interface Features {
 }
 
 class ApiError extends Error {
-  constructor(message: string, public userMessage?: string) {
+  userMessage?: string
+  constructor(message: string, userMessage?: string) {
     super(message)
     this.name = 'ApiError'
+    this.userMessage = userMessage
   }
 }
 
 class ApiService {
-  private getErrorMessage(error: unknown): string {
-    if (error instanceof ApiError) {
-      return error.userMessage || '操作失败，请稍后重试'
-    }
-    if (error instanceof TypeError && error.message.includes('fetch')) {
-      return '网络连接失败，请检查网络连接'
-    }
-    if (error instanceof Error) {
-      return error.message
-    }
-    return '操作失败，请稍后重试'
-  }
-
   async get<T>(endpoint: string): Promise<T> {
     try {
+      const headers: Record<string, string> = {}
+      const token = getAuthToken()
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+
       const response = await fetch(`${API_BASE}${endpoint}`, {
+        headers,
         signal: AbortSignal.timeout(10000),
       })
       if (!response.ok) {
@@ -67,11 +81,17 @@ class ApiService {
     }
   }
 
-  async post<T>(endpoint: string, data: any): Promise<T> {
+  async post<T>(endpoint: string, data: Record<string, unknown>): Promise<T> {
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      const token = getAuthToken()
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+
       const response = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(data),
         signal: AbortSignal.timeout(10000),
       })
@@ -87,11 +107,17 @@ class ApiService {
     }
   }
 
-  async put<T>(endpoint: string, data: any): Promise<T> {
+  async put<T>(endpoint: string, data: Record<string, unknown>): Promise<T> {
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      const token = getAuthToken()
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+
       const response = await fetch(`${API_BASE}${endpoint}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(data),
         signal: AbortSignal.timeout(10000),
       })
@@ -183,6 +209,163 @@ class ApiService {
 
   async stopAudioRecording(recordingId: string): Promise<{ success: boolean; audioUrl: string }> {
     return this.post('/device/stop-audio', { recordingId })
+  }
+
+  async getQuizConfig(): Promise<{
+    enabled: boolean
+    quizType: string
+    questionBank?: string
+    correctRewardMinutes: number
+    randomMode: boolean
+  }> {
+    return this.get<{
+      enabled: boolean
+      quizType: string
+      questionBank?: string
+      correctRewardMinutes: number
+      randomMode: boolean
+    }>('/quiz/config')
+  }
+
+  async updateQuizConfig(config: {
+    enabled: boolean
+    quizType: string
+    questionBank?: string
+    correctRewardMinutes: number
+    randomMode: boolean
+  }): Promise<{ success: boolean }> {
+    return this.put('/quiz/config', config)
+  }
+
+  async getQuizQuestion(type?: string): Promise<{
+    id: string
+    type: string
+    question: string
+    options: string[]
+    correctAnswer: number
+    explanation?: string
+  }> {
+    const endpoint = type ? `/quiz/question?type=${type}` : '/quiz/question'
+    return this.get<{
+      id: string
+      type: string
+      question: string
+      options: string[]
+      correctAnswer: number
+      explanation?: string
+    }>(endpoint)
+  }
+
+  async submitQuizAnswer(questionId: string, answer: number): Promise<{
+    success: boolean
+    isCorrect: boolean
+    rewardMinutes?: number
+  }> {
+    return this.post('/quiz/answer', { questionId, answer })
+  }
+
+  async getQuizRecords(limit?: number): Promise<{
+    records: Array<{
+      id: string
+      questionId: string
+      type: string
+      question: string
+      userAnswer: number
+      isCorrect: boolean
+      timestamp: string
+      rewardMinutes?: number
+    }>
+  }> {
+    const endpoint = limit ? `/quiz/records?limit=${limit}` : '/quiz/records'
+    return this.get<{
+      records: Array<{
+        id: string
+        questionId: string
+        type: string
+        question: string
+        userAnswer: number
+        isCorrect: boolean
+        timestamp: string
+        rewardMinutes?: number
+      }>
+    }>(endpoint)
+  }
+
+  async getQuizStatistics(): Promise<{
+    totalQuestions: number
+    correctCount: number
+    incorrectCount: number
+    accuracyRate: number
+    totalRewardMinutes: number
+    byType: {
+      english: { total: number; correct: number; accuracy: number }
+      poetry: { total: number; correct: number; accuracy: number }
+      random: { total: number; correct: number; accuracy: number }
+    }
+  }> {
+    return this.get<{
+      totalQuestions: number
+      correctCount: number
+      incorrectCount: number
+      accuracyRate: number
+      totalRewardMinutes: number
+      byType: {
+        english: { total: number; correct: number; accuracy: number }
+        poetry: { total: number; correct: number; accuracy: number }
+        random: { total: number; correct: number; accuracy: number }
+      }
+    }>('/quiz/statistics')
+  }
+
+  async register(data: {
+    phone: string
+    password: string
+    code?: string
+    wechatOpenId?: string
+    wechatNickname?: string
+    wechatAvatar?: string
+  }): Promise<{ success: boolean; token: string; user: { id: string; name: string; phone?: string; avatar?: string } }> {
+    return this.post('/auth/register', data)
+  }
+
+  async login(data: { phone: string; password: string }): Promise<{ success: boolean; token: string; user: { id: string; name: string; phone?: string; avatar?: string } }> {
+    return this.post('/auth/login', data)
+  }
+
+  async wechatLogin(wechatOpenId: string, wechatNickname: string, wechatAvatar: string): Promise<{ success: boolean; token: string; user: { id: string; name: string; phone?: string; avatar?: string } }> {
+    return this.post('/auth/wechat-login', { wechatOpenId, wechatNickname, wechatAvatar })
+  }
+
+  async logout(): Promise<{ success: boolean }> {
+    return this.post('/auth/logout', {})
+  }
+
+  async getUserInfo(): Promise<{ id: string; name: string; phone?: string; email?: string; avatar?: string; wechatOpenId?: string; wechatNickname?: string; wechatAvatar?: string; createdAt: string }> {
+    return this.get('/user/info')
+  }
+
+  async updateUser(data: { name?: string; phone?: string; email?: string; avatar?: string }): Promise<{ success: boolean; user: { id: string; name: string; phone?: string; avatar?: string } }> {
+    return this.put('/user/info', data)
+  }
+
+  async getDevices(): Promise<{ devices: Array<{ id: string; userId: string; name: string; model: string; os: string; battery: number; status: 'online' | 'offline'; lastActive: string; network: string; locked: boolean; tempUnlock: string | null; avatar?: string }> }> {
+    return this.get('/user/devices')
+  }
+
+  async addDevice(data: { name: string; model: string; os: string; deviceCode: string }): Promise<{ success: boolean; device: { id: string; name: string; model: string } }> {
+    return this.post('/user/devices', data)
+  }
+
+  async deleteDevice(deviceId: string): Promise<{ success: boolean }> {
+    return this.delete(`/user/devices/${deviceId}`)
+  }
+
+  async selectDevice(deviceId: string): Promise<{ success: boolean; device: { id: string; name: string } }> {
+    return this.post('/user/select-device', { deviceId })
+  }
+
+  async sendVerificationCode(phone: string): Promise<{ success: boolean }> {
+    return this.post('/auth/send-code', { phone })
   }
 }
 

@@ -38,7 +38,7 @@ export function QuizUnlockPage() {
       const [configData, statsData, recordsData] = await Promise.all([
         api.getQuizConfig(),
         api.getQuizStatistics(),
-        api.getQuizRecords(20)
+        api.getQuizRecords({ limit: 20 })
       ])
       setConfig(configData)
       setStatistics(statsData)

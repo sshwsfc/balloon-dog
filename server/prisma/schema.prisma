@@ -1,0 +1,359 @@
+// 气球狗 —— PostgreSQL 数据模型
+//
+// 设计要点：
+// 1. 所有业务数据都以 userId 为隔离边界，设备维度数据再以 deviceId 二级隔离
+//    （mock 版把 device/features 做成全局单例，导致用户之间互相串数据，这里彻底修正）。
+// 2. 需要设备端 Agent 真正执行的能力（锁屏、拍照、录像、同屏、读数）统一走
+//    DeviceCommand 指令队列：后端只负责下发 + 收敛结果，不在 HTTP 请求里假装成功。
+// 3. 枚举一律用 String + 中文注释（与 kesi saas 保持一致），避免迁移期的 enum 变更成本。
+//
+// 迁移：npm run db:up && npm run prisma:migrate
+// 生成客户端：npm run prisma:generate
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// 用户（家长）
+// ============================================================
+
+model User {
+  id             Int      @id @default(autoincrement())
+  phone          String?  @unique // 手机号（验证码/密码登录）
+  email          String?  @unique
+  passwordHash   String // bcrypt；验证码/微信登录的账号用随机串占位
+  nickname       String   @default("家长用户")
+  avatar         String   @default("")
+  wechatOpenid   String?  @unique // 微信网页授权 openid
+  status         String   @default("active") // active 正常 | disabled 已禁用
+  activeDeviceId String? // 当前选中的设备（前端不传 deviceId 时的默认作用对象）
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  devices     ChildDevice[]
+  quizRecords QuizRecord[]
+  commands    DeviceCommand[] @relation("CommandRequester")
+  media       MediaAsset[]
+
+  @@index([status])
+}
+
+// ============================================================
+// 孩子设备
+// ============================================================
+
+model ChildDevice {
+  id               String    @id @default(cuid())
+  // 可为空：设备端 Agent 先自助注册（userId 为空 = 待认领），家长再凭绑定码认领。
+  // mock 版没有归属概念，任何未登录请求都能读写「全局那一台设备」，这里从模型层面就堵死。
+  userId           Int?
+  user             User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name             String // 家长起的名字，如「小明的小米手机」
+  model            String    @default("Unknown")
+  os               String    @default("Unknown") // Android | iOS | HarmonyOS
+  osVersion        String    @default("")
+  avatar           String    @default("")
+  deviceCode       String    @unique // 设备绑定码：设备端生成并展示，家长输入后完成认领
+  deviceSecretHash String // 设备端密钥的 bcrypt 哈希（设备端用于续订 device token）
+  boundAt          DateTime? // 家长认领时间；null 表示尚未被任何家长绑定
+  status           String    @default("offline") // online | offline
+  battery          Int       @default(0)
+  network          String    @default("unknown") // wifi | cellular | ethernet | unknown
+  locked           Boolean   @default(false)
+  tempUnlockUntil  DateTime? // 临时解锁到期时间（null 表示未临时解锁）
+  agentVersion     String    @default("")
+  lastActiveAt     DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  features    DeviceFeature[]
+  timePlan    TimePlan?
+  appLimits   AppLimit[]
+  appAudits   AppAuditRequest[]
+  blockedUrls BlockedUrl[]
+  locations   LocationRecord[]
+  safeZones   SafeZone[]
+  commands    DeviceCommand[]
+  quizConfig  QuizConfig?
+  quizRecords QuizRecord[]
+  media       MediaAsset[]
+
+  @@index([userId])
+  @@index([userId, status])
+}
+
+// ============================================================
+// 功能开关（每个设备一份）
+// ============================================================
+
+model DeviceFeature {
+  id        String      @id @default(cuid())
+  deviceId  String
+  device    ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  key       String // lockScreen | tempUnlock | timePlan | appLimit | appAudit | webBlock
+  //          screenMonitor | remoteHelp | callSms | remotePhoto | remoteRecord
+  //          videoRecord | audioRecord | quizUnlock
+  enabled   Boolean     @default(false)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  @@unique([deviceId, key])
+}
+
+// ============================================================
+// 时间规划（每日可用时长）
+// ============================================================
+
+model TimePlan {
+  id                String      @id @default(cuid())
+  deviceId          String      @unique
+  device            ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  enabled           Boolean     @default(false)
+  dailyLimitMinutes Int         @default(0) // 0 表示不限制
+  usedTodayMinutes  Int         @default(0)
+  resetAt           DateTime    @default(now()) // usedTodayMinutes 的归零基准日
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+}
+
+// ============================================================
+// 应用时长限制 / 应用审核 / 网址拦截
+// ============================================================
+
+model AppLimit {
+  id                String      @id @default(cuid())
+  deviceId          String
+  device            ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  appName           String // 展示名，如「抖音」
+  packageName       String      @default("") // Android 包名 / iOS Bundle ID
+  dailyLimitMinutes Int         @default(0)
+  enabled           Boolean     @default(true)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  @@unique([deviceId, appName])
+}
+
+model AppAuditRequest {
+  id          String      @id @default(cuid())
+  deviceId    String
+  device      ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  appName     String
+  packageName String      @default("")
+  status      String      @default("pending") // pending 待审核 | approved 已批准 | rejected 已拒绝
+  reason      String      @default("")
+  reviewedAt  DateTime?
+  createdAt   DateTime    @default(now())
+
+  @@index([deviceId, status])
+}
+
+model BlockedUrl {
+  id        String      @id @default(cuid())
+  deviceId  String
+  device    ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  url       String // 域名或网址
+  enabled   Boolean     @default(true)
+  createdAt DateTime    @default(now())
+
+  @@unique([deviceId, url])
+}
+
+// ============================================================
+// 设备指令队列（后端下发 → 设备端轮询领取 → 回报结果）
+// ============================================================
+
+model DeviceCommand {
+  id              String      @id @default(cuid())
+  deviceId        String
+  device          ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  type            String // lock | unlock | temp_unlock | cancel_temp_unlock
+  //                remote_photo | screenshot | start_recording | stop_recording
+  //                start_audio | stop_audio | sync_config | fetch_location
+  payload         Json? // 指令参数，如 { minutes: 30 }
+  status          String      @default("pending") // pending 待领取 | dispatched 已领取执行中
+  //                succeeded 成功 | failed 失败 | expired 超时未领取 | cancelled 家长撤销
+  result          Json? // 设备端回传的结果，如 { mediaId: "..." }
+  error           String      @default("")
+  requestedBy     Int?
+  requestedByUser User?       @relation("CommandRequester", fields: [requestedBy], references: [id], onDelete: SetNull)
+  expiresAt       DateTime
+  dispatchedAt    DateTime?
+  finishedAt      DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([deviceId, status])
+  @@index([status, expiresAt])
+  @@index([deviceId, createdAt])
+}
+
+// ============================================================
+// 位置轨迹与安全区
+// ============================================================
+
+model LocationRecord {
+  id         String      @id @default(cuid())
+  deviceId   String
+  device     ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  latitude   Float
+  longitude  Float
+  accuracy   Float       @default(0) // 精度（米）
+  address    String      @default("")
+  type       String      @default("other") // home 家 | school 学校 | other 其它
+  recordedAt DateTime // 设备上报的时刻（非入库时刻）
+  createdAt  DateTime    @default(now())
+
+  @@index([deviceId, recordedAt])
+}
+
+model SafeZone {
+  id           String      @id @default(cuid())
+  deviceId     String
+  device       ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  name         String
+  latitude     Float
+  longitude    Float
+  radiusMeters Int         @default(200)
+  address      String      @default("")
+  type         String      @default("other") // home | school | other
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([deviceId])
+}
+
+// ============================================================
+// 答题解锁
+// ============================================================
+
+model QuizQuestion {
+  id            String   @id @default(cuid())
+  type          String // english 英文单词 | poetry 古诗填空
+  grade         String   @default("grade1") // grade1..grade6
+  question      String
+  options       String[]
+  correctAnswer Int // options 的下标
+  explanation   String   @default("")
+  createdAt     DateTime @default(now())
+
+  records QuizRecord[]
+
+  @@index([type, grade])
+}
+
+model QuizConfig {
+  id                   String      @id @default(cuid())
+  deviceId             String      @unique
+  device               ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  enabled              Boolean     @default(false)
+  quizType             String      @default("english") // english | poetry | random
+  grade                String      @default("grade1") // 题库年级
+  correctRewardMinutes Int         @default(3) // 答对奖励时长
+  randomMode           Boolean     @default(false) // 根据设备画面随机出题
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+}
+
+model QuizRecord {
+  id            String       @id @default(cuid())
+  // 可为空：答题由设备端 Agent 提交，理论上设备可能尚未被认领
+  userId        Int?
+  user          User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId      String
+  device        ChildDevice  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  questionId    String
+  question      QuizQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  type          String
+  questionText  String // 冗余题干，题库删改后记录仍可读
+  userAnswer    Int
+  isCorrect     Boolean
+  rewardMinutes Int          @default(0)
+  createdAt     DateTime     @default(now())
+
+  @@index([deviceId, createdAt])
+  @@index([userId, createdAt])
+}
+
+// ============================================================
+// 短信验证码
+// ============================================================
+
+model SmsCode {
+  id         String    @id @default(cuid())
+  phone      String
+  codeHash   String // 验证码本身也哈希存储（防日志/DB 泄露后直接可用）
+  purpose    String // register 注册 | login 验证码登录 | bind 绑定手机号
+  attempts   Int       @default(0) // 校验失败次数，超限作废
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([phone, purpose, createdAt])
+  @@index([expiresAt])
+}
+
+// ============================================================
+// 媒体（设备回传的照片/截图/音视频）
+// ============================================================
+
+model MediaAsset {
+  id        String      @id @default(cuid())
+  deviceId  String
+  device    ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  userId    Int?
+  user      User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind      String // photo 拍照 | screenshot 屏幕截图 | video 录像 | audio 录音
+  filename  String // 落盘文件名
+  mimeType  String
+  sizeBytes Int
+  commandId String? // 由哪条指令产生
+  createdAt DateTime    @default(now())
+
+  @@index([deviceId, createdAt])
+  @@index([userId])
+}
+
+// ============================================================
+// 管理后台（与家长账号完全隔离：独立表、独立令牌、独立入口）
+// ============================================================
+
+model Admin {
+  id           Int       @id @default(autoincrement())
+  username     String    @unique // 登录账号
+  passwordHash String // bcrypt
+  name         String    @default("管理员")
+  // 角色：super 超级管理员（可管理其它管理员）| operator 运营（只读 + 日常处置）
+  role         String    @default("super")
+  status       String    @default("active") // active 正常 | disabled 已禁用
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([status])
+}
+
+/// 管理员操作审计。记录每一次 /api/admin 请求（含登录尝试），
+/// 请求参数里的密码/密钥/令牌会被脱敏后再落库。
+model OperationLog {
+  id        Int      @id @default(autoincrement())
+  adminId   Int? // 登录失败等场景可能为空
+  adminName String   @default("") // 管理员账号名（登录尝试时取请求体）
+  action    String // 人类可读的操作描述，如「禁用家长账号」
+  method    String // HTTP 方法
+  path      String // 请求路径
+  status    Int // 响应状态码
+  detail    String? // 脱敏后的请求参数摘要（JSON）
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([adminId])
+  @@index([action])
+}

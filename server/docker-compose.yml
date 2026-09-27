@@ -1,0 +1,32 @@
+# 气球狗本地开发数据库。
+# 端口用 5433 以避免与本机已存在的其它 PostgreSQL（如 gtsiot-postgres 占用 5432）冲突。
+#
+# ⚠️ name 必须显式指定：Compose 默认用「所在目录名」作为项目名，
+# 本目录与 kesi 项目的 server/ 目录同名（都是 server），项目名 + 服务名(postgres)
+# 双重撞车会导致 `docker compose up` 把对方的容器当成同项目容器重建。
+name: balloon-dog
+
+services:
+  postgres:
+    # 本机已有华为云镜像源的 postgres 16（Docker Hub 直连拉取会被 keychain 凭据助手拦截）。
+    # 如果你能正常访问 Docker Hub，可换回官方 tag：image: postgres:16-alpine
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/postgres:16-alpine
+    container_name: balloon-dog-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: balloon
+      POSTGRES_PASSWORD: balloon_dev_pwd
+      POSTGRES_DB: balloon_dog
+      TZ: Asia/Shanghai
+    ports:
+      - '5433:5432'
+    volumes:
+      - balloon-dog-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U balloon -d balloon_dog']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  balloon-dog-pgdata:

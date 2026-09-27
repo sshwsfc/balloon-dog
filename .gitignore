@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# 后端
+server/uploads/
+server/.env
+server/dist/

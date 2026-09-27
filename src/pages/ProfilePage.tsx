@@ -1,165 +1,226 @@
-import { useState, useEffect } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
-import { User, Mail, Settings, Bell, Shield, LogOut, ChevronRight, Plus, Smartphone } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Bell,
+  ChevronRight,
+  Image as ImageIcon,
+  LogOut,
+  Mail,
+  Plus,
+  Settings,
+  Shield,
+  Smartphone,
+  User,
+} from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
-import { api } from '@/services/api'
-
-interface Device {
-  id: string
-  name: string
-  model: string
-  battery: number
-  status: 'online' | 'offline'
-}
+import { api, toUserMessage } from '@/services/api'
+import { toast } from 'sonner'
+import type { Device } from '@/types'
 
 export function ProfilePage() {
   const navigate = useNavigate()
   const { user, logout } = useAuth()
   const [devices, setDevices] = useState<Device[]>([])
+  const [deviceError, setDeviceError] = useState<string | null>(null)
 
-  const loadDevices = async () => {
-    try {
-      const response = await api.getDevices()
-      setDevices(response.devices)
-    } catch (error) {
-      console.error('Failed to load devices:', error)
-    }
-  }
+  const fetchDevices = useCallback(() => api.getDevices(), [])
 
   useEffect(() => {
-    loadDevices()
-  }, [])
+    let cancelled = false
+    fetchDevices()
+      .then((res) => {
+        if (cancelled) return
+        setDevices(res.devices ?? [])
+        setDeviceError(null)
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        setDeviceError(toUserMessage(error, '加载设备失败'))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [fetchDevices])
+
+  const reloadDevices = useCallback(async () => {
+    try {
+      const res = await fetchDevices()
+      setDevices(res.devices ?? [])
+      setDeviceError(null)
+    } catch (error) {
+      setDeviceError(toUserMessage(error, '加载设备失败'))
+    }
+  }, [fetchDevices])
 
   const handleLogout = () => {
     logout()
-    navigate('/login')
+    navigate('/login', { replace: true })
   }
+
+  const menuItems = [
+    { icon: User, title: '个人信息', desc: '修改昵称、邮箱', onClick: () => toast.info('个人信息编辑即将上线') },
+    { icon: Bell, title: '通知设置', desc: '消息提醒、推送通知', onClick: () => toast.info('通知设置即将上线') },
+    { icon: Shield, title: '隐私安全', desc: '密码、指纹、面部识别', onClick: () => toast.info('隐私安全设置即将上线') },
+    { icon: Settings, title: '通用设置', desc: '语言、主题、版本', onClick: () => toast.info('通用设置即将上线') },
+  ]
+
   return (
     <div className="min-h-screen pb-20 bg-gray-100">
       <div className="bg-gradient-to-br from-green-400 to-green-600 text-white px-4 py-6">
         <div className="flex items-center space-x-3">
           {user?.avatar ? (
-            <img src={user.avatar} alt="avatar" className="w-16 h-16 rounded-full" />
+            <img src={user.avatar} alt="头像" className="w-16 h-16 rounded-full bg-white/20" />
           ) : (
             <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center">
               <User className="w-8 h-8" />
             </div>
           )}
-          <div>
-            <h1 className="text-xl font-medium">{user?.name || '用户'}</h1>
+          <div className="min-w-0">
+            <h1 className="text-xl font-medium truncate">{user?.name || '家长用户'}</h1>
             <p className="text-xs opacity-80 mt-0.5">家长账户</p>
-            <p className="text-xs opacity-60 mt-1">{user?.phone || user?.email || ''}</p>
+            <p className="text-xs opacity-60 mt-1 truncate">
+              {user?.phone || user?.email || '未绑定手机号'}
+              {user?.wechatBound ? ' · 已绑定微信' : ''}
+            </p>
           </div>
         </div>
       </div>
 
+      {/* 设备列表 */}
       <div className="px-3 -mt-4">
         <Card>
           <CardContent className="p-0">
-            {devices.length > 0 ? (
-              devices.map((device) => (
-                <div
-                  key={device.id}
-                  className="flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors cursor-pointer"
-                  onClick={() => navigate('/devices')}
-                >
-                  <div className="flex items-center space-x-3">
-                    <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
-                      <Smartphone className="w-5 h-5 text-blue-500" />
-                    </div>
-                    <div>
-                      <h4 className="font-medium text-gray-900 text-sm">{device.name}</h4>
-                      <p className="text-xs text-gray-400 mt-0.5">{device.model}</p>
-                    </div>
-                  </div>
-                  <ChevronRight className="w-5 h-5 text-gray-300" />
-                </div>
-              ))
-            ) : (
-              <div className="flex items-center justify-center py-3 hover:bg-gray-50 active:bg-gray-100 transition-colors cursor-pointer">
-                <Plus className="w-4 h-4 text-gray-400 mr-1.5" />
-                <span className="text-sm text-gray-500">添加新设备</span>
+            {deviceError ? (
+              <div className="px-4 py-4 text-center">
+                <p className="text-sm text-gray-500">{deviceError}</p>
+                <Button variant="outline" size="sm" className="mt-2" onClick={() => void reloadDevices()}>
+                  重试
+                </Button>
               </div>
-            )}
-            {devices.length > 0 && (
-              <div className="mx-4 border-t border-gray-100" />
-            )}
-            {devices.length > 0 && (
-              <div
-                className="flex items-center justify-center py-3 hover:bg-gray-50 active:bg-gray-100 transition-colors cursor-pointer"
+            ) : devices.length === 0 ? (
+              // 原实现这里没有 onClick，点了没反应
+              <button
+                type="button"
+                className="w-full flex items-center justify-center py-4 hover:bg-gray-50 active:bg-gray-100 transition-colors"
                 onClick={() => navigate('/devices')}
               >
                 <Plus className="w-4 h-4 text-gray-400 mr-1.5" />
-                <span className="text-sm text-gray-500">添加新设备</span>
-              </div>
+                <span className="text-sm text-gray-500">绑定孩子设备</span>
+              </button>
+            ) : (
+              <>
+                {devices.map((device, index) => (
+                  <div key={device.id}>
+                    <button
+                      type="button"
+                      className="w-full flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors text-left"
+                      onClick={() => navigate('/devices')}
+                    >
+                      <div className="flex items-center space-x-3 min-w-0">
+                        <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center flex-shrink-0">
+                          <Smartphone className="w-5 h-5 text-blue-500" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center space-x-2">
+                            <h4 className="font-medium text-gray-900 text-sm truncate">{device.name}</h4>
+                            <Badge
+                              className={
+                                device.status === 'online'
+                                  ? 'bg-[#07c160] text-white text-[10px]'
+                                  : 'bg-gray-400 text-white text-[10px]'
+                              }
+                            >
+                              {device.status === 'online' ? '在线' : '离线'}
+                            </Badge>
+                          </div>
+                          <p className="text-xs text-gray-400 mt-0.5 truncate">{device.model}</p>
+                        </div>
+                      </div>
+                      <ChevronRight className="w-5 h-5 text-gray-300 flex-shrink-0" />
+                    </button>
+                    {index < devices.length - 1 && <div className="mx-4 border-t border-gray-100" />}
+                  </div>
+                ))}
+                <div className="mx-4 border-t border-gray-100" />
+                <button
+                  type="button"
+                  className="w-full flex items-center justify-center py-3 hover:bg-gray-50 active:bg-gray-100 transition-colors"
+                  onClick={() => navigate('/devices')}
+                >
+                  <Plus className="w-4 h-4 text-gray-400 mr-1.5" />
+                  <span className="text-sm text-gray-500">管理设备</span>
+                </button>
+              </>
             )}
           </CardContent>
         </Card>
       </div>
 
+      {/* 媒体入口 */}
       <div className="px-3 mt-3">
         <Card>
           <CardContent className="p-0">
-            <div className="flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors">
+            <button
+              type="button"
+              className="w-full flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors text-left"
+              onClick={() => navigate('/media')}
+            >
               <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center">
-                  <User className="w-5 h-5 text-gray-500" />
+                <div className="w-10 h-10 bg-cyan-50 rounded-lg flex items-center justify-center">
+                  <ImageIcon className="w-5 h-5 text-cyan-500" />
                 </div>
                 <div>
-                  <h4 className="font-medium text-gray-900 text-sm">个人信息</h4>
-                  <p className="text-xs text-gray-400 mt-0.5">修改姓名、手机号</p>
+                  <h4 className="font-medium text-gray-900 text-sm">设备照片</h4>
+                  <p className="text-xs text-gray-400 mt-0.5">查看孩子设备回传的照片与截图</p>
                 </div>
               </div>
               <ChevronRight className="w-5 h-5 text-gray-300" />
-            </div>
-            <div className="mx-4 border-t border-gray-100" />
-            <div className="flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors">
-              <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center">
-                  <Bell className="w-5 h-5 text-gray-500" />
-                </div>
-                <div>
-                  <h4 className="font-medium text-gray-900 text-sm">通知设置</h4>
-                  <p className="text-xs text-gray-400 mt-0.5">消息提醒、推送通知</p>
-                </div>
-              </div>
-              <ChevronRight className="w-5 h-5 text-gray-300" />
-            </div>
-            <div className="mx-4 border-t border-gray-100" />
-            <div className="flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors">
-              <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center">
-                  <Shield className="w-5 h-5 text-gray-500" />
-                </div>
-                <div>
-                  <h4 className="font-medium text-gray-900 text-sm">隐私安全</h4>
-                  <p className="text-xs text-gray-400 mt-0.5">密码、指纹、面部识别</p>
-                </div>
-              </div>
-              <ChevronRight className="w-5 h-5 text-gray-300" />
-            </div>
-            <div className="mx-4 border-t border-gray-100" />
-            <div className="flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors">
-              <div className="flex items-center space-x-3">
-                <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center">
-                  <Settings className="w-5 h-5 text-gray-500" />
-                </div>
-                <div>
-                  <h4 className="font-medium text-gray-900 text-sm">通用设置</h4>
-                  <p className="text-xs text-gray-400 mt-0.5">语言、主题、版本</p>
-                </div>
-              </div>
-              <ChevronRight className="w-5 h-5 text-gray-300" />
-            </div>
+            </button>
           </CardContent>
         </Card>
       </div>
 
+      {/* 设置项 */}
       <div className="px-3 mt-3">
         <Card>
           <CardContent className="p-0">
-            <div className="flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors">
+            {menuItems.map((item, index) => (
+              <div key={item.title}>
+                <button
+                  type="button"
+                  className="w-full flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors text-left"
+                  onClick={item.onClick}
+                >
+                  <div className="flex items-center space-x-3">
+                    <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center">
+                      <item.icon className="w-5 h-5 text-gray-500" />
+                    </div>
+                    <div>
+                      <h4 className="font-medium text-gray-900 text-sm">{item.title}</h4>
+                      <p className="text-xs text-gray-400 mt-0.5">{item.desc}</p>
+                    </div>
+                  </div>
+                  <ChevronRight className="w-5 h-5 text-gray-300" />
+                </button>
+                {index < menuItems.length - 1 && <div className="mx-4 border-t border-gray-100" />}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* 客服 + 退出 */}
+      <div className="px-3 mt-3">
+        <Card>
+          <CardContent className="p-0">
+            <button
+              type="button"
+              className="w-full flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors text-left"
+              onClick={() => toast.info('客服联系方式即将上线')}
+            >
               <div className="flex items-center space-x-3">
                 <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center">
                   <Mail className="w-5 h-5 text-gray-500" />
@@ -170,10 +231,11 @@ export function ProfilePage() {
                 </div>
               </div>
               <ChevronRight className="w-5 h-5 text-gray-300" />
-            </div>
+            </button>
             <div className="mx-4 border-t border-gray-100" />
-            <div
-              className="flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors cursor-pointer"
+            <button
+              type="button"
+              className="w-full flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors text-left"
               onClick={handleLogout}
             >
               <div className="flex items-center space-x-3">
@@ -185,7 +247,7 @@ export function ProfilePage() {
                   <p className="text-xs text-gray-400 mt-0.5">退出当前账户</p>
                 </div>
               </div>
-            </div>
+            </button>
           </CardContent>
         </Card>
       </div>

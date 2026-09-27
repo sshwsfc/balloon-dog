@@ -1,372 +1,600 @@
-const API_BASE = 'http://' + location.hostname + ':3000/api'
+/**
+ * 后端接口层。
+ *
+ * 相对 mock 版的几处关键修正：
+ *  1. **错误信息透传**：后端返回的 `{ message }` 是可直接展示的中文短句，
+ *     过去被整包丢弃、前端统一显示 "API Error: 400"。现在 ApiError.userMessage 有值，
+ *     所有页面用 `toUserMessage(error)` 取值。
+ *  2. **delete 也带令牌**：原本 delete() 是唯一漏拼 Authorization 的方法，
+ *     导致删除设备必然 401。现在所有方法走同一个 request()。
+ *  3. **401 统一处理**：令牌失效时自动清凭据并跳登录，而不是让每个页面自己 try/catch。
+ *  4. **相对路径 /api**：开发走 Vite 代理、生产走 Nginx 反代，不再硬编码 host:port
+ *     （原实现拼接 `location.hostname:3000`，换端口/域名就废）。
+ */
+import type {
+  AuthResponse,
+  CommandDispatchResult,
+  Device,
+  DeviceCommand,
+  Features,
+  LocationPoint,
+  MediaAsset,
+  QuizAnswerResult,
+  QuizConfig,
+  QuizQuestion,
+  QuizRecord,
+  QuizStatistics,
+  SafeZone,
+  User,
+} from '@/types'
 
-let currentToken: string | null = null
+const API_BASE = '/api'
+const TOKEN_KEY = 'balloon_dog_token'
+const REQUEST_TIMEOUT_MS = 15_000
 
-export const setAuthToken = (token: string | null) => {
-  currentToken = token
-  if (token) {
-    localStorage.setItem('auth_token', token)
-  } else {
-    localStorage.removeItem('auth_token')
+/** 后端统一错误体 */
+interface ServerErrorBody {
+  title?: string
+  status?: number
+  message?: string
+  detail?: string | null
+  errors?: { path: string; message: string }[] | null
+  request_id?: string
+}
+
+export class ApiError extends Error {
+  readonly status: number
+  readonly code: string
+  /** 可直接展示给用户的中文提示 */
+  readonly userMessage: string
+  readonly detail: string | null
+  readonly fieldErrors: { path: string; message: string }[] | null
+  readonly requestId?: string
+
+  constructor(init: {
+    status: number
+    code: string
+    userMessage: string
+    detail?: string | null
+    fieldErrors?: { path: string; message: string }[] | null
+    requestId?: string
+  }) {
+    super(init.userMessage)
+    this.name = 'ApiError'
+    this.status = init.status
+    this.code = init.code
+    this.userMessage = init.userMessage
+    this.detail = init.detail ?? null
+    this.fieldErrors = init.fieldErrors ?? null
+    this.requestId = init.requestId
   }
 }
 
-export const getAuthToken = () => {
+/**
+ * 从任意异常里取出「能展示给用户」的中文提示。
+ * 页面里统一用这个，不要再写 `error.message || '...'` ——
+ * 网络错误、超时、后端业务错误的文案差异都在这里收口。
+ */
+export function toUserMessage(error: unknown, fallback = '操作失败，请稍后重试'): string {
+  if (error instanceof ApiError) return error.userMessage || fallback
+  if (error instanceof Error) {
+    if (error.name === 'TimeoutError') return '请求超时，请检查网络后重试'
+    if (error.name === 'AbortError') return '请求已取消'
+    if (error.message === 'Failed to fetch') return '无法连接服务器，请确认后端已启动'
+    return error.message || fallback
+  }
+  return fallback
+}
+
+// ============================================================
+// 令牌存储
+// ============================================================
+
+let currentToken: string | null = null
+let unauthorizedHandler: (() => void) | null = null
+
+export function setAuthToken(token: string | null): void {
+  currentToken = token
+  if (token) {
+    localStorage.setItem(TOKEN_KEY, token)
+  } else {
+    localStorage.removeItem(TOKEN_KEY)
+  }
+}
+
+export function getAuthToken(): string | null {
   if (!currentToken) {
-    currentToken = localStorage.getItem('auth_token')
+    currentToken = localStorage.getItem(TOKEN_KEY)
   }
   return currentToken
 }
 
-export interface Device {
-  id: string
-  name: string
-  model: string
-  os: string
-  battery: number
-  status: string
-  lastActive: string
-  network: string
-  locked: boolean
-  tempUnlock: string | null
+/**
+ * 注册 401 回调（AuthContext 在挂载时注册）。
+ * 令牌过期/被禁用时，API 层先清凭证再通知上层跳转登录，
+ * 避免每个页面各自处理一遍。
+ */
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler
 }
 
-export interface Features {
-  lockScreen: { enabled: boolean; locked: boolean }
-  tempUnlock: { enabled: boolean; unlockTime: string | null }
-  timePlan: { enabled: boolean; dailyLimit: number; usedToday: number }
-  appLimit: { enabled: boolean; apps: Record<string, number> }
-  appAudit: { enabled: boolean; pendingApps: string[] }
-  webBlock: { enabled: boolean; blockedUrls: string[] }
-  screenMonitor: { enabled: boolean }
-  remoteHelp: { enabled: boolean }
-  callSms: { enabled: boolean }
-  remotePhoto: { enabled: boolean }
-  remoteRecord: { enabled: boolean }
-  videoRecord: { enabled: boolean }
-  audioRecord: { enabled: boolean }
+// ============================================================
+// 请求核心
+// ============================================================
+
+type QueryValue = string | number | boolean | undefined | null
+
+function buildUrl(path: string, query?: Record<string, QueryValue>): string {
+  const url = `${API_BASE}${path}`
+  if (!query) return url
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null && value !== '') {
+      params.append(key, String(value))
+    }
+  }
+  const qs = params.toString()
+  return qs ? `${url}?${qs}` : url
 }
 
-class ApiError extends Error {
-  userMessage?: string
-  constructor(message: string, userMessage?: string) {
-    super(message)
-    this.name = 'ApiError'
-    this.userMessage = userMessage
+interface RequestOptions {
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE'
+  body?: unknown
+  query?: Record<string, QueryValue>
+  /** 上传表单时传 FormData（不能设 Content-Type，交给浏览器带 boundary） */
+  formData?: FormData
+  /** 内部标记：401 时不触发跳转（登录接口本身失败不该再跳一次） */
+  skipUnauthorizedHandler?: boolean
+}
+
+async function request<T>(path: string, options: RequestOptions): Promise<T> {
+  const headers: Record<string, string> = {}
+  const token = getAuthToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+
+  let body: BodyInit | undefined
+  if (options.formData) {
+    body = options.formData
+  } else if (options.body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    body = JSON.stringify(options.body)
+  }
+
+  let response: Response
+  try {
+    response = await fetch(buildUrl(path, options.query), {
+      method: options.method,
+      headers,
+      body,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+  } catch (error) {
+    // 网络层异常（断网/超时/后端没起来）统一包装，页面只需认 ApiError
+    if (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+      throw new ApiError({
+        status: 0,
+        code: 'TIMEOUT',
+        userMessage: '请求超时，请检查网络后重试',
+      })
+    }
+    throw new ApiError({
+      status: 0,
+      code: 'NETWORK_ERROR',
+      userMessage: '无法连接服务器，请确认后端已启动',
+    })
+  }
+
+  // 204 或空响应体
+  const text = await response.text()
+  let payload: unknown = null
+  if (text) {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = null
+    }
+  }
+
+  if (!response.ok) {
+    const errBody = (payload ?? {}) as ServerErrorBody
+
+    if (response.status === 401 && !options.skipUnauthorizedHandler) {
+      setAuthToken(null)
+      unauthorizedHandler?.()
+    }
+
+    throw new ApiError({
+      status: response.status,
+      code: errBody.title || `HTTP_${response.status}`,
+      // 后端已经给了中文 message，直接用；没有才兜底
+      userMessage: errBody.message || defaultMessageForStatus(response.status),
+      detail: errBody.detail ?? null,
+      fieldErrors: errBody.errors ?? null,
+      requestId: errBody.request_id,
+    })
+  }
+
+  return payload as T
+}
+
+function defaultMessageForStatus(status: number): string {
+  switch (status) {
+    case 400:
+      return '请求参数有误'
+    case 403:
+      return '没有权限执行此操作'
+    case 404:
+      return '请求的数据不存在'
+    case 409:
+      return '数据冲突，请刷新后重试'
+    case 413:
+      return '内容过大，请压缩后重试'
+    case 422:
+      return '提交内容未通过校验'
+    case 429:
+      return '操作过于频繁，请稍后再试'
+    case 503:
+      return '服务暂时不可用，请稍后重试'
+    default:
+      return '服务器开小差了，请稍后重试'
   }
 }
 
-class ApiService {
-  async get<T>(endpoint: string): Promise<T> {
-    try {
-      const headers: Record<string, string> = {}
-      const token = getAuthToken()
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`
-      }
+const http = {
+  get: <T>(path: string, query?: Record<string, QueryValue>) =>
+    request<T>(path, { method: 'GET', query }),
+  post: <T>(path: string, body?: unknown, query?: Record<string, QueryValue>) =>
+    request<T>(path, { method: 'POST', body, query }),
+  put: <T>(path: string, body?: unknown, query?: Record<string, QueryValue>) =>
+    request<T>(path, { method: 'PUT', body, query }),
+  del: <T>(path: string, query?: Record<string, QueryValue>) =>
+    request<T>(path, { method: 'DELETE', query }),
+  upload: <T>(path: string, formData: FormData) =>
+    request<T>(path, { method: 'POST', formData }),
+}
 
-      const response = await fetch(`${API_BASE}${endpoint}`, {
-        headers,
-        signal: AbortSignal.timeout(10000),
-      })
-      if (!response.ok) {
-        throw new ApiError(`API Error: ${response.status}`, '获取数据失败，请稍后重试')
-      }
-      return response.json()
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        throw new ApiError('Timeout', '请求超时，请检查网络连接')
-      }
-      throw error
-    }
-  }
+// ============================================================
+// 认证
+// ============================================================
 
-  async post<T>(endpoint: string, data: Record<string, unknown>): Promise<T> {
-    try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      const token = getAuthToken()
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`
-      }
+export type SmsPurpose = 'register' | 'login' | 'bind'
 
-      const response = await fetch(`${API_BASE}${endpoint}`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(data),
-        signal: AbortSignal.timeout(10000),
-      })
-      if (!response.ok) {
-        throw new ApiError(`API Error: ${response.status}`, '操作失败，请稍后重试')
-      }
-      return response.json()
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        throw new ApiError('Timeout', '请求超时，请检查网络连接')
-      }
-      throw error
-    }
-  }
+export interface SendCodeResult {
+  success: boolean
+  message: string
+  ttlSeconds: number
+  /** 仅在后端未配置真实短信通道的本地联调模式下返回 */
+  devCode?: string
+}
 
-  async put<T>(endpoint: string, data: Record<string, unknown>): Promise<T> {
-    try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      const token = getAuthToken()
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`
-      }
+export const authApi = {
+  sendCode: (phone: string, purpose: SmsPurpose = 'register') =>
+    http.post<SendCodeResult>('/auth/send-code', { phone, purpose }),
 
-      const response = await fetch(`${API_BASE}${endpoint}`, {
-        method: 'PUT',
-        headers,
-        body: JSON.stringify(data),
-        signal: AbortSignal.timeout(10000),
-      })
-      if (!response.ok) {
-        throw new ApiError(`API Error: ${response.status}`, '操作失败，请稍后重试')
-      }
-      return response.json()
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        throw new ApiError('Timeout', '请求超时，请检查网络连接')
-      }
-      throw error
-    }
-  }
+  register: (data: { phone: string; password: string; code: string; nickname?: string }) =>
+    http.post<AuthResponse>('/auth/register', data),
 
-  async delete<T>(endpoint: string): Promise<T> {
-    try {
-      const response = await fetch(`${API_BASE}${endpoint}`, {
-        method: 'DELETE',
-        signal: AbortSignal.timeout(10000),
-      })
-      if (!response.ok) {
-        throw new ApiError(`API Error: ${response.status}`, '操作失败，请稍后重试')
-      }
-      return response.json()
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        throw new ApiError('Timeout', '请求超时，请检查网络连接')
-      }
-      throw error
-    }
-  }
+  login: (data: { phone: string; password: string }) =>
+    // 登录失败时不要触发全局 401 跳转（本来就在登录页）
+    request<AuthResponse>('/auth/login', { method: 'POST', body: data, skipUnauthorizedHandler: true }),
 
-  async getDevice(): Promise<Device> {
-    return this.get<Device>('/device')
-  }
+  smsLogin: (data: { phone: string; code: string }) =>
+    request<AuthResponse>('/auth/sms-login', { method: 'POST', body: data, skipUnauthorizedHandler: true }),
 
-  async getFeatures(): Promise<Features> {
-    return this.get<Features>('/features')
-  }
+  logout: () => http.post<{ success: boolean }>('/auth/logout', {}),
 
-  async lockScreen(locked: boolean): Promise<{ success: boolean }> {
-    return this.post('/device/lock', { locked })
-  }
+  changePassword: (data: { oldPassword: string; newPassword: string }) =>
+    http.post<{ success: boolean }>('/auth/change-password', data),
 
-  async tempUnlock(minutes: number): Promise<{ success: boolean; unlockTime: string }> {
-    return this.post('/device/temp-unlock', { minutes })
-  }
+  bindPhone: (data: { phone: string; code: string }) =>
+    http.post<{ success: boolean; user: User }>('/auth/bind-phone', data),
+}
 
-  async cancelTempUnlock(): Promise<{ success: boolean }> {
-    return this.post('/device/cancel-temp-unlock', {})
-  }
+export interface WechatQr {
+  state: string
+  /** 真实模式是微信授权链接（前端渲染成二维码）；联调模式是占位串 */
+  qrContent: string
+  real: boolean
+}
 
-  async setTimePlan(limit: number): Promise<{ success: boolean }> {
-    return this.put('/features/time-plan', { dailyLimit: limit })
-  }
+export const wechatApi = {
+  createQr: () => http.get<WechatQr>('/auth/wechat/qr'),
+  poll: (state: string) =>
+    http.get<{ status: 'pending' | 'done'; token?: string; user?: User }>('/auth/wechat/state', { state }),
+  /** 微信内置浏览器直接授权 */
+  authorizeUrl: (redirect?: string) =>
+    http.get<{ url: string }>('/auth/wechat/authorize-url', redirect ? { redirect } : undefined),
+  /** 未配置真实微信时的联调模拟扫码 */
+  devScan: (state: string) => http.post<{ success: boolean }>('/auth/wechat/dev-scan', { state }),
+}
 
-  async setAppLimit(appName: string, limit: number): Promise<{ success: boolean }> {
-    return this.put('/features/app-limit', { appName, limit })
-  }
+export const userApi = {
+  getProfile: () => http.get<User>('/user/info'),
+  updateProfile: (data: { name?: string; email?: string; avatar?: string }) =>
+    http.put<{ success: boolean; user: User }>('/user/info', data),
+}
 
-  async auditApp(appName: string, approved: boolean): Promise<{ success: boolean }> {
-    return this.post('/features/app-audit', { appName, approved })
-  }
+// ============================================================
+// 设备
+// ============================================================
 
-  async blockUrl(url: string): Promise<{ success: boolean }> {
-    return this.post('/features/web-block', { url })
-  }
+export const deviceApi = {
+  list: () => http.get<{ devices: Device[] }>('/devices'),
 
-  async enableFeature(feature: string, enabled: boolean): Promise<{ success: boolean }> {
-    return this.put('/features', { feature, enabled })
-  }
+  /** 当前操作设备（未指定则用后端记录的 activeDeviceId） */
+  current: (deviceId?: string) =>
+    http.get<Device>('/device', deviceId ? { deviceId } : undefined),
 
-  async takePhoto(): Promise<{ success: boolean; photoUrl: string }> {
-    return this.post('/device/remote-photo', {})
-  }
+  /** 凭孩子设备上显示的绑定码认领设备 */
+  bind: (data: { deviceCode: string; name?: string }) =>
+    http.post<{ success: boolean; alreadyBound: boolean; device: Device }>('/devices/bind', data),
 
-  async startRecording(): Promise<{ success: boolean; recordingId: string }> {
-    return this.post('/device/start-recording', {})
-  }
+  update: (deviceId: string, data: { name?: string; avatar?: string }) =>
+    http.put<{ success: boolean; device: Device }>(`/devices/${deviceId}`, data),
 
-  async stopRecording(recordingId: string): Promise<{ success: boolean; videoUrl: string }> {
-    return this.post('/device/stop-recording', { recordingId })
-  }
+  remove: (deviceId: string) => http.del<{ success: boolean }>(`/devices/${deviceId}`),
 
-  async startAudioRecording(): Promise<{ success: boolean; recordingId: string }> {
-    return this.post('/device/start-audio', {})
-  }
+  select: (deviceId: string) =>
+    http.post<{ success: boolean; device: Device }>(`/devices/${deviceId}/select`, {}),
+}
 
-  async stopAudioRecording(recordingId: string): Promise<{ success: boolean; audioUrl: string }> {
-    return this.post('/device/stop-audio', { recordingId })
-  }
+// ============================================================
+// 指令下发
+// ============================================================
 
-  async getQuizConfig(): Promise<{
-    enabled: boolean
-    quizType: string
-    questionBank?: string
-    correctRewardMinutes: number
-    randomMode: boolean
-  }> {
-    return this.get<{
-      enabled: boolean
-      quizType: string
+export const commandApi = {
+  lock: (locked: boolean, deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/lock', { locked }, deviceId ? { deviceId } : undefined),
+
+  tempUnlock: (minutes: number, deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/temp-unlock', { minutes }, deviceId ? { deviceId } : undefined),
+
+  cancelTempUnlock: (deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/cancel-temp-unlock', {}, deviceId ? { deviceId } : undefined),
+
+  takePhoto: (deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/remote-photo', {}, deviceId ? { deviceId } : undefined),
+
+  screenshot: (deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/screenshot', {}, deviceId ? { deviceId } : undefined),
+
+  startRecording: (deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/start-recording', {}, deviceId ? { deviceId } : undefined),
+
+  stopRecording: (recordingId: string, deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/stop-recording', { recordingId }, deviceId ? { deviceId } : undefined),
+
+  startAudio: (deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/start-audio', {}, deviceId ? { deviceId } : undefined),
+
+  stopAudio: (recordingId: string, deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/stop-audio', { recordingId }, deviceId ? { deviceId } : undefined),
+
+  history: (options?: { deviceId?: string; status?: string; limit?: number }) =>
+    http.get<{ commands: DeviceCommand[] }>('/device/commands', {
+      deviceId: options?.deviceId,
+      status: options?.status,
+      limit: options?.limit ?? 20,
+    }),
+
+  cancel: (commandId: string, deviceId?: string) =>
+    http.post<{ command: DeviceCommand; cancelled: boolean }>(
+      `/device/commands/${commandId}/cancel`,
+      {},
+      deviceId ? { deviceId } : undefined,
+    ),
+}
+
+// ============================================================
+// 功能配置
+// ============================================================
+
+export const featureApi = {
+  get: (deviceId?: string) => http.get<Features>('/features', deviceId ? { deviceId } : undefined),
+
+  set: (feature: string, enabled: boolean, deviceId?: string) =>
+    http.put<{ success: boolean }>('/features', { feature, enabled }, deviceId ? { deviceId } : undefined),
+
+  setTimePlan: (dailyLimit: number, deviceId?: string) =>
+    http.put<{ success: boolean }>('/features/time-plan', { dailyLimit }, deviceId ? { deviceId } : undefined),
+
+  setAppLimit: (appName: string, limit: number, deviceId?: string) =>
+    http.put<{ success: boolean }>('/features/app-limit', { appName, limit }, deviceId ? { deviceId } : undefined),
+
+  removeAppLimit: (appName: string, deviceId?: string) =>
+    http.del<{ success: boolean }>(
+      `/features/app-limit/${encodeURIComponent(appName)}`,
+      deviceId ? { deviceId } : undefined,
+    ),
+
+  auditApp: (appName: string, approved: boolean, deviceId?: string) =>
+    http.post<{ success: boolean }>('/features/app-audit', { appName, approved }, deviceId ? { deviceId } : undefined),
+
+  blockUrl: (url: string, deviceId?: string) =>
+    http.post<{ success: boolean; url: string }>('/features/web-block', { url }, deviceId ? { deviceId } : undefined),
+
+  unblockUrl: (url: string, deviceId?: string) =>
+    http.del<{ success: boolean }>(
+      `/features/web-block/${encodeURIComponent(url)}`,
+      deviceId ? { deviceId } : undefined,
+    ),
+}
+
+// ============================================================
+// 答题解锁
+// ============================================================
+
+export const quizApi = {
+  getConfig: (deviceId?: string) => http.get<QuizConfig>('/quiz/config', deviceId ? { deviceId } : undefined),
+
+  updateConfig: (
+    config: {
+      enabled?: boolean
+      quizType?: string
       questionBank?: string
-      correctRewardMinutes: number
-      randomMode: boolean
-    }>('/quiz/config')
-  }
+      grade?: string
+      correctRewardMinutes?: number
+      randomMode?: boolean
+    },
+    deviceId?: string,
+  ) =>
+    http.put<{ success: boolean; config: QuizConfig }>(
+      '/quiz/config',
+      config,
+      deviceId ? { deviceId } : undefined,
+    ),
 
-  async updateQuizConfig(config: {
-    enabled: boolean
-    quizType: string
-    questionBank?: string
-    correctRewardMinutes: number
-    randomMode: boolean
-  }): Promise<{ success: boolean }> {
-    return this.put('/quiz/config', config)
-  }
+  previewQuestion: (options?: { type?: string; grade?: string; deviceId?: string }) =>
+    http.get<QuizQuestion>('/quiz/question', {
+      type: options?.type,
+      grade: options?.grade,
+      deviceId: options?.deviceId,
+    }),
 
-  async getQuizQuestion(type?: string): Promise<{
-    id: string
-    type: string
-    question: string
-    options: string[]
-    correctAnswer: number
-    explanation?: string
-  }> {
-    const endpoint = type ? `/quiz/question?type=${type}` : '/quiz/question'
-    return this.get<{
-      id: string
-      type: string
-      question: string
-      options: string[]
-      correctAnswer: number
-      explanation?: string
-    }>(endpoint)
-  }
+  submitAnswer: (questionId: string, answer: number, deviceId?: string) =>
+    http.post<QuizAnswerResult>('/quiz/answer', { questionId, answer }, deviceId ? { deviceId } : undefined),
 
-  async submitQuizAnswer(questionId: string, answer: number): Promise<{
-    success: boolean
-    isCorrect: boolean
-    rewardMinutes?: number
-  }> {
-    return this.post('/quiz/answer', { questionId, answer })
-  }
+  records: (options?: { limit?: number; type?: string; deviceId?: string }) =>
+    http.get<{ records: QuizRecord[] }>('/quiz/records', {
+      limit: options?.limit ?? 20,
+      type: options?.type,
+      deviceId: options?.deviceId,
+    }),
 
-  async getQuizRecords(limit?: number): Promise<{
-    records: Array<{
-      id: string
-      questionId: string
-      type: string
-      question: string
-      userAnswer: number
-      isCorrect: boolean
-      timestamp: string
-      rewardMinutes?: number
-    }>
-  }> {
-    const endpoint = limit ? `/quiz/records?limit=${limit}` : '/quiz/records'
-    return this.get<{
-      records: Array<{
-        id: string
-        questionId: string
-        type: string
-        question: string
-        userAnswer: number
-        isCorrect: boolean
-        timestamp: string
-        rewardMinutes?: number
-      }>
-    }>(endpoint)
-  }
-
-  async getQuizStatistics(): Promise<{
-    totalQuestions: number
-    correctCount: number
-    incorrectCount: number
-    accuracyRate: number
-    totalRewardMinutes: number
-    byType: {
-      english: { total: number; correct: number; accuracy: number }
-      poetry: { total: number; correct: number; accuracy: number }
-      random: { total: number; correct: number; accuracy: number }
-    }
-  }> {
-    return this.get<{
-      totalQuestions: number
-      correctCount: number
-      incorrectCount: number
-      accuracyRate: number
-      totalRewardMinutes: number
-      byType: {
-        english: { total: number; correct: number; accuracy: number }
-        poetry: { total: number; correct: number; accuracy: number }
-        random: { total: number; correct: number; accuracy: number }
-      }
-    }>('/quiz/statistics')
-  }
-
-  async register(data: {
-    phone: string
-    password: string
-    code?: string
-    wechatOpenId?: string
-    wechatNickname?: string
-    wechatAvatar?: string
-  }): Promise<{ success: boolean; token: string; user: { id: string; name: string; phone?: string; avatar?: string } }> {
-    return this.post('/auth/register', data)
-  }
-
-  async login(data: { phone: string; password: string }): Promise<{ success: boolean; token: string; user: { id: string; name: string; phone?: string; avatar?: string } }> {
-    return this.post('/auth/login', data)
-  }
-
-  async wechatLogin(wechatOpenId: string, wechatNickname: string, wechatAvatar: string): Promise<{ success: boolean; token: string; user: { id: string; name: string; phone?: string; avatar?: string } }> {
-    return this.post('/auth/wechat-login', { wechatOpenId, wechatNickname, wechatAvatar })
-  }
-
-  async logout(): Promise<{ success: boolean }> {
-    return this.post('/auth/logout', {})
-  }
-
-  async getUserInfo(): Promise<{ id: string; name: string; phone?: string; email?: string; avatar?: string; wechatOpenId?: string; wechatNickname?: string; wechatAvatar?: string; createdAt: string }> {
-    return this.get('/user/info')
-  }
-
-  async updateUser(data: { name?: string; phone?: string; email?: string; avatar?: string }): Promise<{ success: boolean; user: { id: string; name: string; phone?: string; avatar?: string } }> {
-    return this.put('/user/info', data)
-  }
-
-  async getDevices(): Promise<{ devices: Array<{ id: string; userId: string; name: string; model: string; os: string; battery: number; status: 'online' | 'offline'; lastActive: string; network: string; locked: boolean; tempUnlock: string | null; avatar?: string }> }> {
-    return this.get('/user/devices')
-  }
-
-  async addDevice(data: { name: string; model: string; os: string; deviceCode: string }): Promise<{ success: boolean; device: { id: string; name: string; model: string } }> {
-    return this.post('/user/devices', data)
-  }
-
-  async deleteDevice(deviceId: string): Promise<{ success: boolean }> {
-    return this.delete(`/user/devices/${deviceId}`)
-  }
-
-  async selectDevice(deviceId: string): Promise<{ success: boolean; device: { id: string; name: string } }> {
-    return this.post('/user/select-device', { deviceId })
-  }
-
-  async sendVerificationCode(phone: string): Promise<{ success: boolean }> {
-    return this.post('/auth/send-code', { phone })
-  }
+  statistics: (deviceId?: string) =>
+    http.get<QuizStatistics>('/quiz/statistics', deviceId ? { deviceId } : undefined),
 }
 
-export const api = new ApiService()
+// ============================================================
+// 位置与安全区
+// ============================================================
+
+export const locationApi = {
+  list: (options?: { deviceId?: string; limit?: number; from?: string; to?: string }) =>
+    http.get<{ locations: LocationPoint[] }>('/locations', {
+      deviceId: options?.deviceId,
+      limit: options?.limit ?? 50,
+      from: options?.from,
+      to: options?.to,
+    }),
+
+  latest: (deviceId?: string) =>
+    http.get<{ location: LocationPoint | null }>('/locations/latest', deviceId ? { deviceId } : undefined),
+
+  listZones: (deviceId?: string) =>
+    http.get<{ safeZones: SafeZone[] }>('/safe-zones', deviceId ? { deviceId } : undefined),
+
+  createZone: (
+    data: {
+      name: string
+      latitude: number
+      longitude: number
+      radiusMeters?: number
+      address?: string
+      type?: 'home' | 'school' | 'other'
+    },
+    deviceId?: string,
+  ) => http.post<{ success: boolean; safeZone: SafeZone }>('/safe-zones', data, deviceId ? { deviceId } : undefined),
+
+  updateZone: (zoneId: string, data: Partial<Omit<SafeZone, 'id' | 'deviceId' | 'createdAt'>>, deviceId?: string) =>
+    http.put<{ success: boolean; safeZone: SafeZone }>(
+      `/safe-zones/${zoneId}`,
+      data,
+      deviceId ? { deviceId } : undefined,
+    ),
+
+  removeZone: (zoneId: string, deviceId?: string) =>
+    http.del<{ success: boolean }>(`/safe-zones/${zoneId}`, deviceId ? { deviceId } : undefined),
+}
+
+// ============================================================
+// 媒体
+// ============================================================
+
+export const mediaApi = {
+  list: (options?: { deviceId?: string; kind?: string; limit?: number }) =>
+    http.get<{ media: MediaAsset[] }>('/media', {
+      deviceId: options?.deviceId,
+      kind: options?.kind,
+      limit: options?.limit ?? 50,
+    }),
+
+  remove: (mediaId: string) => http.del<{ success: boolean }>(`/media/${mediaId}`),
+}
+
+// ============================================================
+// 兼容聚合导出（既有页面用 `api.xxx` 的写法可继续使用）
+// ============================================================
+
+export const api = {
+  // 认证
+  sendCode: authApi.sendCode,
+  sendVerificationCode: (phone: string) => authApi.sendCode(phone, 'register'),
+  register: authApi.register,
+  login: authApi.login,
+  smsLogin: authApi.smsLogin,
+  logout: authApi.logout,
+  changePassword: authApi.changePassword,
+  bindPhone: authApi.bindPhone,
+
+  // 微信
+  wechatQr: wechatApi.createQr,
+  wechatPoll: wechatApi.poll,
+  wechatAuthorizeUrl: wechatApi.authorizeUrl,
+  wechatDevScan: wechatApi.devScan,
+
+  // 用户
+  getUserInfo: userApi.getProfile,
+  updateUser: userApi.updateProfile,
+
+  // 设备
+  getDevices: deviceApi.list,
+  getDevice: deviceApi.current,
+  bindDevice: deviceApi.bind,
+  updateDevice: deviceApi.update,
+  deleteDevice: deviceApi.remove,
+  selectDevice: deviceApi.select,
+
+  // 指令
+  lockScreen: commandApi.lock,
+  tempUnlock: commandApi.tempUnlock,
+  cancelTempUnlock: commandApi.cancelTempUnlock,
+  takePhoto: commandApi.takePhoto,
+  screenshot: commandApi.screenshot,
+  startRecording: commandApi.startRecording,
+  stopRecording: commandApi.stopRecording,
+  startAudioRecording: commandApi.startAudio,
+  stopAudioRecording: commandApi.stopAudio,
+  getCommands: commandApi.history,
+  cancelCommand: commandApi.cancel,
+
+  // 功能
+  getFeatures: featureApi.get,
+  enableFeature: featureApi.set,
+  setTimePlan: featureApi.setTimePlan,
+  setAppLimit: featureApi.setAppLimit,
+  removeAppLimit: featureApi.removeAppLimit,
+  auditApp: featureApi.auditApp,
+  blockUrl: featureApi.blockUrl,
+  unblockUrl: featureApi.unblockUrl,
+
+  // 答题
+  getQuizConfig: quizApi.getConfig,
+  updateQuizConfig: quizApi.updateConfig,
+  getQuizQuestion: quizApi.previewQuestion,
+  submitQuizAnswer: quizApi.submitAnswer,
+  getQuizRecords: quizApi.records,
+  getQuizStatistics: quizApi.statistics,
+
+  // 位置
+  getLocations: locationApi.list,
+  getLatestLocation: locationApi.latest,
+  getSafeZones: locationApi.listZones,
+  createSafeZone: locationApi.createZone,
+  updateSafeZone: locationApi.updateZone,
+  deleteSafeZone: locationApi.removeZone,
+
+  // 媒体
+  getMedia: mediaApi.list,
+  deleteMedia: mediaApi.remove,
+}

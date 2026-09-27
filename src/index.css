@@ -30,8 +30,23 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-#root {
+/* 家长端挂载点是 #root，管理后台是 #admin-root（两个独立 SPA 入口） */
+#root,
+#admin-root {
   min-height: 100vh;
+}
+
+/* 管理后台默认使用系统 UI 字体栈，表格式密集信息可读性更好 */
+.admin-shell {
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* 管理后台的表格在窄屏下横向滚动，而不是把列挤成一团 */
+.admin-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 @supports (padding: max(0px)) {
@@ -97,73 +112,80 @@ body {
   --color-sidebar-ring: var(--sidebar-ring);
 }
 
+/* ============================================================
+ * 设计 token（家长端与管理后台共用）
+ *
+ * 注意：`@theme inline` 会把 --color-* 映射到这里的 --*，因此这里才是真正的取值处。
+ * 历史上这里是一套 shadcn 默认的灰黑色板，把「品牌主色」覆盖成了近黑色 ——
+ * 结果是 <Button> 的默认 variant 渲染成黑底，家长端各处只能硬编码 bg-[#07c160] 绕过。
+ * 现在改回真实品牌色：primary = 微信绿，destructive = 危险红。
+ * ============================================================ */
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+
+  --background: #f7f7f7;
+  --foreground: #09090b;
+  --card: #ffffff;
+  --card-foreground: #09090b;
+  --popover: #ffffff;
+  --popover-foreground: #09090b;
+
+  --primary: #07c160; /* 微信绿：品牌主色 */
+  --primary-foreground: #ffffff;
+  --secondary: #10b981;
+  --secondary-foreground: #ffffff;
+  --muted: #f2f2f2;
+  --muted-foreground: #71717a;
+  --accent: #f2f2f2;
+  --accent-foreground: #09090b;
+  --destructive: #fa5151;
+  --border: #e5e5e5;
+  --input: #e5e5e5;
+  --ring: #07c160;
+
+  --chart-1: #07c160;
+  --chart-2: #3b82f6;
+  --chart-3: #f59e0b;
+  --chart-4: #8b5cf6;
+  --chart-5: #ef4444;
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #09090b;
+  --sidebar-primary: #07c160;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f2f2f2;
+  --sidebar-accent-foreground: #09090b;
+  --sidebar-border: #e5e5e5;
+  --sidebar-ring: #07c160;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --background: #0b0b0c;
+  --foreground: #fafafa;
+  --card: #17171a;
+  --card-foreground: #fafafa;
+  --popover: #17171a;
+  --popover-foreground: #fafafa;
+  --primary: #07c160;
+  --primary-foreground: #ffffff;
+  --secondary: #10b981;
+  --secondary-foreground: #062f1c;
+  --muted: #26262b;
+  --muted-foreground: #a1a1aa;
+  --accent: #26262b;
+  --accent-foreground: #fafafa;
+  --destructive: #ff6b6b;
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: #07c160;
+  --sidebar: #131316;
+  --sidebar-foreground: #fafafa;
+  --sidebar-primary: #07c160;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #26262b;
+  --sidebar-accent-foreground: #fafafa;
+  --sidebar-border: oklch(1 0 0 / 12%);
+  --sidebar-ring: #07c160;
 }
 
 @layer base {

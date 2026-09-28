@@ -77,6 +77,14 @@ export const devicesRepo = {
       create: { deviceId, enabled: false, quizType: 'english', grade: 'grade1' },
       update: {},
     });
+
+    // 锁屏策略：默认 kiosk（可远程即时解锁），不要默认成 password ——
+    // 那是需要家长显式选择的高风险档位
+    await prisma.lockPolicy.upsert({
+      where: { deviceId },
+      create: { deviceId, strength: 'kiosk', countdownSeconds: 30, scheduleEnabled: false },
+      update: {},
+    });
   },
 
   listFeatures: (deviceId: string) =>

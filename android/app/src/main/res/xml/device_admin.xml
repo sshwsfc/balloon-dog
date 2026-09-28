@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  设备管理器策略声明。
+  这里刻意只申请「强制锁屏」一项 —— 权限要得越少，家长越愿意授权，
+  而远程拍照/录音/定位这些能力本来就走运行时权限，不需要设备管理器。
+  若要把应用设为 Device Owner 以获得更强管控，同样用这份声明即可。
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+        <disable-keyguard-features />
+        <watch-login />
+    </uses-policies>
+</device-admin>

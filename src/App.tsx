@@ -3,6 +3,7 @@ import { HomePage } from './pages/HomePage'
 import { LocationPage } from './pages/LocationPage'
 import { ProfilePage } from './pages/ProfilePage'
 import { QuizUnlockPage } from './pages/QuizUnlockPage'
+import { SchedulePage } from './pages/SchedulePage'
 import { LoginPage } from './pages/LoginPage'
 import { DeviceManagePage } from './pages/DeviceManagePage'
 import { MediaPage } from './pages/MediaPage'
@@ -91,6 +92,14 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <MediaPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/schedule"
+          element={
+            <ProtectedRoute>
+              <SchedulePage />
             </ProtectedRoute>
           }
         />

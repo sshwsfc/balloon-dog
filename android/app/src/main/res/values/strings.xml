@@ -1,0 +1,97 @@
+<resources>
+    <string name="app_name">气球狗守护</string>
+
+    <string name="title_settings">设置</string>
+    <string name="title_quiz">答题解锁</string>
+
+    <string name="channel_agent">守护服务</string>
+    <string name="channel_agent_desc">气球狗常驻运行状态（不可关闭，否则服务会被系统回收）</string>
+    <string name="channel_events">家长操作提醒</string>
+    <string name="channel_events_desc">家长下发锁屏、拍照等指令时的本机提醒</string>
+
+    <string name="device_admin_description">允许家长远程锁定这台设备的屏幕</string>
+
+    <!-- 主界面 -->
+    <string name="section_status">运行状态</string>
+    <string name="section_pairing">配对信息</string>
+    <string name="section_permissions">权限与能力</string>
+    <string name="section_actions">操作</string>
+    <string name="section_log">运行日志</string>
+
+    <string name="label_device_code">绑定码</string>
+    <string name="label_server">后端地址</string>
+    <string name="label_device_name">设备名称</string>
+    <string name="label_lock_capability">锁屏能力</string>
+    <string name="label_today_usage">今日已用</string>
+
+    <string name="pairing_hint">请在家长端的「设备管理 → 绑定设备」里输入上面的绑定码完成配对。</string>
+
+    <string name="action_start">启动守护</string>
+    <string name="action_stop">停止守护</string>
+    <string name="action_refresh">立即刷新</string>
+    <string name="action_settings">设置</string>
+    <string name="action_grant_admin">激活设备管理器</string>
+    <string name="action_grant_overlay">授予悬浮窗权限</string>
+    <string name="action_grant_runtime">申请采集权限</string>
+    <string name="action_battery">忽略电池优化</string>
+    <string name="action_quiz">答题解锁</string>
+    <string name="action_clear_log">清空日志</string>
+
+    <string name="permission_granted">已授予</string>
+    <string name="permission_denied">未授予</string>
+
+    <string name="status_running">守护运行中</string>
+    <string name="status_stopped">守护已停止</string>
+    <string name="status_bound">已绑定家长</string>
+    <string name="status_unbound">尚未绑定</string>
+
+    <!-- 设置页 -->
+    <string name="settings_server_hint">例如 http://192.168.1.10:4000 或 http://10.0.2.2:4000（模拟器访问宿主机）</string>
+    <string name="settings_name_hint">给孩子设备起个名字，例如「小明的小米手机」</string>
+    <string name="settings_save">保存</string>
+    <string name="settings_saved">设置已保存，正在重新连接…</string>
+    <string name="settings_auto_location">自动上报位置（每 5 分钟）</string>
+    <string name="settings_reset">重置设备身份</string>
+    <string name="settings_reset_warning">重置后本机将变成一台新设备，家长需要重新输入新的绑定码。确定继续吗？</string>
+    <string name="settings_reset_done">已重置，新绑定码：</string>
+    <string name="settings_about">关于</string>
+
+    <!-- 锁定页 -->
+    <string name="lock_title">设备已被家长锁定</string>
+    <string name="lock_hint">如需使用，请联系家长或通过答题获得使用时长。</string>
+
+    <!-- 答题页 -->
+    <string name="quiz_loading">正在取题…</string>
+    <string name="quiz_submit">提交答案</string>
+    <string name="quiz_next">再来一题</string>
+    <string name="quiz_correct">回答正确</string>
+    <string name="quiz_wrong">回答错误</string>
+    <string name="quiz_reward_prefix">已获得使用时长：</string>
+    <string name="quiz_minutes">分钟</string>
+    <string name="quiz_correct_answer">正确答案：</string>
+    <string name="quiz_finish">完成，返回</string>
+
+    <!-- 强管控：锁屏强度 / 保活 / 应急解锁 -->
+    <string name="action_emergency_unlock">应急解锁</string>
+    <string name="section_protection">防护与保活</string>
+    <string name="section_lock_strength">锁屏强度</string>
+    <string name="action_set_emergency">设置应急解锁密码</string>
+    <string name="action_heal">立即自检并恢复守护</string>
+    <string name="action_owner_guide">如何开启设备所有者（最强）</string>
+    <string name="hardening_on">最强防护：已启用</string>
+    <string name="hardening_off">最强防护：未启用</string>
+    <string name="emergency_set">应急解锁密码：已设置</string>
+    <string name="emergency_unset">应急解锁密码：未设置（最高强度档必须设置）</string>
+
+    <!-- 无障碍看门狗 -->
+    <string name="accessibility_summary">锁定期间保持锁定界面在最前</string>
+    <string name="accessibility_description">锁定期间防止通过通知栏或系统设置绕过管控：
+· 下拉通知栏会被自动收起
+· 打开系统设置会被推走（阻止撤销悬浮窗权限或关闭本服务）
+
+紧急呼叫与来电永远放行。</string>
+    <string name="action_enable_watchdog">开启无障碍看门狗</string>
+    <string name="action_watchdog_guide">为什么需要无障碍权限？</string>
+    <string name="watchdog_on">无障碍看门狗：已开启</string>
+    <string name="watchdog_off">无障碍看门狗：未开启（锁定可被通知栏绕过）</string>
+</resources>

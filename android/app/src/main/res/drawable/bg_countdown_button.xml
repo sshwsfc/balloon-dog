@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 倒计时悬浮窗里的「答题解锁」按钮底：绿色圆角 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/wechat_green" />
+    <corners android:radius="18dp" />
+</shape>

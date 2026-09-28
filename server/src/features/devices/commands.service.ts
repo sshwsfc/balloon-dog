@@ -226,7 +226,11 @@ async function applyDeviceState(deviceId: string, command: DeviceCommand): Promi
   const payload = (command.payload ?? {}) as Record<string, unknown>;
   switch (command.type) {
     case 'lock':
-      await prisma.childDevice.update({ where: { id: deviceId }, data: { locked: true } });
+      // 与上面的乐观更新保持一致：锁定生效即代表临时解锁作废
+      await prisma.childDevice.update({
+        where: { id: deviceId },
+        data: { locked: true, tempUnlockUntil: null },
+      });
       break;
     case 'unlock':
       await prisma.childDevice.update({ where: { id: deviceId }, data: { locked: false } });

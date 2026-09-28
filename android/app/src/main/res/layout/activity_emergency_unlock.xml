@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/lock_bg"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/action_emergency_unlock"
+        android:textColor="@color/lock_text"
+        android:textSize="20sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:lineSpacingExtra="4dp"
+        android:text="应急密码由家长在本机设置、离线可用。输入正确后会解除锁定并清除随机锁屏密码。"
+        android:textColor="#FFB8B8B8"
+        android:textSize="13sp" />
+
+    <EditText
+        android:id="@+id/editPassword"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp"
+        android:hint="请输入家长设置的应急密码"
+        android:importantForAutofill="no"
+        android:inputType="numberPassword"
+        android:maxLines="1"
+        android:textColor="@color/lock_text"
+        android:textColorHint="#FF6A6A6A" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/buttonConfirm"
+        style="@style/ButtonPrimary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:text="解锁" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/buttonCancel"
+        style="@style/ButtonSecondary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="取消" />
+
+</LinearLayout>

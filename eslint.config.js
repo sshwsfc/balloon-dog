@@ -9,7 +9,10 @@ export default defineConfig([
   // server/ 是独立的 npm 包（Express + Prisma，Node 运行时），有自己的 tsconfig 与
   // eslint 配置（见 server/eslint.config.js）。用这份「浏览器 + React」配置去 lint 它
   // 是错误的：globals.browser 会把 Node 全局量判成未定义，React 规则对后端也无意义。
-  globalIgnores(['dist', 'server', 'node_modules']),
+  //
+  // android/ 同理：那是独立的 Gradle 工程（Java + 少量 Node 联调脚本），
+  // 既不属于前端的 tsconfig 项目，也不该受 React 规则约束。
+  globalIgnores(['dist', 'server', 'android', 'node_modules']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知栏小图标：必须是纯白单色 + 透明背景，否则在部分 ROM 上会显示成一个白方块 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,2 L20,5.5 V11.5 C20,16.5 16.6,20.8 12,22 C7.4,20.8 4,16.5 4,11.5 V5.5 Z M12,7.2 m-1.6,0 a1.6,1.6 0 1,0 3.2,0 a1.6,1.6 0 1,0 -3.2,0 M8.8,10 m-1.2,0 a1.2,1.2 0 1,0 2.4,0 a1.2,1.2 0 1,0 -2.4,0 M15.2,10 m-1.2,0 a1.2,1.2 0 1,0 2.4,0 a1.2,1.2 0 1,0 -2.4,0 M12,11.4 C9.9,11.4 8.5,13 8.5,14.6 C8.5,16.2 10.1,16.9 12,16.9 C13.9,16.9 15.5,16.2 15.5,14.6 C15.5,13 14.1,11.4 12,11.4 Z" />
+</vector>

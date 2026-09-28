@@ -65,8 +65,13 @@ model ChildDevice {
   status           String    @default("offline") // online | offline
   battery          Int       @default(0)
   network          String    @default("unknown") // wifi | cellular | ethernet | unknown
-  locked           Boolean   @default(false)
+  locked           Boolean   @default(false) // 家长的<b>期望</b>状态（远程锁定）
   tempUnlockUntil  DateTime? // 临时解锁到期时间（null 表示未临时解锁）
+  // 设备上<b>实际</b>的锁定状态。与 locked 刻意分开：
+  // 设备可能因为作息时间表或每日额度而锁定，那与家长的远程指令无关。
+  // 只报期望值会让家长在「作息时间到了」时看到「未锁定」这种错误结论。
+  effectiveLocked  Boolean   @default(false)
+  lockReason       String    @default("") // 生效锁定原因的人话说明
   agentVersion     String    @default("")
   lastActiveAt     DateTime?
   createdAt        DateTime  @default(now())
@@ -83,6 +88,8 @@ model ChildDevice {
   quizConfig  QuizConfig?
   quizRecords QuizRecord[]
   media       MediaAsset[]
+  lockPolicy  LockPolicy?
+  schedules   ScheduleRule[]
 
   @@index([userId])
   @@index([userId, status])
@@ -279,6 +286,66 @@ model QuizRecord {
 
   @@index([deviceId, createdAt])
   @@index([userId, createdAt])
+}
+
+// ============================================================
+// 锁屏强度策略（每台设备一份）
+// ============================================================
+
+/// 决定设备端「锁得住到什么程度」。设备端会结合自身实际权限自动降级，
+/// 这里存的是家长的<b>期望强度</b>，实际生效强度由设备在指令结果里如实回报。
+model LockPolicy {
+  id       String      @id @default(cuid())
+  deviceId String      @unique
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// kiosk 锁定页（默认：用 Lock Task 把设备钉在锁定页，可远程解锁）
+  /// password 随机改系统锁屏密码（最高强度：连系统锁屏都进不去）
+  strength String @default("kiosk")
+
+  /// 锁屏前用透明悬浮窗预告的秒数；0 表示不预告
+  countdownSeconds Int @default(30)
+
+  /// 是否启用下方的时间表（ScheduleRule）
+  scheduleEnabled Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================================
+// 定时锁屏 / 定时解锁时间表
+// ============================================================
+
+/// 一条按星期重复的时段规则。
+///
+/// 语义（设备端 ScheduleEngine 的求值顺序）：
+///   1. 命中任意一条 enabled 的 `unlock` 规则 → 此时段允许使用；
+///   2. 否则命中任意一条 `lock` 规则 → 此时段锁定；
+///   3. 都没命中 → 不因时间表锁定。
+/// `unlock` 优先于 `lock`，这样「整晚锁定 + 中午放行」这类组合可以直接表达。
+model ScheduleRule {
+  id       String      @id @default(cuid())
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  name   String @default("") // 例如「晚上睡觉」，仅用于展示
+  action String @default("lock") // lock 锁定 | unlock 允许使用
+
+  /// 生效的星期：0=周日 … 6=周六（与 JS Date.getDay() 一致）
+  daysOfWeek Int[]
+
+  /// 从 00:00 起的分钟数，取值 0..1439
+  startMinute Int
+  /// 取值 0..1440；1440 表示当天 24:00；
+  /// endMinute < startMinute 表示跨天（例如 22:00 → 次日 07:00）
+  endMinute Int
+
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([deviceId])
 }
 
 // ============================================================

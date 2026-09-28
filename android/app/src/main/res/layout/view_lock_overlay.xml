@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  全屏锁定悬浮窗的内容。
+  与 activity_lock_screen.xml 视觉一致，但它是加进 WindowManager 的 View 而不是 Activity ——
+  这个区别就是「按 Home 键能不能切走」的分水岭。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/lockOverlayRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/lock_bg"
+    android:clickable="true"
+    android:focusable="true">
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="28dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/lock_title"
+                android:textColor="@color/lock_text"
+                android:textSize="24sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/overlayReason"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:gravity="center"
+                android:lineSpacingExtra="4dp"
+                android:textColor="#FFB8B8B8"
+                android:textSize="15sp"
+                tools:text="作息：睡觉时间" />
+
+            <TextView
+                android:id="@+id/overlayCountdown"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:gravity="center"
+                android:textColor="@color/wechat_green"
+                android:textSize="17sp"
+                tools:text="临时可用剩余 12分钟" />
+
+            <TextView
+                android:id="@+id/overlayStrength"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:gravity="center"
+                android:lineSpacingExtra="3dp"
+                android:textColor="#FF7A7A7A"
+                android:textSize="12sp"
+                tools:text="全屏悬浮窗锁定：按 Home 键也切不走" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center"
+                android:text="@string/lock_hint"
+                android:textColor="#FF8A8A8A"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/overlayQuizButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="28dp"
+                android:background="@drawable/bg_countdown_button"
+                android:clickable="true"
+                android:gravity="center"
+                android:paddingTop="14dp"
+                android:paddingBottom="14dp"
+                android:text="@string/action_quiz"
+                android:textColor="#FFFFFFFF"
+                android:textSize="15sp"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/overlayEmergencyButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:clickable="true"
+                android:gravity="center"
+                android:paddingTop="14dp"
+                android:paddingBottom="14dp"
+                android:text="@string/action_emergency_unlock"
+                android:textColor="#FFB8B8B8"
+                android:textSize="14sp"
+                android:visibility="gone" />
+
+        </LinearLayout>
+    </ScrollView>
+</FrameLayout>

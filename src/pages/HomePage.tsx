@@ -14,6 +14,7 @@ import { toast } from 'sonner'
 import {
   Battery,
   BookOpen,
+  CalendarClock,
   Camera,
   Check,
   ChevronRight,
@@ -55,6 +56,7 @@ interface FeatureMeta {
 const basicFeatures: FeatureMeta[] = [
   { id: 'lockScreen', icon: Lock, name: '一键锁屏', desc: '立即锁定设备屏幕', color: 'text-orange-500', bg: 'bg-orange-50' },
   { id: 'tempUnlock', icon: Shield, name: '临时使用', desc: '授权临时使用权限', color: 'text-blue-500', bg: 'bg-blue-50' },
+  { id: 'schedule', icon: CalendarClock, name: '锁屏设置', desc: '锁屏强度与定时锁屏时间表', color: 'text-teal-500', bg: 'bg-teal-50' },
   { id: 'timePlan', icon: Clock, name: '时间规划', desc: '设置使用时间限制', color: 'text-purple-500', bg: 'bg-purple-50' },
   { id: 'appLimit', icon: Smartphone, name: '应用限制', desc: '限制应用使用时长', color: 'text-green-500', bg: 'bg-green-50' },
   { id: 'appAudit', icon: Shield, name: '应用审核', desc: '审核新安装应用', color: 'text-yellow-500', bg: 'bg-yellow-50' },
@@ -91,6 +93,33 @@ function formatCountdown(untilIso: string, now: number): string | null {
   if (hours > 0) return `${hours}小时${minutes}分钟后自动锁定`
   if (minutes > 0) return `${minutes}分${String(seconds).padStart(2, '0')}秒后自动锁定`
   return `${seconds}秒后自动锁定`
+}
+
+/**
+ * 基础功能列表右侧的状态副标题。
+ * 从 JSX 里抽出来是因为分支已经很多，内联三元表达式既难读又容易写错条件顺序。
+ */
+function basicFeatureStatus(
+  featureId: string,
+  desc: string,
+  device: Device,
+  features: Features,
+  tempUnlockLabel: string | null,
+): string {
+  switch (featureId) {
+    case 'lockScreen':
+      return device.locked ? '设备已锁定' : '设备正常使用'
+    case 'tempUnlock':
+      return tempUnlockLabel ?? '设备正常锁定'
+    case 'schedule':
+      return '锁屏强度、定时锁屏 / 解锁时间表'
+    case 'timePlan':
+      return `今日已使用 ${features.timePlan.usedToday} 分钟${
+        features.timePlan.dailyLimit > 0 ? `，限制 ${features.timePlan.dailyLimit} 分钟` : '，未设置限制'
+      }`
+    default:
+      return desc
+  }
 }
 
 export function HomePage() {
@@ -465,22 +494,12 @@ export function HomePage() {
           <CardContent className="p-0">
             {basicFeatures.map((feature, index) => {
               const Icon = feature.icon
-              const status =
-                feature.id === 'lockScreen'
-                  ? device.locked
-                    ? '设备已锁定'
-                    : '设备正常使用'
-                  : feature.id === 'tempUnlock'
-                    ? (tempUnlockLabel ?? '设备正常锁定')
-                    : feature.id === 'timePlan'
-                      ? `今日已使用 ${features.timePlan.usedToday} 分钟${
-                          features.timePlan.dailyLimit > 0 ? `，限制 ${features.timePlan.dailyLimit} 分钟` : '，未设置限制'
-                        }`
-                      : feature.desc
+              const status = basicFeatureStatus(feature.id, feature.desc, device, features, tempUnlockLabel)
 
               const onClick = () => {
                 if (feature.id === 'lockScreen') setLockDialogOpen(true)
                 else if (feature.id === 'tempUnlock') setTempUnlockDialogOpen(true)
+                else if (feature.id === 'schedule') navigate('/schedule')
                 else if (feature.id === 'timePlan') setTimePlanDialogOpen(true)
                 else if (feature.id === 'appLimit') setAppLimitDialogOpen(true)
                 else if (feature.id === 'appAudit') setAppAuditDialogOpen(true)

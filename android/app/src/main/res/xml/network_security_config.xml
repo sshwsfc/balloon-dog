@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  明文 HTTP 是被刻意允许的：
+  这套 Agent 通常指向家长自己局域网里的后端（http://192.168.x.x:4000/api），
+  没有公网域名也就没有证书。生产部署请把后端放到 HTTPS 后面，届时可把
+  cleartextTrafficPermitted 改成 false，只保留对自建证书的信任配置。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

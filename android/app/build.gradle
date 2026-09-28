@@ -1,0 +1,84 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.balloondog.agent'
+
+    // 本工程锁定在「本机 Android SDK 已安装」的 compileSdk 33 上，
+    // AGP 8.7 会为它挑选 34.0.0 的 build-tools，而本机只装了 33.0.1 / 36.0.0-rc5，
+    // 因此显式指定 36.0.0-rc5（build-tools 向上兼容，d8/aapt2 用在 API 33 产物上没有问题）。
+    //
+    // 若你的 SDK 里装了 35.0.0 / 34.0.0，把下面两行换成：
+    //     compileSdk 35
+    //     buildToolsVersion '35.0.0'
+    // 并把 defaultConfig.targetSdk 提到 34，同时升级 AndroidX 依赖，见 android/README.md。
+    compileSdk 33
+    buildToolsVersion '36.0.0-rc5'
+
+    defaultConfig {
+        applicationId 'com.balloondog.agent'
+        // Android 7.0 —— 覆盖 Camera2 / MediaProjection / DevicePolicyManager 全部所需 API
+        minSdk 24
+        // Android 13。前台服务类型（camera / microphone / location / mediaProjection）
+        // 已按规范声明并在 startForeground 时使用，因此采集类能力在 Android 13 与 14+ 上
+        // 都能正常拿到 while-in-use 权限。
+        targetSdk 33
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    // 调试签名固定放在工程内（android/keystore/debug.keystore），
+    // 不依赖 ~/.android/debug.keystore —— 保证在任何机器 / CI 上都能直接 assembleDebug。
+    signingConfigs {
+        debug {
+            storeFile rootProject.file('keystore/debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        viewBinding true
+        buildConfig true
+    }
+
+    packaging {
+        resources {
+            excludes += ['META-INF/DEPENDENCIES', 'META-INF/LICENSE*', 'META-INF/NOTICE*']
+        }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    // 版本刻意与 compileSdk 33 对齐：appcompat 1.7 / material 1.12 / core 1.13 会强制要求 compileSdk 34+
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.9.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'androidx.core:core:1.10.1'
+    // OkHttp：长轮询（读超时需大于 wait 秒）、multipart 上传、连接复用都由它兜住
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}

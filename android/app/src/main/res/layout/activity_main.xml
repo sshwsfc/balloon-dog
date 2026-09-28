@@ -1,0 +1,420 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/surface_bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <!-- ============ 运行状态 ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/section_status"
+                style="@style/CardTitle" />
+
+            <TextView
+                android:id="@+id/textStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                android:textColor="@color/wechat_green"
+                tools:text="守护运行中" />
+
+            <TextView
+                android:id="@+id/textDetail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:textSize="13sp"
+                android:textColor="@color/text_secondary"
+                tools:text="已绑定 · 电量 80% · wifi" />
+        </LinearLayout>
+
+        <!-- ============ 配对信息 ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/section_pairing"
+                style="@style/CardTitle" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_device_code"
+                android:gravity="center"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/label_device_code"
+                    style="@style/RowLabel" />
+
+                <TextView
+                    android:id="@+id/textDeviceCode"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:letterSpacing="0.25"
+                    android:textColor="@color/wechat_green_dark"
+                    android:textSize="34sp"
+                    android:textStyle="bold"
+                    tools:text="AB3D7K9M" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/textPairingHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:lineSpacingExtra="3dp"
+                android:text="@string/pairing_hint"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="14dp"
+                android:background="@color/divider" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/label_server"
+                    style="@style/RowLabel" />
+
+                <TextView
+                    android:id="@+id/textServer"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="2"
+                    style="@style/RowValue"
+                    tools:text="http://10.0.2.2:4000/api" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/label_today_usage"
+                    style="@style/RowLabel" />
+
+                <TextView
+                    android:id="@+id/textUsage"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="2"
+                    style="@style/RowValue"
+                    tools:text="0分钟 / 上限 120分钟" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ============ 权限与能力 ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/section_permissions"
+                style="@style/CardTitle" />
+
+            <TextView
+                android:id="@+id/textLockCapability"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:lineSpacingExtra="2dp"
+                android:textColor="@color/text_primary"
+                android:textSize="13sp"
+                tools:text="设备管理器（可真正锁屏）" />
+
+            <TextView
+                android:id="@+id/textPermissionSummary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:lineSpacingExtra="4dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                tools:text="相机：已授予\n麦克风：未授予" />
+        </LinearLayout>
+
+        <!-- ============ 操作 ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/section_actions"
+                style="@style/CardTitle" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonToggleService"
+                style="@style/ButtonPrimary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/action_start" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonRefresh"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_refresh" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonGrantAdmin"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_grant_admin" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonGrantRuntime"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_grant_runtime" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonGrantOverlay"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_grant_overlay" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonBattery"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_battery" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonQuiz"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_quiz"
+                android:visibility="gone" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonSettings"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_settings" />
+        </LinearLayout>
+
+        <!-- ============ 防护与保活 ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/section_protection"
+                style="@style/CardTitle" />
+
+            <TextView
+                android:id="@+id/textStrengthDetail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:lineSpacingExtra="3dp"
+                android:textColor="@color/text_primary"
+                android:textSize="13sp"
+                tools:text="锁屏强度：强（Lock Task 钉住锁定页）" />
+
+            <TextView
+                android:id="@+id/textHardening"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="3dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                tools:text="禁止卸载：未生效" />
+
+            <TextView
+                android:id="@+id/textEmergency"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                tools:text="应急解锁密码：未设置" />
+
+            <TextView
+                android:id="@+id/textWatchdog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="3dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                tools:text="无障碍看门狗：未开启" />
+
+            <TextView
+                android:id="@+id/textKeepAlive"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="3dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                tools:text="看门狗已排定" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonSetEmergency"
+                style="@style/ButtonPrimary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="@string/action_set_emergency" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonEnableWatchdog"
+                style="@style/ButtonPrimary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_enable_watchdog" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonWatchdogGuide"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_watchdog_guide" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonHeal"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_heal" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonOwnerGuide"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_owner_guide" />
+        </LinearLayout>
+
+        <!-- ============ 运行日志 ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/section_log"
+                    style="@style/CardTitle" />
+
+                <TextView
+                    android:id="@+id/buttonClearLog"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:padding="4dp"
+                    android:text="@string/action_clear_log"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/textLog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:fontFamily="monospace"
+                android:lineSpacingExtra="4dp"
+                android:textColor="@color/log_info"
+                android:textIsSelectable="true"
+                android:textSize="11sp"
+                tools:text="12:03:41  设备码 AB3D7K9M，后端 http://10.0.2.2:4000/api" />
+        </LinearLayout>
+
+    </LinearLayout>
+</ScrollView>

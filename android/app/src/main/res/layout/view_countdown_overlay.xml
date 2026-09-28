@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  锁屏倒计时预告悬浮窗。
+  刻意做成半透明的窄条卡片而不是全屏遮罩：它只是「预告」，不打断孩子当前正在做的事，
+  真正挡住屏幕的是锁定页 / 全屏锁定悬浮窗。全屏式预告会让人误以为已经锁了。
+
+  注意这里刻意没有图标：早期版本放了一个 emoji（⏳），不同 ROM 的字形宽度差异很大，
+  在模拟器上直接和标题文字叠在了一起。倒计时这种必须一眼看清的界面，
+  不应该依赖 emoji 渲染。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/countdownRoot"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_countdown_overlay"
+    android:elevation="8dp"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="18dp"
+    android:paddingEnd="12dp"
+    android:paddingTop="12dp"
+    android:paddingBottom="12dp">
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/countdownTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:textColor="#FFFFFFFF"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            tools:text="距锁定还有 1:02" />
+
+        <TextView
+            android:id="@+id/countdownReason"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:textColor="#B3FFFFFF"
+            android:textSize="12sp"
+            tools:text="作息：睡觉时间" />
+    </LinearLayout>
+
+    <!--
+      这里用 TextView 而不是 MaterialButton：
+      悬浮窗是用 ApplicationContext 加进 WindowManager 的，没有 Material 主题，
+      MaterialButton 会直接抛「Error inflating class」。普通 TextView + 背景 drawable
+      不依赖主题，是这个场景下更稳的选择。
+    -->
+    <TextView
+        android:id="@+id/countdownQuizButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:background="@drawable/bg_countdown_button"
+        android:clickable="true"
+        android:focusable="false"
+        android:gravity="center"
+        android:minWidth="76dp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:text="@string/action_quiz"
+        android:textColor="#FFFFFFFF"
+        android:textSize="13sp"
+        android:visibility="gone" />
+
+</LinearLayout>

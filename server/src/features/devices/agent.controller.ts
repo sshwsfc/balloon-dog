@@ -13,6 +13,7 @@ import { waitForDevice } from './devices.notifier';
 import { currentDeviceId } from '../../shared/deviceScope';
 import { NotFoundError } from '../../errors';
 import { FEATURE_DEFS } from './devices.constants';
+import { scheduleService } from '../schedule/schedule.service';
 
 /**
  * 设备端 Agent 接口。
@@ -100,12 +101,14 @@ export async function getConfig(req: Request, res: Response) {
   }
 
   await devicesRepo.ensureDefaults(device.id);
-  const [featureRows, timePlan, appLimits, blockedUrls, quizConfig] = await Promise.all([
+  const [featureRows, timePlan, appLimits, blockedUrls, quizConfig, lockPolicy] = await Promise.all([
     devicesRepo.listFeatures(device.id),
     devicesRepo.getTimePlan(device.id),
     devicesRepo.listAppLimits(device.id),
     devicesRepo.listBlockedUrls(device.id),
     devicesRepo.listQuizConfig(device.id),
+    // 锁屏强度 + 定时时间表：设备端据此在本地强制锁屏 / 解锁
+    scheduleService.buildAgentPayload(device.id),
   ]);
 
   const enabledFeatures = featureRows.filter((f) => f.enabled).map((f) => f.key);
@@ -143,6 +146,14 @@ export async function getConfig(req: Request, res: Response) {
       grade: quizConfig?.grade ?? 'grade1',
       rewardMinutes: quizConfig?.correctRewardMinutes ?? 3,
       randomMode: quizConfig?.randomMode ?? false,
+    },
+    // 锁屏策略与时间表。字段名与家长端 /api/lock-policy、/api/schedules 保持一致，
+    // 三端共用一套语义，避免「家长端显示的和设备端执行的不是一回事」。
+    lockPolicy: {
+      strength: lockPolicy.strength,
+      countdownSeconds: lockPolicy.countdownSeconds,
+      scheduleEnabled: lockPolicy.scheduleEnabled,
+      schedule: lockPolicy.schedule,
     },
   });
 }

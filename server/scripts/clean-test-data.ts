@@ -23,8 +23,8 @@ const apply = process.argv.includes('--apply') || process.env.APPLY === '1' || p
 const TEST_NICKNAMES = ['隔离测试B', '后台处置测试', '冒烟测试'];
 /** 测试/示例注册的设备码前缀。 */
 const TEST_DEVICE_PREFIXES = ['SMOKE', 'OPTEST'];
-/** 设备名里含这些字样的也清掉。 */
-const TEST_DEVICE_NAME_HINTS = ['冒烟测试', '运营处置测试'];
+/** 设备名里含这些字样的也清掉（'E2E' 覆盖 android/scripts/e2e-agent.mjs 绑定的临时设备）。 */
+const TEST_DEVICE_NAME_HINTS = ['冒烟测试', '运营处置测试', 'E2E'];
 /** 示例 Agent 用的固定设备码。 */
 const TEST_DEVICE_CODES = ['AGENT001'];
 

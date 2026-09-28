@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与家长端保持同一套配色：微信绿 #07c160 -->
+    <color name="wechat_green">#FF07C160</color>
+    <color name="wechat_green_dark">#FF059748</color>
+    <color name="danger_red">#FFE64340</color>
+    <color name="warning_amber">#FFFA9D3B</color>
+    <color name="text_primary">#FF1A1A1A</color>
+    <color name="text_secondary">#FF888888</color>
+    <color name="text_tertiary">#FFB2B2B2</color>
+    <color name="surface_bg">#FFF5F5F5</color>
+    <color name="card_bg">#FFFFFFFF</color>
+    <color name="divider">#FFEDEDED</color>
+    <color name="log_info">#FF444444</color>
+    <color name="log_success">#FF07C160</color>
+    <color name="log_warn">#FFFA9D3B</color>
+    <color name="log_error">#FFE64340</color>
+    <color name="lock_bg">#FF101418</color>
+    <color name="lock_text">#FFF2F2F2</color>
+    <color name="launcher_background">#FF07C160</color>
+</resources>

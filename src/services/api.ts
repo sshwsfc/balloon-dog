@@ -18,6 +18,7 @@ import type {
   DeviceCommand,
   Features,
   LocationPoint,
+  LockPolicy,
   MediaAsset,
   QuizAnswerResult,
   QuizConfig,
@@ -25,6 +26,9 @@ import type {
   QuizRecord,
   QuizStatistics,
   SafeZone,
+  ScheduleListResponse,
+  ScheduleRule,
+  ScheduleRuleInput,
   User,
 } from '@/types'
 
@@ -508,6 +512,63 @@ export const locationApi = {
 }
 
 // ============================================================
+// 锁屏策略与定时时间表
+// ============================================================
+
+/**
+ * 锁屏强度策略。
+ *
+ * 注意：`strength` / `countdownSeconds` 是设备端执行锁定时的参数，改这里只改配置，
+ * 不会立即锁屏（立即锁屏走 commandApi.lock 的指令队列）。
+ */
+export const lockPolicyApi = {
+  get: (deviceId?: string) => http.get<LockPolicy>('/lock-policy', deviceId ? { deviceId } : undefined),
+
+  update: (
+    patch: { strength?: LockPolicy['strength']; countdownSeconds?: number; scheduleEnabled?: boolean },
+    deviceId?: string,
+  ) =>
+    http.put<{ success: boolean; policy: LockPolicy }>(
+      '/lock-policy',
+      patch,
+      deviceId ? { deviceId } : undefined,
+    ),
+}
+
+/**
+ * 定时锁屏 / 解锁时间表。
+ *
+ * 求值优先级（后端与设备端同一套语义）：命中 `unlock` → 允许使用；
+ * 否则命中 `lock` → 锁定；都没命中 → 不因时间表锁定。
+ * 返回的 `preview` 按服务器时间计算，真正执行的是孩子设备（以设备本地时钟为准）。
+ */
+export const scheduleApi = {
+  // ---------- 时间表规则 ----------
+  list: (deviceId?: string) => http.get<ScheduleListResponse>('/schedules', deviceId ? { deviceId } : undefined),
+
+  create: (data: ScheduleRuleInput, deviceId?: string) =>
+    http.post<{ success: boolean; schedule: ScheduleRule }>(
+      '/schedules',
+      data,
+      deviceId ? { deviceId } : undefined,
+    ),
+
+  update: (scheduleId: string, data: Partial<ScheduleRuleInput>, deviceId?: string) =>
+    http.put<{ success: boolean; schedule: ScheduleRule }>(
+      `/schedules/${scheduleId}`,
+      data,
+      deviceId ? { deviceId } : undefined,
+    ),
+
+  remove: (scheduleId: string, deviceId?: string) =>
+    http.del<{ success: boolean }>(`/schedules/${scheduleId}`, deviceId ? { deviceId } : undefined),
+
+  // ---------- 锁屏强度策略 ----------
+  getPolicy: lockPolicyApi.get,
+  updatePolicy: lockPolicyApi.update,
+}
+
+// ============================================================
 // 媒体
 // ============================================================
 
@@ -597,4 +658,12 @@ export const api = {
   // 媒体
   getMedia: mediaApi.list,
   deleteMedia: mediaApi.remove,
+
+  // 锁屏策略与定时时间表
+  getLockPolicy: scheduleApi.getPolicy,
+  updateLockPolicy: scheduleApi.updatePolicy,
+  getSchedules: scheduleApi.list,
+  createSchedule: scheduleApi.create,
+  updateSchedule: scheduleApi.update,
+  deleteSchedule: scheduleApi.remove,
 }

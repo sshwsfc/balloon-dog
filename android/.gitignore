@@ -1,0 +1,22 @@
+# 说明：本文件位于 android/ 内，所有模式都相对于本目录解析。
+# 因此写 build/ 而不是 android/build/ —— 后者在 android/.gitignore 里
+# 会被解析成 android/android/build/，永远匹配不到任何东西。
+
+# Gradle 构建产物与缓存
+.gradle/
+build/
+app/build/
+
+# 本工程为「沙箱/CI 友好」把构建缓存放在工程内（见 android/README.md）
+.gradle-home/
+
+# 联调用的模拟器 AVD 与 adb 状态（本地生成，含数 GB 镜像数据）
+.android-home/
+
+# 本机 SDK 路径，不应入库
+local.properties
+
+# IDE
+.idea/
+*.iml
+captures/

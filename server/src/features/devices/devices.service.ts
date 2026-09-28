@@ -319,12 +319,18 @@ export const devicesService = {
     if (reconciled.locked === locked && !reconciled.tempUnlockUntil) {
       return { success: true, noop: true, command: null, device: toDeviceView(reconciled) };
     }
+    // 关键：锁定必须<b>同时清掉 tempUnlockUntil</b>。
+    // 否则「家长先点临时解锁（+30 分钟）、随后又点锁定」会锁不上 ——
+    // 设备端把 tempUnlockUntil 当作优先级最高的放行依据，服务端没清，
+    // 设备就会继续认为自己在放行期内，远程锁定静默失效。
     return dispatchCommand(
       reconciled,
       userId,
       locked ? 'lock' : 'unlock',
       {},
-      locked ? { locked: true } : { locked: false, tempUnlockUntil: null },
+      locked
+        ? { locked: true, tempUnlockUntil: null }
+        : { locked: false, tempUnlockUntil: null },
     );
   },
 
@@ -477,18 +483,30 @@ export const devicesService = {
   },
 
   /** 设备心跳：刷新在线状态、电量、网络。 */
-  async heartbeat(deviceId: string, input: { battery?: number; network?: string; agentVersion?: string }) {
+  async heartbeat(
+    deviceId: string,
+    input: {
+      battery?: number;
+      network?: string;
+      agentVersion?: string;
+      effectiveLocked?: boolean;
+      lockReason?: string;
+    },
+  ) {
     const updated = await devicesRepo.update(deviceId, {
       status: 'online',
       lastActiveAt: new Date(),
       ...(input.battery !== undefined ? { battery: input.battery } : {}),
       ...(input.network !== undefined ? { network: input.network } : {}),
       ...(input.agentVersion !== undefined ? { agentVersion: input.agentVersion } : {}),
+      ...(input.effectiveLocked !== undefined ? { effectiveLocked: input.effectiveLocked } : {}),
+      ...(input.lockReason !== undefined ? { lockReason: input.lockReason } : {}),
     });
     return {
       success: true,
       serverTime: new Date().toISOString(),
       bound: Boolean(updated.userId),
+      // 回给设备的是<b>期望</b>状态，供设备端与服务端对齐
       locked: updated.locked,
       tempUnlockUntil: updated.tempUnlockUntil,
     };

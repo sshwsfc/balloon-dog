@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 绑定码展示底：浅绿底 + 虚线边框，让家长一眼找到要输入的那串码 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#1407C160" />
+    <stroke
+        android:width="1dp"
+        android:color="@color/wechat_green"
+        android:dashWidth="6dp"
+        android:dashGap="4dp" />
+    <corners android:radius="10dp" />
+</shape>

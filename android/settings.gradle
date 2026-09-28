@@ -1,0 +1,24 @@
+/**
+ * 气球狗 · 孩子设备端 Agent —— Gradle 设置
+ *
+ * 这是一个独立的 Android 工程，与仓库根目录的 React 前端、server/ 后端互不干扰。
+ * 它只依赖 /api/agent/* 这一组「设备端协议」接口。
+ */
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'BalloonDogAgent'
+include ':app'

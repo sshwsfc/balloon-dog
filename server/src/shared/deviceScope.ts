@@ -119,6 +119,10 @@ export function toDeviceView(device: ChildDevice) {
     lastActiveAt: device.lastActiveAt,
     network: device.network,
     locked: device.locked,
+    // 设备端上报的<b>实际</b>锁定状态：与 locked（家长期望值）分开，
+    // 这样家长才知道「作息时间到了所以锁了」和「我手动锁的」是两回事
+    effectiveLocked: device.effectiveLocked,
+    lockReason: device.lockReason,
     tempUnlock: device.tempUnlockUntil ? device.tempUnlockUntil.toISOString() : null,
     deviceCode: device.deviceCode,
     agentVersion: device.agentVersion,

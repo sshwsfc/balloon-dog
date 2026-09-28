@@ -20,6 +20,7 @@ import { adminRoutes } from './features/admin/admin.routes';
 import { quizRoutes } from './features/quiz/quiz.controller';
 import { locationRoutes, safeZoneRoutes } from './features/locations/locations.controller';
 import { mediaRoutes } from './features/media/media.routes';
+import { lockPolicyRoutes, scheduleRoutes } from './features/schedule/schedule.controller';
 
 /**
  * Express 应用工厂。中间件顺序严格遵循：
@@ -97,6 +98,8 @@ export function createApp(): Express {
   app.use('/api/locations', locationRoutes);
   app.use('/api/safe-zones', safeZoneRoutes);
   app.use('/api/media', mediaRoutes);
+  app.use('/api/lock-policy', lockPolicyRoutes);
+  app.use('/api/schedules', scheduleRoutes);
   app.use('/api/agent', agentRoutes);
   app.use('/api/admin', adminRoutes);
 

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 应用图标：盾牌 + 爪印，寓意「守护」 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#07C160"
+        android:pathData="M0,0h108v108h-108z" />
+
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,16 L86,29 V53 C86,72 72,87 54,93 C36,87 22,72 22,53 V29 Z" />
+
+    <path
+        android:fillColor="#07C160"
+        android:pathData="M54,38 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0" />
+    <path
+        android:fillColor="#07C160"
+        android:pathData="M41,47 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+    <path
+        android:fillColor="#07C160"
+        android:pathData="M67,47 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+    <path
+        android:fillColor="#07C160"
+        android:pathData="M54,52 C46,52 41,58 41,64 C41,70 47,73 54,73 C61,73 67,70 67,64 C67,58 62,52 54,52 Z" />
+</vector>

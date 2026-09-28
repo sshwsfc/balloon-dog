@@ -69,6 +69,10 @@ npm run dev             # 只起前端
 | `npm run db:clean` | 清理冒烟测试留下的临时账号与设备（先预演） |
 | `npm run e2e` | **浏览器端到端测试**（家长端 + 管理后台，CDP 驱动无头 Chrome） |
 | `npm run e2e:parent` / `e2e:admin` | 只跑其中一套 |
+| `npm run android:build` | 构建孩子设备端 Agent 的调试 APK（见 [`android/README.md`](android/README.md)） |
+| `npm run android:release` | 构建 Agent 的发布 APK |
+| `npm run android:e2e` | **Agent 端到端联调**（真机/模拟器 + 真实后端：协议闭环、拍照/录音/截图、Kiosk 锁定、倒计时悬浮窗、作息时间表、最高强度档、保活） |
+| `npm run android:crosstest` | **作息求值交叉验证**（Android 与后端两套实现逐点比对，2016 个采样点） |
 | `npm run db:up` / `db:down` | 起停 PostgreSQL 容器 |
 | `npm run db:migrate` | 执行 Prisma 迁移 |
 | `npm run db:seed` | 灌入演示数据（幂等） |
@@ -100,6 +104,9 @@ balloon-dog/
 │  ├─ prisma/                # schema + migrations + seed
 │  ├─ scripts/               # 冒烟测试 + 设备端 Agent 示例 + 测试数据清理
 │  └─ src/features/          # auth / devices / quiz / locations / media / admin
+├─ android/                  # 孩子设备端 Agent（Java + XML，见 android/README.md）
+│  ├─ app/src/main/java/     # net / capability / service / ui / data / model
+│  └─ scripts/e2e-agent.mjs  # Agent 端到端联调（真机或模拟器 + 真实后端）
 ├─ server/docker-compose.yml
 └─ vite.config.ts            # 双入口构建 + /api 代理 + /admin history fallback
 ```

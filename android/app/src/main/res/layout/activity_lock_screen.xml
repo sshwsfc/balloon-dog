@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/lock_bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="28dp">
+
+        <ImageView
+            android:layout_width="72dp"
+            android:layout_height="72dp"
+            android:contentDescription="@string/app_name"
+            android:src="@drawable/ic_launcher" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:text="@string/lock_title"
+            android:textColor="@color/lock_text"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/textLockReason"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center"
+            android:lineSpacingExtra="4dp"
+            android:textColor="#FFB8B8B8"
+            android:textSize="14sp"
+            tools:text="作息：晚上睡觉" />
+
+        <TextView
+            android:id="@+id/textCountdown"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:gravity="center"
+            android:textColor="@color/wechat_green"
+            android:textSize="16sp"
+            tools:text="临时可用剩余 12分钟" />
+
+        <!-- 锁定强度说明：如实告诉孩子（以及家长）这台设备被锁到什么程度 -->
+        <TextView
+            android:id="@+id/textStrength"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:gravity="center"
+            android:lineSpacingExtra="3dp"
+            android:textColor="#FF7A7A7A"
+            android:textSize="12sp"
+            tools:text="Kiosk 锁定：无法退出" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="center"
+            android:lineSpacingExtra="4dp"
+            android:text="@string/lock_hint"
+            android:textColor="#FF8A8A8A"
+            android:textSize="13sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonQuizUnlock"
+            style="@style/ButtonPrimary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="26dp"
+            android:text="@string/action_quiz"
+            android:visibility="gone" />
+
+        <!--
+          应急解锁：只有在家长于本机设置过应急密码后才显示。
+          它是「服务端不可用」时的唯一出路，所以必须留在锁定页上、且不需要网络。
+        -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonEmergencyUnlock"
+            style="@style/ButtonSecondary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/action_emergency_unlock"
+            android:textColor="#FFB8B8B8"
+            android:visibility="gone" />
+
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  无障碍看门狗的服务声明。
+
+  accessibilityEventTypes 只订阅必要的几类：窗口状态变化、窗口内容变化、窗口列表变化。
+  订阅得越少越省电，也不会因为无关事件被频繁唤醒。
+
+  notificationTimeout=100：系统把事件批量回调的最小间隔。越小反应越快，
+  但过于频繁会耗电；100ms 是「能把逃逸窗口压到几百毫秒内」与功耗之间的折中。
+
+  canRetrieveWindowContent=true 是必需的：要靠它读取当前前台窗口属于哪个包，
+  从而判断「锁定界面是不是被抢走了」。
+
+  isAccessibilityTool=false：诚实声明。这个标记本意是给「服务残障用户」的工具用的，
+  本应用是家长管控工具，不该冒用；代价是系统设置里会显示一则提醒，文档中已说明。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_description"
+    android:isAccessibilityTool="false"
+    android:notificationTimeout="100"
+    android:summary="@string/accessibility_summary" />

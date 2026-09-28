@@ -80,6 +80,15 @@ export const agentHeartbeatSchema = z.object({
   battery: z.coerce.number().int().min(0).max(100).optional(),
   network: z.enum(['wifi', 'cellular', 'ethernet', 'unknown']).optional(),
   agentVersion: z.string().trim().max(30).optional(),
+  /**
+   * 设备上<b>实际</b>是否处于锁定。
+   *
+   * 与 DeviceCommand 里的 locked（家长的期望状态）不是一回事：设备可能因为
+   * 作息时间表或每日额度而锁定。设备端每秒求值一次，状态变化时随心跳上报，
+   * 家长端因此能看到「现在到底锁没锁」，而不是只知道自己的期望值。
+   */
+  effectiveLocked: z.boolean().optional(),
+  lockReason: z.string().trim().max(60).optional(),
 });
 
 /** 设备端回报指令执行结果。 */

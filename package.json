@@ -18,8 +18,12 @@
     "db:down": "npm --prefix server run db:down",
     "db:migrate": "npm --prefix server run prisma:migrate",
     "db:seed": "npm --prefix server run seed",
-    "dev:all": "concurrently -n server,web -c green,cyan \"npm run server:dev\" \"npm run dev\"",
+    "dev:all": "concurrently -n server,web -c green,cyan \"npm run server:dev\" \"npm run dev -- --host\"",
     "db:clean": "npm --prefix server run clean:test-data",
+    "android:build": "cd android && ./gradlew :app:assembleDebug",
+    "android:release": "cd android && ./gradlew :app:assembleRelease",
+    "android:e2e": "node android/scripts/e2e-agent.mjs",
+    "android:crosstest": "bash android/scripts/crosstest/run.sh",
     "e2e": "node scripts/browser-e2e.mjs",
     "e2e:parent": "node scripts/browser-e2e.mjs --only=parent",
     "e2e:admin": "node scripts/browser-e2e.mjs --only=admin"

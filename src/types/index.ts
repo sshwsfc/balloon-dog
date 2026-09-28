@@ -241,6 +241,75 @@ export interface MediaAsset {
 }
 
 // ============================================================
+// 锁屏策略与定时时间表
+// ============================================================
+
+/**
+ * 锁屏强度。
+ * - `kiosk`：默认。用 Lock Task 把设备钉在锁定页，家长可远程即时解锁；
+ * - `password`：最高强度。锁定瞬间把系统锁屏密码改成随机值，风险很高。
+ */
+export type LockStrength = 'kiosk' | 'password'
+
+/** 单台设备的锁屏策略（GET/PUT /api/lock-policy） */
+export interface LockPolicy {
+  deviceId: string
+  strength: LockStrength
+  /** 锁屏前透明悬浮窗的预告秒数，0..600，0 表示不预告 */
+  countdownSeconds: number
+  /** 定时时间表总开关；关掉后所有规则都不生效 */
+  scheduleEnabled: boolean
+}
+
+/** 时间表规则的动作用语义：`lock` 该时段锁定，`unlock` 该时段允许使用 */
+export type ScheduleAction = 'lock' | 'unlock'
+
+export interface ScheduleRule {
+  id: string
+  deviceId: string
+  name: string
+  action: ScheduleAction
+  /** 0=周日 … 6=周六，与 JS `Date.getDay()` 一致；至少一天 */
+  daysOfWeek: number[]
+  /** 从 00:00 起的分钟数，0..1439（22:00 = 1320） */
+  startMinute: number
+  /** 1..1440（24:00 = 1440）；小于 startMinute 表示跨天 */
+  endMinute: number
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+/** 后端按服务器时间算出的实时预览；设备端以本地时钟为准 */
+export interface SchedulePreview {
+  /** 按服务器时间，此刻是否处于锁定状态 */
+  lockedNow: boolean
+  /** 决定当前状态的规则名；未命中任何规则时为 null */
+  matchedRuleName: string | null
+  /** 下一次锁定状态发生变化的时刻（ISO）；没有边界时为 null */
+  nextChangeAt: string | null
+  /** 那次变化之后是否锁定；没有边界时为 null */
+  nextChangeLocked: boolean | null
+  evaluatedAt: string
+}
+
+export interface ScheduleListResponse {
+  schedules: ScheduleRule[]
+  scheduleEnabled: boolean
+  preview: SchedulePreview
+}
+
+/** 新增 / 编辑规则的入参 */
+export interface ScheduleRuleInput {
+  name: string
+  action: ScheduleAction
+  daysOfWeek: number[]
+  startMinute: number
+  endMinute: number
+  enabled: boolean
+}
+
+// ============================================================
 // 通用
 // ============================================================
 

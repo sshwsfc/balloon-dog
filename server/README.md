@@ -320,6 +320,27 @@ npm run dev              # 家长端与后台同一个 dev server
 | GET/POST | `/api/safe-zones` | 安全区列表 / 新增 |
 | PUT/DELETE | `/api/safe-zones/:safeZoneId` | 修改 / 删除 |
 
+### 锁屏策略与作息时间表 `/api/lock-policy`、`/api/schedules`
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET/PUT | `/api/lock-policy` | 锁屏强度（`kiosk` / `password`）、锁屏前倒计时预告秒数、作息总开关 |
+| GET | `/api/schedules` | 时间表列表 + **按服务器时间算的实时预览**（此刻是否锁定、命中哪条规则、下次变更时刻） |
+| POST/PUT/DELETE | `/api/schedules[/:scheduleId]` | 增删改；创建时自动打开作息总开关 |
+
+时间表语义（`evaluateSchedule`，与 Android 端 `ScheduleEngine` 同一套，已交叉验证 2016 个采样点）：
+
+- `action`：`lock` 该时段锁定 | `unlock` 该时段允许使用；**`unlock` 优先于 `lock`**，
+  因此「整晚锁定 + 中午放行」可以直接叠加表达；
+- `daysOfWeek`：`0`=周日 … `6`=周六（与 JS `Date.getDay()` 一致）；
+- `startMinute` `0..1439`、`endMinute` `1..1440`（`1440` 即 24:00）；
+- `endMinute < startMinute` 表示**跨天**（如 `1320 → 420` = 22:00 到次日 07:00）。
+
+> 规则随 `/api/agent/config` 下发到设备后**落盘到本机**，由设备本地时钟驱动 ——
+> 孩子断网也绕不过作息表。设备端还会把**实际**锁定状态随心跳上报
+> （`effectiveLocked` / `lockReason`），与家长的期望状态 `locked` 分开存放，
+> 这样家长能区分「我手动锁的」和「作息时间到了所以锁了」。
+
 ### 媒体 `/api/media`
 
 | 方法 | 路径 | 说明 |

@@ -50,6 +50,8 @@ public class QuizActivity extends AppCompatActivity {
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private RemoteQuestion current;
+    /** 这道题是否来自屏幕内容（用于界面提示与提交时走对应接口）。 */
+    private boolean fromScreen;
     private final List<ItemQuizOptionBinding> optionBindings = new ArrayList<>();
     private int selectedIndex = -1;
     private boolean answered;
@@ -98,7 +100,19 @@ public class QuizActivity extends AppCompatActivity {
 
         executor.execute(() -> {
             try {
-                RemoteQuestion question = api.fetchQuizQuestion(store.getBaseUrl());
+                // 优先取「基于屏幕内容」的题：服务端在屏幕题用完或没开启时会自动
+                // 回退到普通题库，所以这里不需要自己判断该走哪条路。
+                AgentApi.ScreenQuestion screen = api.fetchScreenQuizQuestion(store.getBaseUrl());
+                if (screen == null) {
+                    main.post(() -> {
+                        binding.textType.setText("");
+                        binding.textQuestion.setText("题库暂时没有可用题目，请稍后再试。");
+                    });
+                    return;
+                }
+                RemoteQuestion question = new RemoteQuestion(
+                        screen.id, screen.type, "grade1", screen.question, screen.options, 0);
+                fromScreen = screen.fromScreen();
                 main.post(() -> renderQuestion(question));
             } catch (ApiException e) {
                 main.post(() -> renderError(e));
@@ -113,8 +127,11 @@ public class QuizActivity extends AppCompatActivity {
             return;
         }
         current = question;
-        binding.textType.setText(question.typeLabel() + " · 答对奖励 "
-                + question.rewardMinutes + " 分钟");
+        // 屏幕题要说清楚它的来源 —— 「这题来自你刚才看的内容」对孩子更有代入感，
+        // 也是这个功能存在的意义
+        String prefix = fromScreen ? "来自你刚才看的内容 · " : "";
+        binding.textType.setText(prefix + question.typeLabel()
+                + (question.rewardMinutes > 0 ? " · 答对奖励 " + question.rewardMinutes + " 分钟" : ""));
         binding.textQuestion.setText(question.question);
 
         binding.optionContainer.removeAllViews();
@@ -174,8 +191,9 @@ public class QuizActivity extends AppCompatActivity {
 
         executor.execute(() -> {
             try {
+                // 屏幕题与题库题走同一个「交卷」入口：服务端会按题目 id 判断该用哪套判定。
                 AgentApi.AnswerResult result =
-                        api.submitQuizAnswer(store.getBaseUrl(), current.id, selectedIndex);
+                        api.submitScreenQuizAnswer(store.getBaseUrl(), current.id, selectedIndex);
                 main.post(() -> renderAnswer(result));
             } catch (ApiException e) {
                 main.post(() -> {

@@ -132,6 +132,9 @@ import { Card } from '@/components/ui/card'
 ### Conventions
 
 - **UI Language**: All user-facing text is in Chinese (this is a Chinese parental control app)
+- **Responsive**: 页面最外层用 `.page-shell`（详见 [`docs/RESPONSIVE.md`](docs/RESPONSIVE.md)），
+  栅格要给出 `sm:` / `lg:` 档位，导航统一走 `BottomNav`；横屏与宽屏都要能用。
+  验证：`npm run e2e:responsive`（5 档视口 × 14 个页面）
 - **Component Exports**: Use named exports: `export function HomePage() {}`
 - **Styling**: WeChat-inspired UI with primary green `#07c160`, shadcn/ui, Tailwind CSS v4
 - **Error Handling**: try-catch with `toast.error(toUserMessage(error))`; type caught values as `unknown`

@@ -7,7 +7,15 @@ import { SchedulePage } from './pages/SchedulePage'
 import { LoginPage } from './pages/LoginPage'
 import { DeviceManagePage } from './pages/DeviceManagePage'
 import { MediaPage } from './pages/MediaPage'
-import { BottomNav } from './components/BottomNav'
+import { InsightsPage } from './pages/InsightsPage'
+import { ModePage } from './pages/ModePage'
+import { ModeSchedulePage } from './pages/ModeSchedulePage'
+import { ModeAppsPage } from './pages/ModeAppsPage'
+import { EyeCarePage } from './pages/EyeCarePage'
+import { AppPluginsPage } from './pages/AppPluginsPage'
+import { AppPluginDetailPage } from './pages/AppPluginDetailPage'
+import { AppAuditPage } from './pages/AppAuditPage'
+import { BottomNav, SIDEBAR_WIDTH_CLASS } from './components/BottomNav'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Toaster } from 'sonner'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
@@ -45,7 +53,10 @@ function AppShell() {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      <Routes>
+      {/* 宽屏下底部导航变成左侧栏，主内容要让出侧栏的宽度。
+          只在「确实有导航」时让位，否则登录页/沉浸式页面会平白缩进一条。 */}
+      <div className={showNav ? SIDEBAR_WIDTH_CLASS : undefined}>
+        <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route
           path="/"
@@ -103,8 +114,75 @@ function AppShell() {
             </ProtectedRoute>
           }
         />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+        <Route
+          path="/insights"
+          element={
+            <ProtectedRoute>
+              <InsightsPage />
+            </ProtectedRoute>
+          }
+        />
+        {/* 模式切换：三态选择 / 时段规划 / 应用白名单 */}
+        <Route
+          path="/mode"
+          element={
+            <ProtectedRoute>
+              <ModePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/mode/schedule"
+          element={
+            <ProtectedRoute>
+              <ModeSchedulePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/mode/apps"
+          element={
+            <ProtectedRoute>
+              <ModeAppsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/eye-care"
+          element={
+            <ProtectedRoute>
+              <EyeCarePage />
+            </ProtectedRoute>
+          }
+        />
+        {/* 插件管理：卡片列表 + 单个应用的插件清单 */}
+        <Route
+          path="/app-plugins"
+          element={
+            <ProtectedRoute>
+              <AppPluginsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/app-plugins/:packageName"
+          element={
+            <ProtectedRoute>
+              <AppPluginDetailPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/app-audit"
+          element={
+            <ProtectedRoute>
+              <AppAuditPage />
+            </ProtectedRoute>
+          }
+        />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </div>
       {showNav && <BottomNav />}
       <Toaster position="top-center" richColors />
     </div>

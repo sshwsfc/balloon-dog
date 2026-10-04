@@ -9,11 +9,14 @@ import {
 import { devicesService } from './devices.service';
 import { commandsService } from './commands.service';
 import { devicesRepo } from './devices.repository';
+import { prisma } from '../../prisma';
 import { waitForDevice } from './devices.notifier';
 import { currentDeviceId } from '../../shared/deviceScope';
 import { NotFoundError } from '../../errors';
 import { FEATURE_DEFS } from './devices.constants';
 import { scheduleService } from '../schedule/schedule.service';
+import { insightsService } from '../insights/insights.service';
+import { modeService } from '../mode/mode.service';
 
 /**
  * 设备端 Agent 接口。
@@ -85,6 +88,29 @@ export async function reportLocation(req: Request, res: Response) {
  * 下发当前生效的管控策略。Agent 拿到后在本地强制执行：
  * 锁屏、每日时长、应用限额、网址黑名单、答题配置。
  */
+/** 用量汇总的类型直接取自服务，避免两处字段漂移。 */
+type UsageSummary = Awaited<ReturnType<typeof insightsService.usageSummary>>;
+
+/**
+ * 把服务端算出的用量汇总压成设备端要的形状。
+ *
+ * 「未设上限」与「上限已用完」必须区分开：前者是 unlimited，后者是 exceeded。
+ * 混在一起会让设备端在家长没设限制时就把手机锁了。
+ */
+function budgetOf(usage: UsageSummary, kind: string) {
+  const budget = usage.budgets.find((b) => b.kind === kind && !b.appName);
+  if (!budget) {
+    return { enabled: false, dailyLimit: 0, usedToday: usage.used[kind] ?? 0, remaining: 0, exceeded: false };
+  }
+  return {
+    enabled: true,
+    dailyLimit: budget.dailyLimit,
+    usedToday: budget.usedToday,
+    remaining: budget.remaining,
+    exceeded: budget.exceeded,
+  };
+}
+
 export async function getConfig(req: Request, res: Response) {
   const deviceId = currentDeviceId(req);
   const device = await devicesRepo.findById(deviceId);
@@ -101,7 +127,9 @@ export async function getConfig(req: Request, res: Response) {
   }
 
   await devicesRepo.ensureDefaults(device.id);
-  const [featureRows, timePlan, appLimits, blockedUrls, quizConfig, lockPolicy] = await Promise.all([
+  const [featureRows, timePlan, appLimits, blockedUrls, quizConfig, lockPolicy, screenConfig, usage,
+    modePayload, eyeCare, pluginRules] =
+    await Promise.all([
     devicesRepo.listFeatures(device.id),
     devicesRepo.getTimePlan(device.id),
     devicesRepo.listAppLimits(device.id),
@@ -109,6 +137,22 @@ export async function getConfig(req: Request, res: Response) {
     devicesRepo.listQuizConfig(device.id),
     // 锁屏强度 + 定时时间表：设备端据此在本地强制锁屏 / 解锁
     scheduleService.buildAgentPayload(device.id),
+    // 屏幕行为洞察：截屏与 AI 设置
+    prisma.screenMonitorConfig.findUnique({ where: { deviceId: device.id } }),
+    // 今日用量与额度。
+    //
+    // 注意区分两件事：
+    //  - **每日时长**（timePlan）设备端会本地兜底锁屏；
+    //  - **局数 / 集数预算**只在这里下发用于展示，设备端**不做本地兜底**
+    //    （LockState.Inputs 里没有对应项）。超限是靠服务端下发 lock 指令实现的，
+    //    所以设备离线期间预算拦不住 —— 详见 docs/FEATURE-STATUS.md §3.4。
+    insightsService.usageSummary(device),
+    // 学习模式 / 普通模式：规则原样下发，Android 侧本地求值（断网也要能算）
+    modeService.buildModePayload(device),
+    // 护眼设置
+    modeService.getEyeCare(device),
+    // 应用插件管控：只下发与默认值不同的项
+    modeService.buildPluginRules(device),
   ]);
 
   const enabledFeatures = featureRows.filter((f) => f.enabled).map((f) => f.key);
@@ -140,12 +184,42 @@ export async function getConfig(req: Request, res: Response) {
         dailyLimitMinutes: a.dailyLimitMinutes,
       })),
     blockedUrls: blockedUrls.filter((u) => u.enabled).map((u) => u.url),
+    // 模式切换：规则原样下发，设备端本地求值
+    mode: modePayload,
+    // 护眼设置
+    eyeCare: {
+      enabled: eyeCare.enabled,
+      continuousMinutes: eyeCare.continuousMinutes,
+      restMinutes: eyeCare.restMinutes,
+      nightStartHour: eyeCare.nightStartHour,
+      nightEndHour: eyeCare.nightEndHour,
+      nightLockEnabled: eyeCare.nightLockEnabled,
+      maxBrightnessPercent: eyeCare.maxBrightnessPercent,
+    },
+    // 应用插件管控：只包含被家长改动过的项
+    appPlugins: pluginRules,
     quiz: {
       enabled: quizConfig?.enabled ?? false,
       quizType: quizConfig?.quizType ?? 'english',
       grade: quizConfig?.grade ?? 'grade1',
       rewardMinutes: quizConfig?.correctRewardMinutes ?? 3,
       randomMode: quizConfig?.randomMode ?? false,
+    },
+    // 屏幕行为洞察。
+    //
+    // 注意 usageBudget 的计数来自服务端的 AI 分析（设备端自己数不准 ——
+    // 判断「这一局打完了没」需要看画面）。设备端拿到的是权威计数，
+    // **当前只用于界面展示**；真正拦住孩子的是服务端在超限后下发的 lock 指令。
+    // （原先这里写的是「用于离线兜底锁屏」，但设备端并没有实现该兜底。）
+    screenMonitor: {
+      captureEnabled: screenConfig?.captureEnabled ?? false,
+      captureIntervalSeconds: screenConfig?.captureIntervalSeconds ?? 30,
+      framesPerBatch: screenConfig?.framesPerBatch ?? 10,
+      quizFromScreen: screenConfig?.quizFromScreen ?? false,
+      usageBudget: {
+        gameRounds: budgetOf(usage, 'game_round'),
+        videoEpisodes: budgetOf(usage, 'video_episode'),
+      },
     },
     // 锁屏策略与时间表。字段名与家长端 /api/lock-policy、/api/schedules 保持一致，
     // 三端共用一套语义，避免「家长端显示的和设备端执行的不是一回事」。

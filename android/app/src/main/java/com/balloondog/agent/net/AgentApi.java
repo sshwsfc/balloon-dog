@@ -302,10 +302,154 @@ public class AgentApi {
     }
 
     // ============================================================
+    // 9. 屏幕行为洞察（截屏包上传 + 屏幕答题）
+    // ============================================================
+
+    /** 上传截屏包后服务端的回执。 */
+    public static final class ScreenBatchAck {
+        public final String batchId;
+        public final int frames;
+        public final String analysisStatus;
+        public final String analysisProvider;
+        public final String analysisNote;
+
+        ScreenBatchAck(String batchId, int frames, String analysisStatus,
+                       String analysisProvider, String analysisNote) {
+            this.batchId = batchId;
+            this.frames = frames;
+            this.analysisStatus = analysisStatus;
+            this.analysisProvider = analysisProvider;
+            this.analysisNote = analysisNote;
+        }
+    }
+
+    /**
+     * 上传一个截屏包。
+     *
+     * @param zip          stored 模式的 zip（帧图 + manifest.json）
+     * @param framesMeta   帧元数据，服务端会与包内图片按顺序对齐
+     */
+    public ScreenBatchAck uploadScreenBatch(String baseUrl, byte[] zip,
+                                            String startedAtIso, String endedAtIso,
+                                            JSONArray framesMeta, String agentVersion)
+            throws ApiException {
+        JSONObject json = client.uploadScreenBatch(
+                base(baseUrl), zip, startedAtIso, endedAtIso, framesMeta, agentVersion);
+        JSONObject analysis = json.optJSONObject("analysis");
+        return new ScreenBatchAck(
+                json.optString("batchId", ""),
+                json.optInt("frames", 0),
+                analysis == null ? "" : analysis.optString("status", ""),
+                analysis == null ? "" : analysis.optString("provider", ""),
+                analysis == null ? "" : analysis.optString("note", ""));
+    }
+
+    /**
+     * 取一道基于屏幕内容的题。
+     *
+     * <p>响应里 {@code source} 会告诉我们这道题是来自屏幕内容还是回退到了普通题库 ——
+     * 界面据此可以显示「这题来自你刚才看的内容」，对孩子更有代入感。
+     */
+    public static final class ScreenQuestion {
+        public final String source;   // screen | bank
+        public final String id;
+        public final String type;
+        public final String question;
+        public final java.util.List<String> options;
+
+        ScreenQuestion(String source, String id, String type, String question,
+                       java.util.List<String> options) {
+            this.source = source;
+            this.id = id;
+            this.type = type;
+            this.question = question;
+            this.options = options;
+        }
+
+        public boolean fromScreen() {
+            return "screen".equals(source);
+        }
+    }
+
+    @Nullable
+    public ScreenQuestion fetchScreenQuizQuestion(String baseUrl) throws ApiException {
+        JSONObject json = client.get(base(baseUrl), Constants.PATH_SCREEN_QUIZ_NEXT, null, false);
+        JSONObject question = json.optJSONObject("question");
+        if (question == null) return null;
+        java.util.List<String> options = new java.util.ArrayList<>();
+        JSONArray array = question.optJSONArray("options");
+        if (array != null) {
+            for (int i = 0; i < array.length(); i++) options.add(array.optString(i));
+        }
+        return new ScreenQuestion(
+                json.optString("source", "bank"),
+                question.optString("id"),
+                question.optString("type", "english"),
+                question.optString("question", ""),
+                options);
+    }
+
+    /** 交屏幕题。判定与奖励完全在服务端做，客户端拿不到答案。 */
+    public AnswerResult submitScreenQuizAnswer(String baseUrl, String questionId, int answer)
+            throws ApiException {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("questionId", questionId);
+            body.put("answer", answer);
+        } catch (JSONException ignored) {
+            // 原生类型
+        }
+        JSONObject json = client.post(base(baseUrl), Constants.PATH_SCREEN_QUIZ_ANSWER, body);
+        return new AnswerResult(
+                json.optBoolean("isCorrect", false),
+                json.optInt("correctAnswer", -1),
+                json.optString("explanation", ""),
+                json.optInt("rewardMinutes", 0),
+                JsonUtils.parseIsoMillis(json.optString("tempUnlockUntil", null)));
+    }
+
+    // ============================================================
     // 辅助
     // ============================================================
 
     /** 便捷方法：把一串字符串装成 JSON 数组（调试用）。 */
+    /** 上报已安装应用清单（全量替换）。 */
+    public void reportApps(String baseUrl,
+                           java.util.List<com.balloondog.agent.capability.AppInventory.AppEntry> apps)
+            throws ApiException {
+        JSONArray array = new JSONArray();
+        for (com.balloondog.agent.capability.AppInventory.AppEntry a : apps) {
+            JSONObject o = new JSONObject();
+            try {
+                o.put("packageName", a.packageName);
+                o.put("appName", a.appName);
+                o.put("isSystem", a.isSystem);
+                o.put("isLaunchable", a.isLaunchable);
+            } catch (Exception ignored) {
+                // 常量 key
+            }
+            array.put(o);
+        }
+        JSONObject body = new JSONObject();
+        try {
+            body.put("apps", array);
+        } catch (Exception ignored) {
+            // 常量 key
+        }
+        client.post(base(baseUrl), Constants.PATH_AGENT_APPS, body);
+    }
+
+    /** 批量上报设备事件。 */
+    public void reportEvents(String baseUrl, JSONArray events) throws ApiException {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("events", events);
+        } catch (Exception ignored) {
+            // 常量 key
+        }
+        client.post(base(baseUrl), Constants.PATH_AGENT_EVENTS, body);
+    }
+
     public static JSONArray toJsonArray(Iterable<String> values) {
         JSONArray array = new JSONArray();
         for (String value : values) {

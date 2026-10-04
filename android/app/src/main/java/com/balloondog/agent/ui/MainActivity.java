@@ -137,6 +137,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         binding.buttonSetEmergency.setOnClickListener(v -> promptEmergencyPassword());
         binding.buttonHeal.setOnClickListener(v -> selfCheckAndHeal());
         binding.buttonEnableWatchdog.setOnClickListener(v -> openAccessibilitySettings());
+        binding.buttonCaptureAuth.setOnClickListener(v -> requestCaptureAuthorization());
         binding.buttonWatchdogGuide.setOnClickListener(v -> showWatchdogGuide());
         binding.buttonOwnerGuide.setOnClickListener(v -> showOwnerGuide());
         binding.buttonClearLog.setOnClickListener(v -> {
@@ -283,6 +284,33 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         binding.textEmergency.setText(emergency.toString());
 
         // 无障碍看门狗：无设备所有者时它决定「能不能被通知栏绕过」，必须显眼地写出来
+        // 屏幕行为洞察：家长开关 + 本机采集授权的状态。
+        // 两者必须分开显示 —— 家长开了但本机没授权，采样一样跑不起来，
+        // 不写清楚的话运维只会看到「截图一直失败」。
+        StringBuilder capture = new StringBuilder();
+        if (!store.isCaptureEnabled()) {
+            capture.append("截屏分析：家长未开启");
+        } else {
+            capture.append("截屏分析：已开启（每 ").append(store.getCaptureIntervalSeconds())
+                    .append(" 秒一张，").append(store.getFramesPerBatch()).append(" 张一包）");
+            capture.append('\n').append("采集授权：")
+                    .append(com.balloondog.agent.capability.ScreenCapturer.hasProjection()
+                            ? "已授权" : "未授权（点下方按钮授权）");
+            capture.append('\n').append("待上传：")
+                    .append(com.balloondog.agent.capability.FrameBatchUploader
+                            .describePending(this, store));
+            capture.append('\n').append("今日额度：游戏 ")
+                    .append(store.isGameRoundsLimited()
+                            ? store.getGameRoundsUsed() + "/" + store.getGameRoundsLimit() + " 局"
+                            : "未限制")
+                    .append("，动画 ")
+                    .append(store.isVideoEpisodesLimited()
+                            ? store.getVideoEpisodesUsed() + "/" + store.getVideoEpisodesLimit() + " 集"
+                            : "未限制");
+        }
+        binding.textScreenCapture.setText(capture.toString());
+        binding.buttonCaptureAuth.setEnabled(store.isCaptureEnabled());
+
         StringBuilder watchdog = new StringBuilder();
         watchdog.append(LockWatchdogService.describeStatus(this));
         if (LockWatchdogService.shouldRecommend(this)) {
@@ -349,6 +377,32 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         EventLog.info("已执行自检：重排看门狗、重建 Kiosk 白名单、拉起守护服务");
         Toast.makeText(this, "自检完成，已重新拉起守护与保活链路", Toast.LENGTH_LONG).show();
         renderState();
+    }
+
+    /**
+     * 请求屏幕采集授权。
+     *
+     * <p>家长在家长端只能「打开开关」，而 MediaProjection 的授权框必须在本机由人点一次。
+     * 这里主动截一张屏来触发那次授权（成功后立刻丢掉这张图，不进入采样队列）——
+     * 否则家长会看到「已开启但一直没有数据」，却不知道差在哪一步。
+     */
+    private void requestCaptureAuthorization() {
+        Toast.makeText(this, "请在弹出的系统对话框中允许屏幕采集", Toast.LENGTH_LONG).show();
+        new Thread(() -> {
+            try {
+                com.balloondog.agent.capability.ScreenCapturer
+                        .captureScreenshotLowRes(this, 480, 45, 60_000L);
+                runOnUiThread(() -> {
+                    Toast.makeText(this, "屏幕采集已授权，之后会自动周期采样", Toast.LENGTH_LONG).show();
+                    renderState();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    Toast.makeText(this, "授权未完成：" + e.getMessage(), Toast.LENGTH_LONG).show();
+                    renderState();
+                });
+            }
+        }, "balloon-capture-auth").start();
     }
 
     /** 跳到系统的无障碍设置页，让家长手动开启看门狗（系统不允许应用自行开启）。 */

@@ -58,6 +58,19 @@ public final class LockEnforcer {
         in.rules = parseRules(store.getScheduleJson());
         in.countdownSeconds = store.getCountdownSeconds();
 
+        // 护眼锁定：强制休息（固定截止时刻）与夜间护眼（每秒按当前小时判定）。
+        // 由 EyeCareController 统一算好原因文案，这里只负责搬进 Inputs ——
+        // 放在这里而不是 LockState 里，是因为 LockState 应当保持纯函数、不碰 SharedPreferences。
+        try {
+            Object[] eyeLock = EyeCareController.currentLock(store, now);
+            if (eyeLock != null) {
+                in.eyeLockReason = (String) eyeLock[0];
+                in.eyeLockUntil = (Long) eyeLock[1];
+            }
+        } catch (Exception ignored) {
+            // 护眼判定失败绝不能影响主锁定链路
+        }
+
         // 每日额度：按 1:1 实时消耗推算耗尽时刻，与 tickUsage 的记账口径保持一致
         if (store.isTimePlanEnabled()) {
             int limitMinutes = store.getDailyLimitMinutes();
@@ -146,6 +159,9 @@ public final class LockEnforcer {
         CountdownOverlay.hide();
         lastCountdownVisible = false;
         EventLog.warn("进入锁定：" + state.describe());
+        com.balloondog.agent.service.AgentService.recordEventStatic(
+                com.balloondog.agent.data.Constants.EVENT_LOCK,
+                state.detail == null ? "设备已锁定" : "设备已锁定（" + state.detail + "）");
 
         // 1) 最强防护：禁卸载 / 禁强行停止 / 禁恢复出厂 / 禁安全模式（需求 1）
         if (store.isHardeningEnabled()) {
@@ -238,6 +254,8 @@ public final class LockEnforcer {
     /** 解除锁定。远程解锁 / 临时解锁 / 答题奖励 / 作息放行都汇聚到这里。 */
     private void exitLock(Context context, AgentStore store) {
         EventLog.success("解除锁定");
+        com.balloondog.agent.service.AgentService.recordEventStatic(
+                com.balloondog.agent.data.Constants.EVENT_UNLOCK, "设备已解锁");
 
         // 解除最高强度档：把系统锁屏密码清掉，让设备重新可用
         if (passwordEngaged || PasswordLockController.isEngaged(store)) {

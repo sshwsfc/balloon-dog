@@ -42,12 +42,17 @@ const OPERATOR_PASS = process.env.OPERATOR_PASS || 'balloon-operator-2026'
 const only = (process.argv.find((a) => a.startsWith('--only=')) || '').split('=')[1]
 const runParent = !only || only === 'parent'
 const runAdmin = !only || only === 'admin'
+const runResponsive = only === 'responsive'
 
 // ============================================================
 // 断言与工具
 // ============================================================
 
-const results = { parent: { pass: 0, fail: 0, failures: [] }, admin: { pass: 0, fail: 0, failures: [] } }
+const results = {
+  parent: { pass: 0, fail: 0, failures: [] },
+  admin: { pass: 0, fail: 0, failures: [] },
+  responsive: { pass: 0, fail: 0, failures: [] },
+}
 let suite = 'parent'
 
 function check(name, ok, extra = '') {
@@ -267,7 +272,14 @@ async function testParent(cdp) {
   check('进入首页', text.includes('设备监控'), text.slice(0, 120).replace(/\n/g, ' | '))
   check('展示真实设备名（来自 PostgreSQL）', text.includes('小明的小米手机'))
   check('展示设备型号', text.includes('Xiaomi 14 Pro'))
-  check('展示今日已用时长（真实时间规划）', /今日已使用\s*\d+\s*分钟/.test(text))
+  // 首页在「模式/护眼/插件」那一轮改版过：原来的「今日已使用 N 分钟」换成了
+  // 「今日使用时长」+ 一个格式化的时长值（可能显示为 1小时35分钟）。
+  // 断言跟着新版式走，但**仍然要求是一个真实时长**，不是空占位。
+  check(
+    '展示今日使用时长（真实时间规划）',
+    text.includes('今日使用时长') && /\d+\s*(小时|分钟)/.test(text),
+    text.slice(0, 140).replace(/\n/g, ' | '),
+  )
   check('展示基础与高级功能分组', text.includes('一键锁屏') && text.includes('远程拍照'))
   check('展示「最近指令」区块', text.includes('最近指令'))
   check('展示指令执行状态', /已完成|等待设备响应|设备执行中|执行失败|已超时/.test(text))
@@ -508,6 +520,322 @@ async function testAdmin(cdp) {
 // 主流程
 // ============================================================
 
+// ============================================================
+// 响应式验证：多种视口下的布局体检
+// ============================================================
+
+/**
+ * 视口矩阵。
+ *
+ * 「横屏手机」是最容易被忽略、也最容易做坏的一档：宽 844 而高只有 390，
+ * 横向像平板、纵向像小屏，通栏拉伸和「底部导航吃掉十分之一屏」都会在这里现形。
+ */
+const RESPONSIVE_VIEWPORTS = [
+  { name: '竖屏手机 390×844', width: 390, height: 844, mobile: true },
+  { name: '横屏手机 844×390', width: 844, height: 390, mobile: true },
+  { name: '平板横屏 1180×820', width: 1180, height: 820, mobile: false },
+  { name: '桌面 1440×900', width: 1440, height: 900, mobile: false },
+  { name: '超宽屏 1920×1080', width: 1920, height: 1080, mobile: false },
+]
+
+const RESPONSIVE_ROUTES = [
+  { path: '/', wide: true, must: '一键锁屏' },
+  { path: '/location', wide: false, must: '位置' },
+  { path: '/profile', wide: false, must: '我的' },
+  { path: '/schedule', wide: false, must: '锁屏' },
+  { path: '/insights', wide: true, must: '洞察' },
+  { path: '/mode', wide: false, must: '模式' },
+  { path: '/mode/schedule', wide: false, must: '时段' },
+  { path: '/mode/apps', wide: true, must: '应用' },
+  { path: '/eye-care', wide: false, must: '护眼' },
+  { path: '/app-plugins', wide: true, must: '插件' },
+  { path: '/app-audit', wide: false, must: '审批' },
+  // /media 与 /quiz-unlock 是沉浸式页面：**故意**不显示任何导航，
+  // 所以不对它们断言导航形态（否则测的是「怎么没导航」这种伪问题）。
+  { path: '/quiz-unlock', wide: false, must: '答题', immersive: true },
+  { path: '/devices', wide: false, must: '设备' },
+  { path: '/media', wide: false, must: '', immersive: true },
+]
+
+/** 页头到 1024px 才出现侧栏，与 BottomNav 里的约定必须一致。 */
+const SIDEBAR_BREAKPOINT = 1024
+
+/**
+ * 找出横向溢出的元素。
+ *
+ * 为什么不只看 `document.documentElement.scrollWidth`：应用在 body 上设了
+ * `overflow-x: hidden`，横向溢出会被**藏起来**而不是消失 —— 只看 scrollWidth
+ * 会让这类问题全部漏检，而那些被裁掉的内容恰恰是用户永远看不到的。
+ * 所以这里逐个元素量右边界。
+ */
+const OVERFLOW_PROBE = `(() => {
+  const vw = window.innerWidth;
+  const bad = [];
+
+  // 祖先里如果有「横向可滚动且确实滚得动」的容器（例如筛选条 chips），
+  // 里面的元素超出视口是**设计如此**，不算溢出。
+  // 不加这条会误报一片，把真正的问题淹掉。
+  const inScroller = (el) => {
+    for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+      const cs = getComputedStyle(p);
+      if ((cs.overflowX === 'auto' || cs.overflowX === 'scroll')
+          && p.scrollWidth > p.clientWidth + 1) return true;
+    }
+    return false;
+  };
+
+  for (const el of document.querySelectorAll('body *')) {
+    if (el.closest('[data-sonner-toaster]')) continue;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) === 0) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    if (r.right > vw + 1 || r.left < -1) {
+      if (inScroller(el)) continue;
+      const cls = (typeof el.className === 'string' ? el.className : '').slice(0, 50);
+      bad.push(el.tagName.toLowerCase() + (cls ? '.' + cls.split(' ')[0] : '')
+        + ' [' + Math.round(r.left) + '..' + Math.round(r.right) + ']');
+      if (bad.length >= 3) break;
+    }
+  }
+  return bad;
+})()`;
+
+/**
+ * 量标题栏：它必须**铺满整个可用宽度**，而标题文字仍与内容列对齐。
+ *
+ * 这是用户明确提的要求（「标题栏应该始终是 width 100%」）。
+ * 改之前 .page-shell 的 padding-inline 把白底页头一起挤窄了，
+ * 桌面上那条白条只从内容列开始，看着像没铺满。
+ */
+const HEADER_PROBE = `(() => {
+  const shell = document.querySelector('.page-shell');
+  const header = shell && shell.querySelector(':scope > .page-header');
+  if (!shell || !header) return null;
+  const s = shell.getBoundingClientRect();
+  const h = header.getBoundingClientRect();
+  const cs = getComputedStyle(shell);
+  const pad = parseFloat(cs.paddingLeft) || 0;
+  return {
+    shellLeft: Math.round(s.left), shellRight: Math.round(s.right),
+    headerLeft: Math.round(h.left), headerRight: Math.round(h.right),
+    shellWidth: Math.round(s.width), headerWidth: Math.round(h.width),
+    contentWidth: Math.round(s.width - pad * 2),
+    pad: Math.round(pad),
+    viewport: window.innerWidth,
+  };
+})()`;
+
+/** 量当前页面的内容列：左右内边距是否对称、内容是否被限宽。 */
+const COLUMN_PROBE = `(() => {
+  const shell = document.querySelector('.page-shell');
+  if (!shell) return null;
+  const cs = getComputedStyle(shell);
+  const padL = parseFloat(cs.paddingLeft) || 0;
+  const padR = parseFloat(cs.paddingRight) || 0;
+  return {
+    padL: Math.round(padL),
+    padR: Math.round(padR),
+    contentWidth: Math.round(shell.clientWidth - padL - padR),
+    viewport: window.innerWidth,
+  };
+})()`;
+
+async function testResponsive(cdp) {
+  suite = 'responsive'
+  section('响应式 · 登录')
+  await cdp.send(
+    'Emulation.setDeviceMetricsOverride',
+    { width: 390, height: 844, deviceScaleFactor: 2, mobile: true },
+    cdp.sessionId,
+  )
+  await cdp.goto('/login')
+  await sleep(2200)
+  await cdp.clearStorage(['balloon_dog_token'])
+  await cdp.goto('/login')
+  await sleep(2000)
+  await cdp.fill('input[type="tel"]', PARENT_PHONE)
+  await cdp.fill('input[type="password"]', PARENT_PASSWORD)
+  await sleep(300)
+  await cdp.clickText('登录')
+  await sleep(3500)
+  check('响应式套件已登录', (await cdp.eval('location.pathname')) === '/')
+
+  const problems = []
+  /** 各视口下首页内容列的实测值，最后打印出来作为「确实限宽了」的证据。 */
+  const columnEvidence = []
+
+  for (const vp of RESPONSIVE_VIEWPORTS) {
+    // 每一档视口都跑完整套路由：横屏与桌面是本次的重点，不能抽样
+    const routes = RESPONSIVE_ROUTES
+    let vpPass = 0
+    section(`响应式 · ${vp.name}（${routes.length} 个页面）`)
+
+    await cdp.send(
+      'Emulation.setDeviceMetricsOverride',
+      { width: vp.width, height: vp.height, deviceScaleFactor: 1, mobile: vp.mobile },
+      cdp.sessionId,
+    )
+    await sleep(400)
+
+    for (const route of routes) {
+      await cdp.goto(route.path)
+      await sleep(vp.mobile ? 1400 : 1100)
+
+      const label = `${vp.name} ${route.path}`
+
+      // 1) 不能有元素横向溢出视口
+      const overflow = await cdp.eval(OVERFLOW_PROBE)
+      if (overflow && overflow.length) {
+        problems.push(`${label} 横向溢出：${overflow.join(' / ')}`)
+      } else {
+        vpPass++
+      }
+
+      // 2) 宽屏下内容必须居中限宽；窄屏下不应出现莫名留白
+      const col = await cdp.eval(COLUMN_PROBE)
+      if (col) {
+        if (vp.width >= 768) {
+          // 要断言的是「内容被限宽且左右对称」。
+          // 不再要求 padL 一定 > 0：≥1024px 时左侧栏已经占掉 224px，
+          // 剩余宽度可能正好等于上限（1180-224=956 ≈ 60rem=960），此时不该有额外留白。
+          // 真正的病是「通栏拉伸」，而 bounded 已经把它挡住了。
+          const symmetric = Math.abs(col.padL - col.padR) <= 1
+          const bounded = col.contentWidth <= (route.wide ? 60 * 16 : 48 * 16) + 2
+          if (!(symmetric && bounded)) {
+            problems.push(
+              `${label} 内容列异常：padL=${col.padL} padR=${col.padR} `
+              + `content=${col.contentWidth}（应左右对称且不超过 ${route.wide ? 60 : 48}rem）`,
+            )
+          } else {
+            vpPass++
+          }
+        } else if (col.padL !== 0 || col.padR !== 0) {
+          problems.push(`${label} 窄屏不该有左右留白：padL=${col.padL} padR=${col.padR}`)
+        } else {
+          vpPass++
+        }
+      }
+
+      // 顺手留几张截图：断言只证明「没有溢出」，证明不了「好不好看」。
+      // 布局类改动必须用眼睛过一遍，这里把关键页面 × 关键视口落盘。
+      const SHOT_ROUTES = ['/', '/mode/schedule', '/app-plugins']
+      const SHOT_VIEWPORTS = ['横屏手机 844×390', '桌面 1440×900']
+      if (SHOT_ROUTES.includes(route.path) && SHOT_VIEWPORTS.includes(vp.name)) {
+        const slug = route.path === '/' ? 'home' : route.path.replace(/\//g, '-').replace(/^-/, '')
+        const vpSlug = vp.name.includes('横屏') ? 'landscape' : 'desktop'
+        try {
+          await cdp.shot(`/tmp/resp-${slug}-${vpSlug}.png`)
+        } catch {
+          // 截图失败不影响断言
+        }
+      }
+
+      // 3) 记下首页的内容列实测值 —— 让「确实限了宽」这件事在输出里看得见，
+      //    而不是只留下一句「通过」。测试通过但说不出量到了什么，是不可信的。
+      if (route.path === '/') {
+        columnEvidence.push({ viewport: vp.name, width: vp.width, col })
+      }
+
+      // 4) 标题栏必须铺满整个可用宽度
+      const header = await cdp.eval(HEADER_PROBE)
+      if (header) {
+        const flush = Math.abs(header.headerLeft - header.shellLeft) <= 1
+          && Math.abs(header.headerRight - header.shellRight) <= 1
+        if (!flush) {
+          problems.push(
+            `${label} 标题栏没铺满：shell=[${header.shellLeft}..${header.shellRight}] `
+            + `header=[${header.headerLeft}..${header.headerRight}]`,
+          )
+        } else if (header.pad > 8 && header.headerWidth < header.contentWidth + 8) {
+          // 只有在**确实存在留白**时才要求标题栏比内容列宽。
+          // pad=0 的视口（例如 1180px 平板：可用 956px 已经小于 --wide 的 960px 上限）
+          // 本来就无处可铺，此时 headerWidth === contentWidth 是正确的，不是 bug。
+          problems.push(
+            `${label} 标题栏宽度与内容列相同（${header.headerWidth}px），负 margin 未生效`,
+          )
+        } else {
+          vpPass++
+        }
+      } else {
+        vpPass++ // 该页面没有标题栏
+      }
+
+      // 5) 导航形态必须与断点一致
+      const nav = await cdp.eval(`(() => {
+        const bars = [...document.querySelectorAll('nav')];
+        const bottom = bars.find(n => n.className.includes('fixed bottom-0'));
+        const side = bars.find(n => n.className.includes('h-screen w-56'));
+        const visible = (el) => !!el && getComputedStyle(el).display !== 'none';
+        return { bottom: visible(bottom), side: visible(side) };
+      })()`)
+      if (route.immersive) {
+        // 沉浸式页面：两种导航都不该出现
+        if (nav.side || nav.bottom) {
+          problems.push(`${label} 沉浸式页面不该出现导航：${JSON.stringify(nav)}`)
+        } else {
+          vpPass++
+        }
+      } else {
+        const wantSidebar = vp.width >= SIDEBAR_BREAKPOINT
+        if (wantSidebar ? !nav.side || nav.bottom : nav.side || !nav.bottom) {
+          problems.push(`${label} 导航形态不对：期望${wantSidebar ? '侧栏' : '底栏'}，实得 ${JSON.stringify(nav)}`)
+        } else {
+          vpPass++
+        }
+      }
+
+      // 6) 关键内容确实渲染出来了（不是被裁成空白）
+      if (route.must) {
+        const text = await cdp.eval('document.body.innerText')
+        if (!text.includes(route.must)) {
+          problems.push(`${label} 页面上找不到「${route.must}」`)
+        } else {
+          vpPass++
+        }
+      }
+    }
+
+    const total = routes.length * 4 + routes.filter((r) => r.must).length
+    console.log(`  ${vpPass}/${total} 项通过`)
+  }
+
+  section('响应式 · 内容列实测（首页）')
+  for (const e of columnEvidence) {
+    if (!e.col) continue
+    const side = e.width >= SIDEBAR_BREAKPOINT ? '（左侧栏已占 224px）' : ''
+    console.log(
+      `  ${e.viewport.padEnd(18)} 视口 ${String(e.width).padStart(4)}px → `
+      + `内容 ${String(e.col.contentWidth).padStart(4)}px `
+      + `左右留白 ${e.col.padL}/${e.col.padR}${side}`,
+    )
+  }
+
+  // 「测试本身是否有效」的自检：宽屏下内容必须**严格窄于**可用区域，
+  // 否则说明限宽根本没生效、上面那些 bounded 断言只是因为页面恰好不宽。
+  // 这一条能挡住「选择器写错、探针量了个空元素」这类假通过。
+  const desktop = columnEvidence.find((e) => e.width >= 1440)
+  const homeShell = await cdp.eval(`!!document.querySelector('.page-shell')`)
+  check('页面确实使用了统一的 .page-shell 容器（探针没量错东西）', homeShell === true)
+  check(
+    '宽屏下内容列确实窄于可用区域（限宽真实生效）',
+    Boolean(desktop && desktop.col && desktop.col.contentWidth < desktop.width - 224 + 2),
+    desktop?.col ? `content=${desktop.col.contentWidth} viewport=${desktop.width}` : '未取到测量值',
+  )
+
+  section('响应式 · 汇总')
+  const total = problems.length
+  results.responsive.pass += total === 0 ? 1 : 0
+  if (total === 0) {
+    console.log('  \u001b[32m✓\u001b[0m 所有视口下均无横向溢出、内容列居中限宽、导航形态正确')
+  } else {
+    results.responsive.fail += 1
+    for (const p of problems.slice(0, 40)) console.log(`  \u001b[31m✗\u001b[0m ${p}`)
+    if (problems.length > 40) console.log(`  … 另有 ${problems.length - 40} 条`)
+    results.responsive.failures.push(...problems.slice(0, 40))
+  }
+}
+
 async function main() {
   console.log(`\n🧪 浏览器端到端测试 → ${APP}\n`)
 
@@ -531,6 +859,7 @@ async function main() {
   try {
     if (runParent) await testParent(cdp)
     if (runAdmin) await testAdmin(cdp)
+    if (runResponsive) await testResponsive(cdp)
   } finally {
     ws.close()
     chrome.kill()
@@ -538,13 +867,14 @@ async function main() {
 
   console.log('\n' + '═'.repeat(54))
   let totalFail = 0
-  for (const key of ['parent', 'admin']) {
+  for (const key of ['parent', 'admin', 'responsive']) {
     const r = results[key]
     if (!runParent && key === 'parent') continue
     if (!runAdmin && key === 'admin') continue
+    if (!runResponsive && key === 'responsive') continue
     if (r.pass + r.fail === 0) continue
     totalFail += r.fail
-    const label = key === 'parent' ? '家长端' : '管理后台'
+    const label = { parent: '家长端', admin: '管理后台', responsive: '响应式' }[key]
     if (r.fail === 0) {
       console.log(`\u001b[32m${label}：全部通过（${r.pass} 项）\u001b[0m`)
     } else {

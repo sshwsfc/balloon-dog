@@ -36,6 +36,111 @@ body {
   min-height: 100vh;
 }
 
+/* ============================================================
+   家长端响应式基础
+   ============================================================
+
+   设计目标：同一套代码在「竖屏手机 / 横屏手机 / 平板 / 桌面浏览器」下都像是有意设计的，
+   而不是把手机界面横向拉扁。
+
+   做法说明（为什么用 padding-inline 而不是包一层 max-width 容器）：
+   页面里大量存在 `bg-white` 的整宽页头与分隔线，如果给内容包一个限宽容器，
+   这些整宽背景会跟着变窄、露出灰底，观感像「卡片没铺满」。
+   直接在容器上用对称的 padding-inline 把内容挤到中间，
+   既保住了整宽背景，又让文字行宽有上限 —— 而且**不需要改任何页面的 JSX 结构**，
+   只需把页面最外层那个一长串 className 换成 .page-shell。
+
+   断点策略：
+     <768px   竖屏手机：原样铺满，一点不变
+     ≥768px   平板/横屏手机：内容收进 42rem 居中
+     ≥1024px  桌面：内容 48rem，底部导航变成左侧栏（见 BottomNav / App）
+   矮视口（横屏手机）另行压缩纵向留白，见文件末尾的 max-height 媒体查询。
+   ============================================================ */
+
+@layer components {
+  .page-shell {
+    /* 内容列两侧的留白。
+       用 vw 而不是 % 计算，是因为 .page-header 也要用同一个数：
+       % 会在**使用它的那个元素**的包含块上重新解析，
+       子元素拿不到父元素算出来的值（父元素被 padding 挤窄后，
+       子元素里同样的表达式会算出 0，等于没生效）。 */
+    --shell-pad: 0px;
+    min-height: 100vh;
+    background-color: #f7f7f7;
+    /* 底部导航的让位；宽屏下导航变成侧栏，这点留白就不需要了 */
+    padding-bottom: 5.5rem;
+    padding-inline: var(--shell-pad);
+  }
+
+  /*
+    标题栏始终铺满整个可用宽度。
+
+    做法是「负 margin 抵消父级留白 + 自己补回等量留白」：
+    外面那圈让白底与分隔线通栏，里面那圈让标题文字仍然与下方卡片对齐。
+    如果只做前者（标题贴着侧栏边），在桌面上会显得和内容脱节；
+    只做后者就是改之前的样子 —— 白条被挤窄，看着像没铺满。
+  */
+  .page-shell > .page-header {
+    margin-inline: calc(-1 * var(--shell-pad));
+    padding-inline: calc(var(--shell-pad) + 1rem);
+  }
+
+  /* 加载态 / 错误态：内容是单个居中块，不需要行宽上限 */
+  .page-shell.page-shell--center {
+    --shell-pad: 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* 沉浸式页面（答题页 / 媒体查看）不显示导航，也就不需要给底栏让位 */
+  .page-shell.page-shell--immersive {
+    padding-bottom: 0;
+  }
+
+  @media (min-width: 640px) {
+    .page-shell > .page-header {
+      padding-inline: calc(var(--shell-pad) + 1.25rem);
+    }
+  }
+
+  /* 宽屏下把内容挤到中间。
+     max(0px, …) 保证窄屏下留白恰好为 0，不会出现「手机上也莫名两边留白」。 */
+  @media (min-width: 768px) {
+    .page-shell {
+      --shell-pad: max(0px, calc((100vw - 42rem) / 2));
+    }
+    /* 列数会跟着变多的页面（首页九宫格、插件卡片墙、洞察时间线）给更宽的舞台 */
+    .page-shell.page-shell--wide {
+      --shell-pad: max(0px, calc((100vw - 48rem) / 2));
+    }
+  }
+
+  @media (min-width: 1024px) {
+    /* 224px = 左侧栏宽度，必须与 BottomNav 的 w-56 / lg:pl-56 一致。
+       这里用具体像素而不是 %，同样是为了让标题栏能共用同一个值。 */
+    .page-shell {
+      --shell-pad: max(0px, calc((100vw - 224px - 48rem) / 2));
+      padding-bottom: 2rem;
+    }
+    .page-shell.page-shell--wide {
+      --shell-pad: max(0px, calc((100vw - 224px - 60rem) / 2));
+    }
+    /* 沉浸式页面不显示侧栏，不该扣掉那 224px */
+    .page-shell.page-shell--immersive {
+      --shell-pad: max(0px, calc((100vw - 48rem) / 2));
+    }
+  }
+
+  /* 横屏手机：视口高度往往只有 320–420px，纵向留白必须收紧，
+     否则一屏只放得下一条记录。这里只动纵向，不动横向布局。 */
+  @media (max-height: 520px) {
+    .page-shell {
+      padding-bottom: 4rem;
+    }
+  }
+}
+
 /* 管理后台默认使用系统 UI 字体栈，表格式密集信息可读性更好 */
 .admin-shell {
   font-family:

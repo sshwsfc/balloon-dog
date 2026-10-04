@@ -79,14 +79,46 @@ public final class ScreenCapturer {
     // 对外能力
     // ============================================================
 
-    /** 截一张屏，返回 JPEG 字节。 */
+    /** 截一张屏，返回原始分辨率的 JPEG 字节（远程截图指令用）。 */
     public static byte[] captureScreenshot(Context context, long timeoutMs) throws CapabilityException {
+        return capture(context, 0, JPEG_QUALITY, timeoutMs, false);
+    }
+
+    /**
+     * 截一张<b>低分辨率</b>的屏，用于周期采样。
+     *
+     * <p>刻意在 {@code VirtualDisplay} 这一层就按目标尺寸创建，而不是先拍全分辨率再缩放：
+     * 1080×2340 的 ARGB_8888 位图约 10 MB，每分钟拍两张的话内存压力相当可观；
+     * 直接在 480 像素宽上合成，位图只有约 2 MB，且省掉一次缩放。
+     *
+     * @param longEdge 目标长边像素（例如 480）
+     * @param quality  JPEG 质量（例如 45）
+     */
+    public static byte[] captureScreenshotLowRes(Context context, int longEdge, int quality, long timeoutMs)
+            throws CapabilityException {
+        return capture(context, longEdge, quality, timeoutMs, true);
+    }
+
+    /**
+     * 截屏核心。
+     *
+     * @param longEdge  目标长边；{@code <= 0} 表示保持屏幕原始分辨率
+     * @param quiet     采样用途时不要每张都打日志（否则日志环会被刷屏）
+     */
+    private static byte[] capture(Context context, int longEdge, int quality, long timeoutMs, boolean quiet)
+            throws CapabilityException {
         Context app = context.getApplicationContext();
         ensureProjection(app, timeoutMs);
 
         DisplayMetrics metrics = realMetrics(app);
         int width = metrics.widthPixels;
         int height = metrics.heightPixels;
+
+        if (longEdge > 0) {
+            int[] scaled = scaleToLimit(width, height, longEdge);
+            width = scaled[0];
+            height = scaled[1];
+        }
 
         ImageReader reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
         VirtualDisplay display = null;
@@ -115,7 +147,7 @@ public final class ScreenCapturer {
             byte[] jpeg;
             try {
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
-                bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out);
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out);
                 jpeg = out.toByteArray();
             } finally {
                 bitmap.recycle();
@@ -124,7 +156,9 @@ public final class ScreenCapturer {
             if (jpeg.length == 0) {
                 throw new CapabilityException("截屏压缩后为空");
             }
-            EventLog.success("已截屏 " + width + "×" + height + "，" + (jpeg.length / 1024) + " KB");
+            if (!quiet) {
+                EventLog.success("已截屏 " + width + "×" + height + "，" + (jpeg.length / 1024) + " KB");
+            }
             return jpeg;
         } finally {
             if (display != null) {
@@ -139,8 +173,10 @@ public final class ScreenCapturer {
             } catch (Exception ignored) {
                 // 同上
             }
-            // 单次截图用完就收起前台服务，避免常驻通知
-            if (!isRecording()) {
+            // 单次截图用完就收起前台服务，避免常驻通知。
+            // 采样（quiet=true）时不收 —— 它每几十秒就要再拍一张，
+            // 反复起停前台服务既费电又会让通知闪来闪去。
+            if (!quiet && !isRecording()) {
                 releaseProjection();
                 ScreenCaptureService.stopIfIdle(app);
             }

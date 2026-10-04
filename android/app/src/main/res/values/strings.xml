@@ -94,4 +94,8 @@
     <string name="action_watchdog_guide">为什么需要无障碍权限？</string>
     <string name="watchdog_on">无障碍看门狗：已开启</string>
     <string name="watchdog_off">无障碍看门狗：未开启（锁定可被通知栏绕过）</string>
+
+    <!-- 屏幕行为洞察 -->
+    <string name="action_grant_capture">授权屏幕采集</string>
+    <string name="capture_hint">家长在家长端开启「周期截屏」后，本机还需要一次屏幕采集授权才能真正开始采样。截图会以低分辨率周期采集并用于行为分析。</string>
 </resources>

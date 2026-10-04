@@ -159,7 +159,15 @@ const handleAction = async () => {
 ```
 
 ### UI/UX Patterns
-- **Mobile-first**: All designs are for mobile (WeChat style)
+- **Mobile-first, but responsive**: 默认按手机竖屏设计（微信风格），但**必须**在横屏手机与
+  宽屏下也成立。做法见 [`docs/RESPONSIVE.md`](docs/RESPONSIVE.md)：
+  - 页面最外层用 `.page-shell`（必要时加 `--wide` / `--immersive` / `--center`），
+    **不要**自己写 `min-h-screen pb-20 bg-gray-100`；
+  - 白底标题栏加 `page-header` 类（必须是 `.page-shell` 的直接子元素）——
+    它靠负 margin 铺满整个可用宽度，不加就会跟着内容一起被挤窄；
+  - 固定列数的栅格一律给出 `sm:` / `lg:` 档位，别让宽屏继续用手机的列数；
+  - 导航由 `BottomNav` 统一处理（窄屏底栏 / 宽屏侧栏），不要再写第二套；
+  - 矮视口（横屏手机）要收紧纵向留白，别只盯着宽度。
 - **Color Scheme**: Primary green `#07c160` (WeChat green), danger red, neutral grays
 - **Dialogs**: Use shadcn/ui Dialog component with DialogHeader, DialogContent, DialogFooter
 - **Forms**: Use proper input fields with focus states (border-[#07c160])

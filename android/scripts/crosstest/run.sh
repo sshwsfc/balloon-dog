@@ -39,5 +39,27 @@ javac -nowarn -d "$WORK/out" -encoding UTF-8 \
   "$HERE/CrossCheck.java"
 java -Duser.timezone="$TZ" -cp "$WORK/out" CrossCheck > "$WORK/android.json"
 
-echo "==> 3/3 逐点比对"
+echo "==> 3/4 逐点比对（作息时间表）"
 node "$HERE/compare.mjs" "$WORK/reference.json" "$WORK/android.json"
+
+echo "==> 4/4 逐点比对（学习模式求值）"
+# 同一套思路：模式求值也实现了两遍（后端给家长端展示、Android 本地强制执行），
+# 漂移的症状是「家长端显示普通模式、孩子手机却在学习模式」。
+(cd "$REPO_DIR/server" && npx tsx "$HERE/mode-reference.ts") > "$WORK/mode-reference.json"
+# -cp 指向第 2 步编译出的桩类目录：ModeConfig 依赖 org.json，
+# 而那套桩已经躺在 $WORK/out 里了
+javac -nowarn -cp "$WORK/out" -d "$WORK/out" -encoding UTF-8 \
+  "$AGENT_SRC/model/ModeConfig.java" \
+  "$AGENT_SRC/capability/StudyModeEngine.java" \
+  "$HERE/ModeCrossCheck.java"
+java -Duser.timezone="$TZ" -cp "$WORK/out" ModeCrossCheck > "$WORK/mode-android.json"
+node "$HERE/compare-mode.mjs" "$WORK/mode-reference.json" "$WORK/mode-android.json"
+
+echo "==> 5/5 学习模式 / 插件管控的判定逻辑"
+# 这两套判定依赖界面可见文本，而模拟器里没装微信/QQ，端到端复现不出来，
+# 所以把判定抽成纯函数在这里逐条覆盖（尤其是「绝不能拦桌面/电话」这类要命的边界）。
+javac -nowarn -cp "$WORK/out" -d "$WORK/out" -encoding UTF-8 \
+  "$AGENT_SRC/model/PluginRule.java" \
+  "$AGENT_SRC/capability/GuardRules.java" \
+  "$HERE/GuardCheck.java"
+java -Duser.timezone="$TZ" -cp "$WORK/out" GuardCheck

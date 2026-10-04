@@ -23,7 +23,7 @@
 
 ## 1. 它做了什么
 
-### 1.1 完整实现设备端协议（8 组接口）
+### 1.1 完整实现设备端协议（11 组接口）
 
 | 方法 | 路径 | 本工程中的实现 |
 | --- | --- | --- |
@@ -35,6 +35,9 @@
 | POST | `/api/agent/locations` | 首次启动 + 每 5 分钟自动上报；`fetch_location` 指令也会触发一次 |
 | POST | `/api/agent/media` | `ApiClient.uploadMedia()` — `multipart/form-data` 上传并把 `mediaId` 回填进指令结果 |
 | GET/POST | `/api/agent/quiz/{question,answer}` | `QuizActivity` + `AgentApi` — 答题换使用时长 |
+| POST | `/api/agent/screen-batches` | `FrameBatchUploader` — 把攒够的一包截图（zip：`frames/*.jpg` + `manifest.json`）上传给服务端做 AI 行为分析 |
+| GET | `/api/agent/screen-quiz/next` | `AgentApi.fetchScreenQuizQuestion()` — 取一道**基于当前屏幕内容**生成的题 |
+| POST | `/api/agent/screen-quiz/answer` | `AgentApi.submitScreenQuizAnswer()` — 交卷，答对即解锁并重置锁定倒计时 |
 
 错误体（`{title,status,message,detail,errors,request_id}`）被翻译成 `ApiException`，
 `userMessage()` 就是后端给的那句中文，直接展示，不自己拼「HTTP 400」。
@@ -238,8 +241,105 @@ BadTokenException: Unable to add window -- token null is not valid; is your acti
    而家长在断网时至少有一条确定的复位路径。
 3. **锁定页永远保留「应急解锁」入口**，完全离线校验，不依赖 Agent 服务、不发任何网络请求。
 
-此外 Android 8.0 起改写已有密码必须先用 `setResetPasswordToken` 预置令牌，
-所以设置应急密码时会顺手把令牌装好（`ensureResetToken`）。
+> ### 安全阀 2 曾经是失效的（已修复，且已进回归）
+>
+> **原来的问题**：`password` 档随机改写系统锁屏密码后，设备一旦重启就会卡在系统锁屏上 ——
+> 随机密码没人知道，应急密码输入不进去，**设备直到恢复出厂都用不了**。
+>
+> **根因**：安全阀 2 要靠 Agent 在开机后跑起来才能执行，可是本工程当时**不是 direct-boot 感知的**。
+> 系统在用户解锁之前不会发 `BOOT_COMPLETED`，而用户解锁又需要那个随机密码 —— 循环依赖。
+> 实测确认：`dumpsys user` 一直停在 `RUNNING_LOCKED`，界面停在 `FallbackHome`，
+> Agent 根本没机会启动去清密码。（之前没暴露，是因为测试在锁定后立刻用应急密码解锁，
+> 随机密码从来没活到重启。）
+>
+> **修法**（三处缺一不可）：
+> 1. `BootReceiver` 声明 `android:directBootAware="true"`，并监听 `LOCKED_BOOT_COMPLETED`
+>    —— 这是用户解锁**之前**唯一能执行代码的时机；
+> 2. reset 令牌与当前随机密码改存**设备加密存储**
+>    （`createDeviceProtectedStorageContext()`，文件 `balloon_dog_agent_device_protected.xml`），
+>    解锁前读得到；
+> 3. `AgentStore` 的构造函数对「解锁前凭据加密存储不可用」免疫 ——
+>    否则用来打破死循环的代码自己先抛异常。应急密码哈希仍留在凭据加密存储里
+>    （它只在解锁后的锁定页用到，没必要提前可读）。
+>
+> **验证**：`android:e2e` 的第 21 步现在真的会「改写随机密码 → 重启 → 断言设备仍能进入系统」，
+> 并断言开机日志里出现了安全阀执行记录。这是端到端回归的一部分，不是手工试过就算。
+> 实测日志：
+>
+> ```
+> W BalloonDog: 检测到随机锁屏密码仍生效，开机时立即清除（避免把用户锁在系统锁屏外）
+> I BalloonDog: 已清除随机锁屏密码，设备恢复可用
+> ```
+>
+> 换句话说：**孩子重启手机拿回手机这条路依然存在**（这是刻意的取舍，见安全阀 2），
+> 但家长不会再被自己孩子的手机锁在门外。
+>
+> ### ⚠️ 另一个已修的「锁死」缺陷：解绑后设备被不存在的设备锁住
+>
+> **现象**：家长在家长端解绑设备后，孩子手机上仍然稳定停在锁定页上，且**谁也解不开** ——
+> 服务端那条设备记录已经没了，家长端连入口都没有。
+>
+> **根因**：解绑后设备端会自动重新注册，拿到一条**全新的 deviceId**；但本地缓存里
+> 还留着上一台设备的锁定策略（`last_config_json` 里的 `"locked":true`），
+> 而本地锁定判定读的是独立的 `locked` 标志 —— 于是新身份继续按旧设备的策略锁着。
+> 实测：服务端明明已经 `bound=false, locked=false`，设备端却仍在锁屏。
+>
+> **修法**（两层，互为兜底）：
+> 1. 注册/续订成功时若发现 deviceId 变了，立刻丢弃上一台设备的策略缓存
+>    （`AgentStore.applyRegistration`）；
+> 2. 更根本的一条不变量：「缓存配置里的 deviceId ≠ 本机 deviceId」就说明这份策略不属于本机，
+>    必须整份丢掉（`AgentStore.healStalePolicyCache`）。它在**服务启动时**和
+>    **锁定页自检时**都会跑 —— 所以已经卡死的设备也能自己恢复，不需要清数据或重装。
+>
+> 这条不改的话，设备的实际表现是「应用坏了」，排查方向会被完全带偏。
+
+### 2.4.1 学习模式与应用插件管控（都走无障碍）
+
+「学习模式下只允许白名单应用」「微信/QQ 的功能管控」都挂在既有的
+`LockWatchdogService` 上，不新开服务（多开一个只会让用户多授权一次，也更容易被系统回收）。
+
+**判定在设备端本地完成**（`StudyModeEngine` + `GuardRules`）。这不是实现细节而是硬要求：
+判定一旦依赖服务端，孩子拔网线、进飞行模式就绕过了。服务端只把规则原样下发并落盘，
+后端 `mode.service.ts` 里那份同样的求值逻辑**只用于家长端展示**，两边由
+`android:crosstest` 逐点比对（3024 个采样点，零差异）。
+
+#### 拦截只针对「可启动的普通应用」
+
+判据是 `AppInventory.isLaunchable()`：只拦「有桌面入口、能启动」的包，
+其余系统组件一律放行。这是安全的一侧 —— 一旦把桌面、systemui、输入法拦掉，
+手机立刻变砖，连紧急呼叫都打不出去。此外 `GuardRules.ALWAYS_ALLOWED` 还显式放行
+桌面、systemui、电话/来电/紧急呼叫、权限控制器。
+
+> ⚠️ **必须声明 `QUERY_ALL_PACKAGES`**。Android 11 起有软件包可见性限制，
+> 不声明时 `queryIntentActivities` 只返回极少数包（实测 1 个），
+> 于是学习模式的拦截判据一律不成立 —— **家长设了却完全不起作用，且没有任何报错**。
+> 这是本功能最容易踩、也最难查的坑。
+
+#### 这套机制的边界（如实写明）
+
+- **按可见文本匹配**：应用改版改了文案就会漏拦。所以每项给的是一**组**候选关键词，
+  且随配置下发，便于集中修正。看不见 WebView / 游戏画布里的内容。
+- **有延迟**：无障碍事件到达 + 判定约几百毫秒，快速滑动可能闪过一帧。
+- **关掉无障碍权限即失效** —— 但关权限本身会被看门狗与设备所有者限制挡住（见 §2.2）。
+- **拦截动作是「按返回推回上一层」**，不是盖一层遮罩：遮罩会被应用的下一次重绘盖过去，
+  而且孩子会以为手机坏了。
+
+#### 为什么插件判定被抽成纯函数
+
+模拟器上没有装微信/QQ，「朋友圈被打开」这个场景**端到端复现不出来**。
+与其写一条永远跑不到的端到端断言（等于没测），不如把判定抽成无 Android 依赖的
+`GuardRules`，用合成界面文本逐条覆盖（`android/scripts/crosstest/GuardCheck.java`），
+设备端只验证「规则能下发、能落盘、拦截链路能跑通」。
+
+#### 排查用的一件事
+
+学习模式开着却拦不下来时，设备日志里会有这样一行（5 秒最多一条）：
+
+```
+学习模式判定：com.google.android.deskclock 可启动=true 是桌面=false 在白名单=true
+```
+
+一眼就能看出是白名单写错了、还是这个包被当成了系统组件。
 
 ### 2.5 保活：先说清楚它做不到什么
 
@@ -326,6 +426,79 @@ JobScheduler、广播都无法再把它唤醒。** 另一个进程也不行 —�
 「计时器和实际锁定时间对不上」这类经典 bug。
 
 ---
+
+### 2.9 锁定复核：亮屏即重锁 + 没锁住就补锁
+
+`LockReassertor` 由 `AgentService` 的 1 秒 ticker 驱动，两条路径语义不同：
+
+| 路径 | 触发 | 判定 | 动作 |
+| --- | --- | --- | --- |
+| A 周期复核 | 每 3 秒，**且屏幕亮着** | 只有在**实际没锁住**时才动手 | 重新进入锁定 |
+| B 亮屏即重锁 | `ACTION_SCREEN_ON` / `ACTION_USER_PRESENT` | **不检查**实际锁定状态 | 重新锁定（`lockNow()` 把屏幕重新关掉） |
+
+熄屏时不走周期复核：屏幕关着，孩子什么都看不见也用不了，这一刻本来就是安全的，
+而路径 B 会在屏幕亮起的那一瞬间接手。加了这一条还顺手去掉一个真实的浪费 ——
+系统锁屏盖在锁定页上面时，锁定页 Activity 处于 stopped（`isShowing()` 为 false），
+周期复核会每 3 秒把它重新拉起来一次，屏幕关着没人看，纯白耗电还刷满日志。
+
+> 实际响应最快的一般是**无障碍看门狗**（走无障碍事件，几十毫秒级），复核器是 3 秒级的兜底。
+> 联调脚本因此断言「看门狗或复核器至少有一条出手」，而不是硬要求是复核器干的。
+
+路径 B 是需求原话「在锁屏状态，但屏幕被打开了，就再锁一次」的直接实现。关键区别：
+「界面还挂着」不等于「锁住了」—— 孩子点亮屏幕后，锁定界面确实还在最前面，
+但屏幕是亮的，时间、通知、以及任何能盖在锁定页上的东西都会暴露。所以要按「屏幕被打开」
+这个事实来判，而不是按「界面还在不在」来判。
+
+「实际是否锁住」按能力档分别取权威信号，而不是只看一个标志：
+
+```
+kiosk 档      ActivityManager.getLockTaskModeState() == LOCK_TASK_MODE_LOCKED
+悬浮窗档      LockOverlayWindow.isShowing()
+Activity 档   LockScreenActivity.isShowing()
+```
+
+#### 一个实测踩到的坑：撤销悬浮窗权限会同时堵死降级路径
+
+悬浮窗权限不可用时，`LockEnforcer.showLockUi()` 会退回 `LockScreenActivity`。但 Android 10 起
+**禁止后台应用自行启动 Activity**，而最常用的豁免恰恰就是 `SYSTEM_ALERT_WINDOW` ——
+权限一撤，「退回 Activity」这条路被系统一并堵死，**锁定彻底失效**（模拟器实测：
+发完锁定指令后屏幕上什么都不会出现，`dumpsys window` 里也没有我们的窗口）。
+
+修法：`AccessibilityService` 是另一条合法豁免。看门狗在 `onServiceConnected()` 里通过
+`LockWatchdogBridge.installActivityStarter()` 把「用无障碍服务上下文启动 Activity」的能力注入
+`ui` 层，`LockScreenActivity.show()` 在没有悬浮窗权限时优先走它（日志：
+`经无障碍服务拉起锁定页（无悬浮窗权限降级路径）`）。
+
+> 这条也说明**看门狗不只是「压短逃逸窗口」**：它同时是悬浮窗权限被撤销后唯一还能把锁定
+> 界面拿到前台的手段。所以「开启无障碍看门狗」这个引导在多设备所有者场景下不是可选项。
+
+#### 看门狗不能和「系统锁屏」打架
+
+`password` 档会锁定系统锁屏，而此时**系统锁屏（systemui）就盖在最上面**。
+看门狗原本把「非本应用包名抢到前台」一律当成绕过，于是：拉锁定页 → 系统锁屏重新压回去 →
+再拉，**每 400ms 一次的死循环**。实测后果有两个，第二个是安全底线级别的：
+
+1. 疯狂耗电，日志被刷满；
+2. 锁定页被反复重建，家长**连「应急解锁」入口都点不到** ——
+   而那是需求 2 里「家长不能拿不回自己孩子手机」的最后一道保险。
+
+修法：`onAccessibilityEvent` 里先用 `KeyguardManager.isKeyguardLocked()` 判断；
+系统锁屏在最上面时直接跳过（设备此刻由系统锁着，本来就没被绕开），
+孩子解开系统锁屏后看门狗立刻恢复工作。
+
+#### 另一个坑：`ACTION_USER_PRESENT` 会被系统静默丢弃
+
+targetSdk 33 起，动态注册广播接收器必须声明导出标志。用 `RECEIVER_NOT_EXPORTED` 注册
+`ACTION_USER_PRESENT` 会被判 `Exported Denial` 直接丢掉 —— 实测日志：
+
+```
+BroadcastQueue: Exported Denial: sending Intent { act=android.intent.action.USER_PRESENT }
+  ... due to receiver ProcessRecord{...} (uid 10157) not specifying RECEIVER_EXPORTED
+```
+
+也就是说「用户解锁完成」这一刻我们根本收不到。改用 `RECEIVER_EXPORTED`。
+被第三方伪造的风险可接受：这个接收器只会触发一次锁定复核，而复核只会让设备更锁、
+绝不会解锁，所以伪造最多造成一次多余的重新锁定。
 
 ## 3. 构建与安装
 
@@ -654,6 +827,23 @@ android/
 
 ---
 
+### 4.3 联调脚本自身的两个坑（踩过，写下来省下一次）
+
+1. **`dumpsys` vs `uiautomator dump` 别混用。** `uiautomator dump` 一跑就会把本应用的
+   无障碍服务顶掉重连（日志里成片的「看门狗已断开 / 已连接」就是这么来的）。
+   用它去检测锁定页，等于边测边把被测对象踢下线 —— 锁定复核恰恰依赖那个服务。
+   所以锁定相关的判定一律走 `dumpsys window` / `dumpsys activity`。
+
+2. **界面文本断言要靠重试，不能忙等。** 本应用有一个 2 秒一次的界面刷新 ticker，
+   窗口经常进不了 `uiautomator` 要求的 idle 状态。`dumpUi()` 必须真等待 + 多次重试，
+   否则这类断言会随机失败 —— 看起来像产品 bug，其实是测试夹具的问题。
+
+   同样地，断言读的属性要对：`adb()` 返回 `{ code, out, err }`。
+   早期版本写成 `.text`，于是「倒计时悬浮窗弹出了没有」这条断言**恒为 false**，
+   从来没有真正验证过任何东西（这条是修好之后才抓到真问题的）。
+
+---
+
 ## 7. 已知边界
 
 **这一节请务必读。** 下面这些不是「没做完」，而是受平台或协议限制、
@@ -734,3 +924,54 @@ android/
   `middleware/auth.ts` 里的严格 `kind` 断言，本工程不做也不应做任何绕行。
 - 媒体只能以「设备令牌上传、家长令牌 / 短时效签名下载」两条路径访问，
   本工程仅使用上传路径。
+
+---
+
+## 10. 屏幕行为洞察：周期截屏 → 打包上传 → AI 分析
+
+家长想知道的不是「孩子用了 3 小时手机」，而是「这 3 小时在干什么」。所以设备端会按配置
+周期截屏、打包上传，由服务端用视觉模型总结出「用了哪个应用、在做什么」，再据此
+统计游戏局数 / 动画集数、触发异常提醒、生成基于屏幕内容的答题。
+
+### 10.1 采集链路
+
+| 环节 | 类 | 说明 |
+| --- | --- | --- |
+| 前台应用 | `ForegroundAppTracker` | 记录当前前台包名，给每张截图标注来源 |
+| 采样 | `ScreenSampler` | 复用 `ScreenCapturer` 的**常驻 MediaProjection**（不重复弹授权框），按 `captureIntervalSeconds` 截一张 |
+| 压缩 | `ScreenCapturer.captureScreenshotLowRes()` | 长边 ≤ 480px + JPEG q=45，单张约 15–30 KB |
+| 打包 | `FrameBatchArchiver` | 攒够 `framesPerBatch`（默认 10）张打成 zip：`frames/*.jpg` + `manifest.json`（时间、包名、序号）。**stored 模式**——JPEG 已经压过了，再 deflate 纯属浪费电 |
+| 上传 | `FrameBatchUploader` | `POST /api/agent/screen-batches`，失败按 5s/15s/60s 退避重试 |
+| 磁盘保护 | `ScreenSampler` | 目录超过 50 MB 或 200 张时丢弃最旧的；上传成功后立即删除 |
+
+授权失效（Android 14 每次新会话都要重新授权）时记日志并在设置页提示，**不静默失败**。
+
+#### 锁定期间不采样、也不申请授权
+
+`ScreenSampler` 和 `ProjectionConsentActivity` 都加了锁定门禁。后者不是多余的：
+
+进程重启后常驻投影会丢，采样器于是去重新申请 MediaProjection，而
+`ProjectionConsentActivity` 是个**系统弹框** —— 它会直接盖在锁定页上面，等于帮孩子把锁屏顶掉。
+实测日志里能看到 `START .../.capability.ProjectionConsentActivity` 出现在锁定之后，
+锁定界面因此没能在前台。两道门禁：采样器锁定期间直接跳过，授权页也拒绝启动。
+
+### 10.2 本地预算强制（不等服务端）
+
+`/api/agent/config` 里带回 `screenMonitor.usageBudget`（游戏局数 / 动画集数上限），
+本地缓存。服务端判定「某一项已达上限」后，`AgentService` 会**在本地立即触发锁定**，
+不依赖下一条指令到达 —— 孩子断网也拦得住。
+
+### 10.3 屏幕答题解锁
+
+`QuizActivity` 优先向 `GET /api/agent/screen-quiz/next` 要一道**基于当前屏幕内容**生成的题
+（例：正在看《小猪佩奇》→ 问 `pig` 这个词）。服务端没有屏幕题、或请求失败时，
+回退到原有题库。答对即解锁并重置锁定倒计时。
+
+### 10.4 这一块明确不做的事
+
+- **不把原图给家长看**。家长端只展示 AI 的结构化结论（时间点 + 应用 + 做了什么），
+  看原图走单独的一次性签名 URL 且留操作记录。管理后台一律看不到内容，只看计数。
+- **没有 AI key 时不编造结论**。`provider` 字段会如实返回 `disabled`（整包跳过，
+  `status: 'skipped'`）或 `heuristic`（纯本地规则：只能从包名和时间推断，
+  **明确不是 AI**，也**判断不了「结算画面是否出现」「这一局是否打完」**）。
+- **不做跨账号聚合**，不用于营销。

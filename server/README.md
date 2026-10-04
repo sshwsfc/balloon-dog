@@ -351,6 +351,66 @@ npm run dev              # 家长端与后台同一个 dev server
 
 ---
 
+### 屏幕行为洞察 `/api/insights`、`/api/alerts`、`/api/screen-monitor`、`/api/usage-budgets`、`/api/usage-summary`
+
+家长端接口，全部走 `resolveDevice` 归属校验，只看得到自己孩子。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/insights` | 洞察时间线（分页），每条含 `provider` / `summary` / `activities` / `frameCount` |
+| GET | `/api/insights/:insightId` | 单条详情 |
+| POST | `/api/insights/:insightId/reanalyze` | 用当前 provider 重跑一次（换了模型 key 之后用得上） |
+| GET | `/api/alerts` | 异常提醒列表（未成年内容 / 疑似被骗 / 情绪问题 / 游戏沉迷 / 高额消费） |
+| POST | `/api/alerts/read-all` | 全部标为已读 |
+| POST | `/api/alerts/:alertId/read` | 单条标为已读 |
+| GET | `/api/screen-monitor` | 截屏与 AI 设置（`captureEnabled` / 间隔 / 每包帧数 / 分析模式 / 异常项开关） |
+| PUT | `/api/screen-monitor` | 更新上述设置，同时下发到设备 |
+| GET | `/api/usage-budgets` | 用量预算列表（游戏局数 / 动画集数） |
+| PUT | `/api/usage-budgets` | 新增或更新一条预算 |
+| DELETE | `/api/usage-budgets/:budgetId` | 删除预算 |
+| GET | `/api/usage-summary` | 今日已玩局数 / 已看集数 / 用量明细 |
+
+### 模式切换 / 护眼 / 功能管控 `/api/device-mode`、`/api/study-slots`、`/api/mode-apps`、`/api/device-apps`、`/api/eye-care`、`/api/app-plugins`、`/api/device-events`
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET/PUT | `/api/device-mode` | 学习模式 / 普通模式：手动指定或按 0–23 时 × 一周七天的时段自动切换；返回服务端算出的 `effectiveMode` 与 `allDayStudyWarning` |
+| GET/PUT | `/api/study-slots` | 时段格子整表读取 / 批量替换（最多 168 格） |
+| GET/POST/DELETE | `/api/mode-apps` | 学习模式应用白名单（`study` / `normal` 两组） |
+| GET | `/api/device-apps` | 设备已安装应用（`q` 搜索、`includeSystem` 是否含系统应用） |
+| POST | `/api/device-apps/refresh` | 让设备重新上报清单（走指令队列，非即时） |
+| GET/PUT | `/api/eye-care` | 护眼：连续用眼提醒、强制休息、夜间时段、亮度上限 |
+| GET/PUT | `/api/app-plugins` | 按应用聚合的功能清单与逐项开关 |
+| GET | `/api/device-events` | 「最新动态」事件流（分页、可按类型筛选） |
+
+**模式求值实现了两遍**：服务端 `mode.service.ts` 的 `evaluateMode` 用于家长端展示，
+Android 的 `StudyModeEngine` 用于本地强制执行（断网也要生效）。
+两边由 `npm run android:crosstest` 逐点比对，**不许漂移** —— 否则会出现
+「家长端显示普通模式、孩子手机却在学习模式」这种最难排查的错位。
+
+**插件目录是代码里的版本化产品知识**（`app.plugins.catalog.ts`），不是表数据：
+微信改一次版文案就可能变，匹配关键词要跟着调，家长既没能力也不该维护它。
+表里只存「家长把它开成了什么」。设备端**不需要**目录副本 —— 规则（含匹配关键词）
+随配置一起下发并落盘，断网照样生效。
+
+> ⚠️ `includeSystem` 这类查询布尔值**不能用 `z.coerce.boolean()`**：
+> 它走 JS 的 `Boolean(value)`，而 `Boolean("false") === true`，
+> 于是 `?includeSystem=false` 的含义正好相反。见 `mode.dto.ts` 里的 `queryBoolean`。
+
+### AI 分析设计
+
+- **可插拔 provider**：任何兼容 OpenAI `/v1/chat/completions` 的视觉模型都能用
+  （`AI_BASE_URL` + `AI_API_KEY` + `AI_VISION_MODEL`）。
+- **没有 key 就不编造结论**。`AI_ENABLED=false` 或 `AI_API_KEY` 为空时，批次状态为
+  `skipped`、`provider` 为 `disabled`，家长端明确显示「未配置 AI」。
+- **启发式降级**（`AI_HEURISTIC_FALLBACK=true`）会给出 `provider: 'heuristic'` 的结果，
+  只依据包名与时间推断，界面**必须标明它不是 AI**。它判断不了「结算画面是否出现」
+  「这一集是否看完」，所以用量统计在启发式模式下不计入。
+- 模型输出经 zod 校验（`insightOutputSchema`），畸形 JSON 走宽松解析后再校验，失败即降级。
+- 帧图片按 `AI_MAX_FRAMES_PER_BATCH` 抽取后再发给模型，不会把整包 10 张原样发过去。
+
+---
+
 ## 设备端 Agent 协议
 
 设备端需实现以下接口（全部要求 `Authorization: Bearer <deviceToken>`，`/register` 除外）。
@@ -377,6 +437,9 @@ npm run agent:example        # 注册一台模拟设备并打印绑定码
 | POST | `/api/agent/media` | 上传媒体（`multipart/form-data`：`file`、`kind`、可选 `commandId`） |
 | GET | `/api/agent/quiz/question` | 取题（需该设备已开启答题解锁） |
 | POST | `/api/agent/quiz/answer` | 交卷；答对后自动延长可用时长（锁屏状态会顺带解锁） |
+| POST | `/api/agent/screen-batches` | 上传一包截屏（`multipart/form-data` 的 `file` 字段是 zip：`frames/*.jpg` + `manifest.json`）。服务端解包、按配额清理旧帧、落库并**同步**跑 AI 分析，返回 `{ batch, insight, alerts, budget }` |
+| GET | `/api/agent/screen-quiz/next` | 取一道基于当前屏幕内容的题（没配置 AI 时返回 `question: null`，设备端回退题库） |
+| POST | `/api/agent/screen-quiz/answer` | 交卷；答对即解锁并重置锁定倒计时 |
 
 ### 指令类型
 
@@ -391,6 +454,10 @@ npm run agent:example        # 注册一台模拟设备并打印绑定码
 | `start_audio` / `stop_audio` | `{ recordingId }` | `remoteRecord` |
 | `fetch_location` | — | — |
 | `sync_config` | — | — |
+
+> `/api/agent/config` 额外返回 `screenMonitor` 块：是否开启截屏、间隔、每包帧数、
+> 分析模式，以及 `usageBudget`（游戏局数 / 动画集数上限）。设备端据此**本地**执行，
+> 超限时不等指令直接锁定。
 
 > 未开启对应功能就下发采集类指令，服务端返回 400 —— 避免「家长以为在录，其实没录」。
 
@@ -417,6 +484,18 @@ npm run lint             # ESLint
 npm run build            # 编译到 dist/
 npm run clean:test-data  # 清理冒烟测试留下的临时账号/设备（先预演，加 --apply 才删）
 ```
+
+屏幕洞察与 AI 分析另有两条脚本（在仓库根目录跑）：
+
+```bash
+npm run server:e2e:insights   # 设备端上传 → 入库 → 家长端可见 → 预算/答题/清理，28 项
+npm run server:mock:ai        # 起一个假的 OpenAI 兼容视觉服务（默认 :4100）
+MOCK_AI_SCENARIO=game npm run server:e2e:ai   # 对着假服务跑 AI 全链路，28 项
+```
+
+`AI_BASE_URL=http://localhost:4100/v1 AI_API_KEY=mock AI_VISION_MODEL=mock-vision` 指向假服务，
+用 `MOCK_AI_SCENARIO` 切换「游戏结算 / 动画 / 可疑聊天 / 情绪」等场景，用来验证
+结构化输出、异常提取、局数集数统计与屏幕出题，**不需要真的 AI key**。
 
 `smoke-test.mjs` 覆盖范围：
 
@@ -465,6 +544,11 @@ npm run seed                         # 重新灌入干净的演示数据
 | `ADMIN_LOGIN_RATE_LIMIT_MAX` | 后台登录**失败**尝试的每分钟上限（默认 10，成功不计入） |
 | `COMMAND_TTL_SECONDS` | 指令未被执行自动过期的时长（默认 300s） |
 | `MEDIA_URL_TTL_SECONDS` | 媒体签名 URL 有效期（默认 600s） |
+| `AI_ENABLED` / `AI_BASE_URL` / `AI_API_KEY` | 视觉模型服务。**缺 key 即视为未配置**，批次标 `skipped`，绝不伪造结果 |
+| `AI_VISION_MODEL` / `AI_TEXT_MODEL` | 视觉与文本模型名（出题用文本模型） |
+| `AI_TIMEOUT_MS` / `AI_MAX_FRAMES_PER_BATCH` | 单次请求超时（默认 90s）与每次送模型的帧数上限（默认 6） |
+| `AI_HEURISTIC_FALLBACK` | 无 AI 时是否用启发式兜底（默认 `true`，结果标注为非 AI） |
+| `SCREEN_BATCH_MAX_SIZE_MB` / `SCREEN_BATCH_MAX_FRAMES` | 单包大小上限（默认 8 MB）与帧数上限（默认 30），超出即拒收 |
 
 ---
 

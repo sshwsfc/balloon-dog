@@ -12,14 +12,33 @@
  *     （原实现拼接 `location.hostname:3000`，换端口/域名就废）。
  */
 import type {
+  AppPluginListResponse,
+  AppPluginUpdateItem,
+  AppPluginUpdateResult,
   AuthResponse,
   CommandDispatchResult,
   Device,
+  DeviceAppListResponse,
+  DeviceAppRefreshResult,
   DeviceCommand,
+  DeviceEventListResponse,
+  DeviceModeState,
+  DeviceModeUpdateResult,
+  DeviceModeValue,
+  EyeCareConfigPatch,
+  EyeCareGetResponse,
+  EyeCareUpdateResult,
   Features,
+  InsightDetail,
+  InsightListResponse,
+  InsightReanalyzeResult,
   LocationPoint,
   LockPolicy,
   MediaAsset,
+  ModeAppAddResult,
+  ModeAppGroup,
+  ModeAppListResponse,
+  ModeSlot,
   QuizAnswerResult,
   QuizConfig,
   QuizQuestion,
@@ -29,6 +48,19 @@ import type {
   ScheduleListResponse,
   ScheduleRule,
   ScheduleRuleInput,
+  ScreenMonitorConfig,
+  ScreenMonitorConfigPatch,
+  ScreenMonitorUpdateResult,
+  StudySlotListResponse,
+  StudySlotReplaceResult,
+  UsageAlertListResponse,
+  UsageAlertReadAllResult,
+  UsageAlertReadResult,
+  UsageAlertType,
+  UsageBudgetInput,
+  UsageBudgetListResponse,
+  UsageBudgetUpsertResult,
+  UsageSummary,
   User,
 } from '@/types'
 
@@ -584,6 +616,257 @@ export const mediaApi = {
 }
 
 // ============================================================
+// 屏幕行为 AI 洞察
+// ============================================================
+
+/**
+ * 洞察时间线（一个批次 = 一条记录）。
+ *
+ * 注意 `isAi` / `aiNote`：后端没有配置视觉模型时会降级成「启发式推断」，
+ * 界面必须据此明确区分，不能让家长把推断当成 AI 结论。
+ */
+export const insightApi = {
+  list: (options?: {
+    deviceId?: string
+    limit?: number
+    from?: string
+    to?: string
+    onlyRisky?: boolean
+  }) =>
+    http.get<InsightListResponse>('/insights', {
+      deviceId: options?.deviceId,
+      limit: options?.limit ?? 30,
+      from: options?.from,
+      to: options?.to,
+      onlyRisky: options?.onlyRisky ?? false,
+    }),
+
+  detail: (insightId: string, deviceId?: string) =>
+    http.get<InsightDetail>(`/insights/${insightId}`, deviceId ? { deviceId } : undefined),
+
+  /** 换模型后补跑：清掉旧结论让分析重跑 */
+  reanalyze: (insightId: string, deviceId?: string) =>
+    http.post<InsightReanalyzeResult>(
+      `/insights/${insightId}/reanalyze`,
+      {},
+      deviceId ? { deviceId } : undefined,
+    ),
+}
+
+// ============================================================
+// 异常提醒
+// ============================================================
+
+export const alertApi = {
+  list: (options?: {
+    deviceId?: string
+    type?: UsageAlertType
+    unreadOnly?: boolean
+    limit?: number
+  }) =>
+    http.get<UsageAlertListResponse>('/alerts', {
+      deviceId: options?.deviceId,
+      type: options?.type,
+      unreadOnly: options?.unreadOnly ?? false,
+      limit: options?.limit ?? 30,
+    }),
+
+  markRead: (alertId: string, deviceId?: string) =>
+    http.post<UsageAlertReadResult>(
+      `/alerts/${alertId}/read`,
+      {},
+      deviceId ? { deviceId } : undefined,
+    ),
+
+  markAllRead: (deviceId?: string) =>
+    http.post<UsageAlertReadAllResult>(
+      '/alerts/read-all',
+      {},
+      deviceId ? { deviceId } : undefined,
+    ),
+}
+
+// ============================================================
+// 截屏与 AI 设置
+// ============================================================
+
+/**
+ * 截屏监控配置。
+ *
+ * `captureEnabled` 是最高敏感度权限（会周期性把画面送到 AI 服务），
+ * 默认关闭；更新接口只接受配置子集，返回值统一挂在 `config` 字段里。
+ */
+export const screenMonitorApi = {
+  get: (deviceId?: string) =>
+    http.get<ScreenMonitorConfig>('/screen-monitor', deviceId ? { deviceId } : undefined),
+
+  update: (patch: ScreenMonitorConfigPatch, deviceId?: string) =>
+    http.put<ScreenMonitorUpdateResult>(
+      '/screen-monitor',
+      patch,
+      deviceId ? { deviceId } : undefined,
+    ),
+}
+
+// ============================================================
+// 用量上限（玩几局 / 看几集）
+// ============================================================
+
+/** 达到上限时后端会自动下发锁屏指令，前端只负责配置与展示用量 */
+export const usageBudgetApi = {
+  list: (deviceId?: string) =>
+    http.get<UsageBudgetListResponse>('/usage-budgets', deviceId ? { deviceId } : undefined),
+
+  /** 同 (kind, appName) 已有记录则更新，没有则新建 */
+  upsert: (input: UsageBudgetInput, deviceId?: string) =>
+    http.put<UsageBudgetUpsertResult>(
+      '/usage-budgets',
+      input,
+      deviceId ? { deviceId } : undefined,
+    ),
+
+  remove: (budgetId: string, deviceId?: string) =>
+    http.del<{ success: boolean }>(
+      `/usage-budgets/${budgetId}`,
+      deviceId ? { deviceId } : undefined,
+    ),
+
+  summary: (deviceId?: string) =>
+    http.get<UsageSummary>('/usage-summary', deviceId ? { deviceId } : undefined),
+}
+
+// ============================================================
+// 模式切换（学习模式 / 普通模式）
+// ============================================================
+
+/**
+ * 设备模式配置（GET/PUT `/api/device-mode`）。
+ *
+ * `manualMode = null` 表示「跟随时段规划」，此时由 `scheduleEnabled` + 时段格子决定模式；
+ * 显式传 `'study'` / `'normal'` 是家长手动锁定模式，时段规划不参与。
+ * 求值以**孩子设备本地时钟**为准，`effectiveMode` 只是服务端按服务器时间的推算。
+ */
+export const deviceModeApi = {
+  get: (deviceId?: string) =>
+    http.get<DeviceModeState>('/device-mode', deviceId ? { deviceId } : undefined),
+
+  update: (
+    patch: { manualMode?: DeviceModeValue | null; scheduleEnabled?: boolean },
+    deviceId?: string,
+  ) =>
+    http.put<DeviceModeUpdateResult>(
+      '/device-mode',
+      patch,
+      deviceId ? { deviceId } : undefined,
+    ),
+}
+
+/**
+ * 学习模式时段格子（0–23 时 × 一周 7 天）。
+ *
+ * 更新是**整表替换**而不是逐格增删：一次请求要么全成要么全不成，
+ * 不会留下「半套规则」这种比没有规则更难排查的状态。最多 168 格。
+ */
+export const studySlotApi = {
+  get: (deviceId?: string) =>
+    http.get<StudySlotListResponse>('/study-slots', deviceId ? { deviceId } : undefined),
+
+  replace: (slots: ModeSlot[], deviceId?: string) =>
+    http.put<StudySlotReplaceResult>(
+      '/study-slots',
+      { slots },
+      deviceId ? { deviceId } : undefined,
+    ),
+}
+
+// ============================================================
+// 学习模式应用分组
+// ============================================================
+
+export const modeAppApi = {
+  list: (deviceId?: string) =>
+    http.get<ModeAppListResponse>('/mode-apps', deviceId ? { deviceId } : undefined),
+
+  add: (
+    data: { packageName: string; appName?: string; group: ModeAppGroup },
+    deviceId?: string,
+  ) =>
+    http.post<ModeAppAddResult>('/mode-apps', data, deviceId ? { deviceId } : undefined),
+
+  remove: (id: string, deviceId?: string) =>
+    http.del<{ success: boolean }>(`/mode-apps/${id}`, deviceId ? { deviceId } : undefined),
+}
+
+// ============================================================
+// 设备已安装应用
+// ============================================================
+
+export const deviceAppApi = {
+  /**
+   * `includeSystem` 只在为 true 时拼进 query。
+   * 后端的 `z.coerce.boolean()` 会把字符串 "false" 也判成 true，
+   * 所以「不包含系统应用」只能靠**不传参数**表达，不能传 false。
+   */
+  list: (options?: { deviceId?: string; q?: string; includeSystem?: boolean }) =>
+    http.get<DeviceAppListResponse>('/device-apps', {
+      deviceId: options?.deviceId,
+      q: options?.q,
+      includeSystem: options?.includeSystem ? true : undefined,
+    }),
+
+  /** 让设备重新上报应用清单（走指令队列，设备在线才会立刻生效） */
+  refresh: (deviceId?: string) =>
+    http.post<DeviceAppRefreshResult>(
+      '/device-apps/refresh',
+      {},
+      deviceId ? { deviceId } : undefined,
+    ),
+}
+
+// ============================================================
+// 护眼设置
+// ============================================================
+
+export const eyeCareApi = {
+  get: (deviceId?: string) =>
+    http.get<EyeCareGetResponse>('/eye-care', deviceId ? { deviceId } : undefined),
+
+  /** patch 里不能带 `nightEnabled`：它是后端按起止小时算出来的只读字段 */
+  update: (patch: EyeCareConfigPatch, deviceId?: string) =>
+    http.put<EyeCareUpdateResult>('/eye-care', patch, deviceId ? { deviceId } : undefined),
+}
+
+// ============================================================
+// 应用插件管控
+// ============================================================
+
+export const appPluginApi = {
+  list: (deviceId?: string) =>
+    http.get<AppPluginListResponse>('/app-plugins', deviceId ? { deviceId } : undefined),
+
+  /** 批量开关（1..200 项）；后端逐项校验插件键，未知键会整批报错而不是静默忽略 */
+  update: (items: AppPluginUpdateItem[], deviceId?: string) =>
+    http.put<AppPluginUpdateResult>(
+      '/app-plugins',
+      { items },
+      deviceId ? { deviceId } : undefined,
+    ),
+}
+
+// ============================================================
+// 设备事件流（最新动态）
+// ============================================================
+
+export const deviceEventApi = {
+  list: (options?: { deviceId?: string; page?: number; pageSize?: number }) =>
+    http.get<DeviceEventListResponse>('/device-events', {
+      deviceId: options?.deviceId,
+      page: options?.page ?? 1,
+      pageSize: options?.pageSize ?? 20,
+    }),
+}
+
+// ============================================================
 // 兼容聚合导出（既有页面用 `api.xxx` 的写法可继续使用）
 // ============================================================
 
@@ -666,4 +949,52 @@ export const api = {
   createSchedule: scheduleApi.create,
   updateSchedule: scheduleApi.update,
   deleteSchedule: scheduleApi.remove,
+
+  // 屏幕行为 AI 洞察
+  getInsights: insightApi.list,
+  getInsight: insightApi.detail,
+  reanalyzeInsight: insightApi.reanalyze,
+
+  // 异常提醒
+  getAlerts: alertApi.list,
+  markAlertRead: alertApi.markRead,
+  markAllAlertsRead: alertApi.markAllRead,
+
+  // 截屏与 AI 设置
+  getScreenMonitorConfig: screenMonitorApi.get,
+  updateScreenMonitorConfig: screenMonitorApi.update,
+
+  // 用量上限
+  getUsageBudgets: usageBudgetApi.list,
+  upsertUsageBudget: usageBudgetApi.upsert,
+  deleteUsageBudget: usageBudgetApi.remove,
+  getUsageSummary: usageBudgetApi.summary,
+
+  // 模式切换（学习模式 / 普通模式）
+  getDeviceMode: deviceModeApi.get,
+  updateDeviceMode: deviceModeApi.update,
+
+  // 学习模式时段格子
+  getStudySlots: studySlotApi.get,
+  replaceStudySlots: studySlotApi.replace,
+
+  // 学习模式应用分组
+  getModeApps: modeAppApi.list,
+  addModeApp: modeAppApi.add,
+  deleteModeApp: modeAppApi.remove,
+
+  // 设备已安装应用
+  getDeviceApps: deviceAppApi.list,
+  refreshDeviceApps: deviceAppApi.refresh,
+
+  // 护眼设置
+  getEyeCare: eyeCareApi.get,
+  updateEyeCare: eyeCareApi.update,
+
+  // 应用插件管控
+  getAppPlugins: appPluginApi.list,
+  updateAppPlugins: appPluginApi.update,
+
+  // 设备事件流
+  getDeviceEvents: deviceEventApi.list,
 }

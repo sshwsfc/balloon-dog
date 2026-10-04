@@ -40,11 +40,30 @@ public class DeviceConfig {
     public final boolean scheduleEnabled;
     /** 已启用的时间表规则；服务端只下发 enabled 的那些 */
     public final List<ScheduleRule> schedule;
+
+    // ---- 屏幕行为洞察 ----
+    public final boolean captureEnabled;
+    public final int captureIntervalSeconds;
+    public final int framesPerBatch;
+    public final boolean quizFromScreen;
+    /** 今日局数额度（由服务端的 AI 分析计数） */
+    public final boolean gameRoundsLimited;
+    public final int gameRoundsLimit;
+    public final int gameRoundsUsed;
+    public final boolean videoEpisodesLimited;
+    public final int videoEpisodesLimit;
+    public final int videoEpisodesUsed;
     public final boolean quizEnabled;
     public final String quizType;
     public final String quizGrade;
     public final int quizRewardMinutes;
     public final boolean quizRandomMode;
+    /** 模式切换（学习 / 普通）。 */
+    public final ModeConfig mode;
+    /** 护眼设置。 */
+    public final EyeCareConfig eyeCare;
+    /** 应用插件管控规则（只含被家长改动过的项）。 */
+    public final List<PluginRule> appPlugins;
     /** 原始 JSON，便于在界面上原样展示或排查。 */
     public final String rawJson;
 
@@ -56,6 +75,9 @@ public class DeviceConfig {
         message = json.optString("message", null);
         locked = json.optBoolean("locked", false);
         tempUnlockUntil = JsonUtils.parseIsoMillis(json.optString("tempUnlockUntil", null));
+        mode = ModeConfig.parse(json.optJSONObject("mode"));
+        eyeCare = EyeCareConfig.parse(json.optJSONObject("eyeCare"));
+        appPlugins = PluginRule.parseAll(json.optJSONArray("appPlugins"));
 
         List<String> featureList = new ArrayList<>();
         JSONArray featureArray = json.optJSONArray("features");
@@ -116,6 +138,36 @@ public class DeviceConfig {
             countdownSeconds = 30;
             scheduleEnabled = false;
             schedule = Collections.emptyList();
+        }
+
+        JSONObject screenMonitor = json.optJSONObject("screenMonitor");
+        if (screenMonitor != null) {
+            captureEnabled = screenMonitor.optBoolean("captureEnabled", false);
+            captureIntervalSeconds = screenMonitor.optInt("captureIntervalSeconds", 30);
+            framesPerBatch = screenMonitor.optInt("framesPerBatch", 10);
+            quizFromScreen = screenMonitor.optBoolean("quizFromScreen", false);
+
+            JSONObject usageBudget = screenMonitor.optJSONObject("usageBudget");
+            JSONObject gameRounds = usageBudget == null ? null : usageBudget.optJSONObject("gameRounds");
+            JSONObject videoEpisodes = usageBudget == null ? null : usageBudget.optJSONObject("videoEpisodes");
+            gameRoundsLimited = gameRounds != null && gameRounds.optBoolean("enabled", false);
+            gameRoundsLimit = gameRounds == null ? 0 : gameRounds.optInt("dailyLimit", 0);
+            gameRoundsUsed = gameRounds == null ? 0 : gameRounds.optInt("usedToday", 0);
+            videoEpisodesLimited = videoEpisodes != null && videoEpisodes.optBoolean("enabled", false);
+            videoEpisodesLimit = videoEpisodes == null ? 0 : videoEpisodes.optInt("dailyLimit", 0);
+            videoEpisodesUsed = videoEpisodes == null ? 0 : videoEpisodes.optInt("usedToday", 0);
+        } else {
+            // 旧版后端没有这个字段：全部按「未开启」处理，功能自然降级
+            captureEnabled = false;
+            captureIntervalSeconds = 30;
+            framesPerBatch = 10;
+            quizFromScreen = false;
+            gameRoundsLimited = false;
+            gameRoundsLimit = 0;
+            gameRoundsUsed = 0;
+            videoEpisodesLimited = false;
+            videoEpisodesLimit = 0;
+            videoEpisodesUsed = 0;
         }
 
         JSONObject quiz = json.optJSONObject("quiz");
@@ -192,6 +244,10 @@ public class DeviceConfig {
         if (!blockedUrls.isEmpty()) sb.append(" · 拦截 ").append(blockedUrls.size()).append(" 个网址");
         sb.append(" · 答题").append(quizEnabled ? "已开" : "关闭");
         if (scheduleEnabled) sb.append(" · 作息 ").append(schedule.size()).append(" 条");
+        if ("study".equals(mode.manualMode)) sb.append(" · 学习模式");
+        else if (mode.scheduleEnabled) sb.append(" · 按时段").append(mode.slots.size()).append(" 格");
+        if (eyeCare.enabled) sb.append(" · 护眼");
+        if (!appPlugins.isEmpty()) sb.append(" · 管控 ").append(appPlugins.size()).append(" 项");
         return sb.toString();
     }
 }

@@ -21,6 +21,22 @@ import { quizRoutes } from './features/quiz/quiz.controller';
 import { locationRoutes, safeZoneRoutes } from './features/locations/locations.controller';
 import { mediaRoutes } from './features/media/media.routes';
 import { lockPolicyRoutes, scheduleRoutes } from './features/schedule/schedule.controller';
+import {
+  alertRoutes,
+  insightRoutes,
+  screenConfigRoutes,
+  usageBudgetRoutes,
+  usageSummaryRoutes,
+} from './features/insights/insights.controller';
+import {
+  deviceModeRoutes,
+  studySlotRoutes,
+  modeAppRoutes,
+  deviceAppRoutes,
+  eyeCareRoutes,
+  appPluginRoutes,
+  deviceEventRoutes,
+} from './features/mode/mode.controller';
 
 /**
  * Express 应用工厂。中间件顺序严格遵循：
@@ -100,6 +116,18 @@ export function createApp(): Express {
   app.use('/api/media', mediaRoutes);
   app.use('/api/lock-policy', lockPolicyRoutes);
   app.use('/api/schedules', scheduleRoutes);
+  app.use('/api/insights', insightRoutes);
+  app.use('/api/alerts', alertRoutes);
+  app.use('/api/screen-monitor', screenConfigRoutes);
+  app.use('/api/usage-budgets', usageBudgetRoutes);
+  app.use('/api/usage-summary', usageSummaryRoutes);
+  app.use('/api/device-mode', deviceModeRoutes);
+  app.use('/api/study-slots', studySlotRoutes);
+  app.use('/api/mode-apps', modeAppRoutes);
+  app.use('/api/device-apps', deviceAppRoutes);
+  app.use('/api/eye-care', eyeCareRoutes);
+  app.use('/api/app-plugins', appPluginRoutes);
+  app.use('/api/device-events', deviceEventRoutes);
   app.use('/api/agent', agentRoutes);
   app.use('/api/admin', adminRoutes);
 

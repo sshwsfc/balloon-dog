@@ -379,6 +379,18 @@ export const devicesService = {
     return dispatchCommand(device, userId, type, payload, {});
   },
 
+  /**
+   * 让设备重新上报已安装应用清单。
+   *
+   * 这是**唯一**一条「读类」指令：它不改变设备状态，只是让设备把清单发上来，
+   * 好让家长端的「选择应用 / 功能管控」看到最新安装情况。
+   * 仍然走指令队列而不是直接返回成功 —— 因为清单只有设备自己知道，
+   * 服务端凭空回一个「已刷新」就是撒谎。
+   */
+  async requestAppSync(userId: number, device: ChildDevice) {
+    return dispatchCommand(device, userId, 'sync_apps', {}, {});
+  },
+
   async stopCapture(
     userId: number,
     device: ChildDevice,

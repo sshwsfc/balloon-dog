@@ -101,7 +101,10 @@ function resolveSerial() {
  *   2. Window #N Window{... <title> ...}      —— 活跃窗口列表里的条目。
  */
 function windowAttached(title) {
-  const out = adb('shell', 'dumpsys', 'window', 'windows').text || ''
+  // 注意是 .out 不是 .text —— adb() 返回的是 { code, out, err }。
+  // 写成 .text 会永远拿到 undefined → 这个判定恒为 false，
+  // 「倒计时悬浮窗弹出了没有」这条断言就变成了永远失败的摆设。
+  const out = adb('shell', 'dumpsys', 'window', 'windows').out || ''
   const focused = new RegExp(`mCurrentFocus=Window\\{[^}]*${title}[^}]*\\}`).test(out)
   const active = new RegExp(`Window #[0-9]+ Window\\{[^}]*${title}[^}]*\\}`).test(out)
   return focused || active
@@ -128,27 +131,73 @@ function shell(cmd) {
 }
 
 /**
+ * 确保 adbd 处于 root。
+ *
+ * <p>必须每次要用之前都确认：**设备一重启，adbd 就退回非 root**。
+ * 不确认的话 `kill -9 <pid>` 会以「Operation not permitted」静默失败
+ * （adb() 不看退出码），于是「进程被杀后自动恢复」这条断言永远等不到新进程 ——
+ * 看起来像保活失效，其实是测试根本没杀掉进程。这个坑真实踩过一整轮。
+ */
+async function ensureRoot() {
+  const before = adb('shell', 'id').out || ''
+  if (before.includes('uid=0')) return true
+  adb('root')
+  adb('wait-for-device')
+  await sleep(2000)
+  const after = adb('shell', 'id').out || ''
+  return after.includes('uid=0')
+}
+
+/**
+ * 杀掉应用进程，并确认真的杀掉了。
+ *
+ * @return true 表示进程确实没了（或杀掉后立刻以新 PID 回来）
+ */
+async function killAgentProcess() {
+  const target = (adb('shell', 'pidof', PKG).out || '').trim()
+  if (!target) return true
+  adb('shell', 'kill', '-9', target)
+  await sleep(1500)
+  const still = (adb('shell', 'pidof', PKG).out || '').trim()
+  return still !== target
+}
+
+/**
+ * 以 root 身份读一个文件；拿不到 root 时返回 null（调用方据此跳过而不是误判失败）。
+ *
+ * <p>设备加密存储（{@code /data/user_de/0/...}）不在 run-as 的作用范围内，
+ * 只有 root 读得到 —— 安全阀的证据恰好在那里。
+ */
+function rootCat(path) {
+  adb('root')
+  const out = adb('shell', 'cat', path)
+  if (out.code !== 0 || /Permission denied|No such file/.test(out.err || '')) return null
+  return out.out || ''
+}
+
+/**
  * dump 一次当前界面（uiautomator），返回 XML 文本；失败时返回空串。
  *
  * 关键点：每次都先删掉上一次的 dump 文件。uiautomator 在界面不空闲时会 dump 失败，
  * 如果直接 cat 就会读到<b>上一次的残留文件</b>，让断言基于过期界面得出结论 ——
  * 这是自动化测试里最隐蔽的一类假阳性。
  */
-function dumpUi() {
+async function dumpUi() {
   // 必须先唤醒屏幕：本应用锁定时会调用 lockNow()（关屏），
   // 而屏幕处于 Asleep 时 uiautomator 拿不到 root node，
   // dump 会静默失败 —— 所有基于界面文本的断言就会莫名其妙地失败。
   adb('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
-  for (let attempt = 0; attempt < 3; attempt++) {
+  adb('shell', 'wm', 'dismiss-keyguard')
+  // 重试要真的等：本应用有一个 2 秒一次的界面刷新 ticker，
+  // 窗口因此经常进不了 uiautomator 要求的 idle 状态，dump 会失败或拿到残缺的层级。
+  // （原来的实现用空循环「等」700 毫秒 —— 那是个忙等，一秒都没等，
+  //   于是这类断言会随机失败，看起来像产品问题，其实是测试夹具的问题。）
+  for (let attempt = 0; attempt < 5; attempt++) {
     adb('shell', 'rm', '-f', '/sdcard/balloon_ui.xml')
     adb('shell', 'uiautomator', 'dump', '/sdcard/balloon_ui.xml')
     const out = adb('shell', 'cat', '/sdcard/balloon_ui.xml').out || ''
     if (out.includes('<hierarchy')) return out
-    const waitMs = 700
-    const end = Date.now() + waitMs
-    while (Date.now() < end) {
-      // 界面可能正在动画，稍等再试
-    }
+    await sleep(1500)
   }
   return ''
 }
@@ -162,16 +211,53 @@ function dumpUi() {
  * 于是所有基于界面文本的断言都会莫名其妙地失败。所以每轮 UI 操作前先清一次。
  */
 async function clearSystemDialogs() {
+  // 通知栏也要收起来：联调过程中会反复测试「锁定期间能不能下拉通知栏」，
+  // 一旦有一轮把通知栏留在展开状态，焦点就落在 NotificationShade 上，
+  // 后面所有界面断言都会看到一个空界面（实测踩过，现象极像产品起不来）。
+  adb('shell', 'cmd', 'statusbar', 'collapse')
+  await sleep(400)
+
+  // 屏幕采集授权框（systemui 的 MediaProjectionPermissionActivity）是最麻烦的一个：
+  // 它是系统界面，不清掉会一直盖在最上层，**而且能跨应用数据清空活到下一轮联调**。
+  // 症状是「主界面已渲染」这类断言稳定失败，但手动看界面一切正常 —— 非常误导人。
+  // 所以这里先看顶层活动，确认是系统弹框才按返回，按到它消失为止。
+  const systemDialog = () => {
+    const out = adb('shell', 'dumpsys', 'activity', 'activities').out || ''
+    const top = out.split('\n').find((l) => l.includes('topResumedActivity')) || ''
+    // 也包括本应用自己的「屏幕共享授权页」：它是个一次性的中转页，
+    // 正常流程会自己关掉，但被中断时会留在最前面挡住主界面。
+    return /systemui|permissioncontroller|MediaProjection|android\.packageinstaller|ProjectionConsentActivity/i.test(top)
+  }
+  for (let i = 0; i < 5; i++) {
+    if (!systemDialog()) break
+    adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
+    await sleep(900)
+  }
+  // 兜底：还有些系统弹框不吃返回键，再用两次盲按
   for (let i = 0; i < 2; i++) {
     adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
     await sleep(600)
   }
+  // 某些弹框被关掉后会留下一个空白的 recents，回桌面再继续更稳
+  adb('shell', 'am', 'start', '-a', 'android.intent.action.MAIN',
+    '-c', 'android.intent.category.HOME')
+  await sleep(800)
 }
 
 /** 统计一段 shell 输出里的非空行数（避免 `grep -c` 计数为 0 时退出码非 0） */
 function countLines(cmd) {
   const out = adb('shell', cmd).out || ''
   return out.split('\n').filter((line) => line.trim().length > 0).length
+}
+
+/**
+ * 列出 dump 里出现的所有文本。
+ *
+ * <p>界面断言失败时把当时的屏幕内容打进失败信息 —— 否则只能看到「没找到某段文字」，
+ * 完全不知道那一刻屏幕上到底是什么，排查全靠猜。
+ */
+function visibleTexts(xml) {
+  return Array.from(new Set((xml.match(/text="[^"]+"/g) || []).map((t) => t.slice(6, -1))))
 }
 
 /** 在界面里按文本找一个节点的中心坐标；找不到返回 null */
@@ -194,7 +280,7 @@ function findNodeCenter(xml, text) {
  */
 async function tapByText(text, maxScrolls = 4) {
   for (let i = 0; i <= maxScrolls; i++) {
-    const center = findNodeCenter(dumpUi(), text)
+    const center = findNodeCenter(await dumpUi(), text)
     if (center) {
       adb('shell', 'input', 'tap', String(center.x), String(center.y))
       return true
@@ -206,8 +292,8 @@ async function tapByText(text, maxScrolls = 4) {
 }
 
 /** 当前界面上是否出现了某段文本 */
-function uiHasText(text) {
-  return dumpUi().includes(`text="${text}"`)
+async function uiHasText(text) {
+  return (await dumpUi()).includes(`text="${text}"`)
 }
 
 /**
@@ -215,7 +301,7 @@ function uiHasText(text) {
  * 系统弹框不属于本应用的窗口，但 uiautomator dump 会把它一起 dump 出来。
  */
 async function tapSystemConsent() {
-  const ui = dumpUi()
+  const ui = await dumpUi()
   // 系统弹框的按钮文案跟随系统语言：中文机是「立即开始」，英文机是「Start now」。
   // 这里两种都认，否则在 en-US 的测试机上会一直等不到点击而超时。
   const labels = [
@@ -426,6 +512,11 @@ async function main() {
   check(booted, '系统已完成启动')
   if (!booted) process.exit(1)
 
+  // 先清掉本机遗留的设备记录再开跑：遗留行可能停在「已绑定 + 已锁定」，
+  // 而重装后的 Agent 会重新注册并认出同一台设备 —— 那就会一开机就是锁定页。
+  const leftovers = await purgeLeftoverDevices(deviceModel())
+  if (leftovers > 0) console.log(`  已清理 ${leftovers} 台上一轮遗留的模拟器设备`)
+
   step('2. 安装 APK 并清空应用数据')
   adb('install', '-r', '-g', APK)
   const installed = shell(`pm list packages ${PKG}`).includes(PKG)
@@ -443,15 +534,71 @@ async function main() {
     adb('wait-for-device')
     await sleep(1500)
   }
+  // 必须先停掉无障碍服务再杀进程：否则系统会在 1 秒内把进程重新拉起来，
+  // 抢在 rm 之前把 shared_prefs 又写回去 —— 上一轮残留的「已锁定」状态就清不掉，
+  // 新的一轮会从「开机就是锁定页」开始，所有界面断言跟着作废（实测踩过）。
+  const watchdogWasOn = shell('settings get secure enabled_accessibility_services').includes(PKG)
+  if (watchdogWasOn) {
+    adb('shell', 'settings', 'put', 'secure', 'enabled_accessibility_services', 'null')
+    await sleep(1500)
+  }
+
   const pid = (adb('shell', 'pidof', PKG).out || '').trim()
   if (pid) adb('shell', 'kill', '-9', pid)
   await sleep(2000)
   if (rooted) {
-    adb('shell', 'rm', '-rf', `/data/data/${PKG}/shared_prefs`, `/data/data/${PKG}/cache`)
+    adb('shell', 'rm', '-rf', `/data/data/${PKG}/shared_prefs`, `/data/data/${PKG}/cache`,
+      `/data/user_de/0/${PKG}/shared_prefs`)
   } else {
     adb('shell', 'run-as', PKG, 'rm', '-rf', 'shared_prefs', 'cache')
   }
   check(true, `应用数据已清空（root=${rooted ? '是' : '否'}）`)
+
+  // 上一轮可能留下「Kiosk 锁定」。它是系统持有的状态，不随进程消失；
+  // 残留的话后续所有界面断言都看不到应用本体（实测会把整轮测试变成无意义的失败）。
+  // 除了残留 Kiosk，还有一种更隐蔽的脏状态：SystemUI 卡住（焦点一直停在通知栏上、
+  // 且没有任何 Activity 处于 resumed）。实测它由上一轮的截屏采集联调留下，
+  // 而且 `cmd statusbar collapse`、返回键、上滑、HOME 都推不动它 ——
+  // 症状就是下一轮所有界面断言看到一个「空界面」，极像应用起不来。
+  const systemUiStuck = () => {
+    const focus = (adb('shell', 'dumpsys', 'window').out || '')
+    const acts = (adb('shell', 'dumpsys', 'activity', 'activities').out || '')
+    const shadeFocused = /mCurrentFocus=Window\{[^}]*NotificationShade/.test(focus)
+    const noResumed = !/topResumedActivity=ActivityRecord/.test(acts)
+    return shadeFocused && noResumed
+  }
+
+  let kioskGone = await waitFor(async () => lockTaskState() === 'NONE' && '已退出 Kiosk',
+    { timeoutMs: 30_000, intervalMs: 3000 })
+  if (systemUiStuck()) {
+    ok('检测到 SystemUI 卡死（焦点停在通知栏且无前台界面），重启一次以取得确定起点')
+    kioskGone = { ok: false }
+  }
+  if (!kioskGone.ok) {
+    // 进程都杀了还退不掉，只剩重启这一条路（Kiosk 状态由系统持久化）。
+    // 开机后 Agent 会去重新注册，而我们上面已经清掉了遗留设备记录，
+    // 于是它注册成一台「未绑定」设备，策略即为不锁 —— 正好是我们想要的起点。
+    adb('shell', 'reboot')
+    adb('wait-for-device')
+    await waitFor(async () => {
+      const b = (adb('shell', 'getprop', 'sys.boot_completed').out || '').trim()
+      return b === '1' && '已重新开机'
+    }, { timeoutMs: 300_000, intervalMs: 5000 })
+    await sleep(8000)
+    adb('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
+    adb('shell', 'wm', 'dismiss-keyguard')
+    await ensureRoot()   // 重启后 adbd 退回非 root，后面还要靠它杀进程/清数据
+    kioskGone = await waitFor(async () => lockTaskState() === 'NONE' && '已退出 Kiosk',
+      { timeoutMs: 120_000, intervalMs: 4000 })
+  }
+  check(kioskGone.ok, '起点无残留的 Kiosk 锁定（测试从确定状态开始）',
+    kioskGone.ok ? '' : `仍为 ${lockTaskState()}`)
+
+  // 重启会让看门狗设置失效，这里统一恢复
+  adb('shell', 'settings', 'put', 'secure', 'enabled_accessibility_services',
+    `${PKG}/${PKG}.service.LockWatchdogService`)
+  adb('shell', 'settings', 'put', 'secure', 'accessibility_enabled', '1')
+  await sleep(1500)
 
   step('3. 授予运行时权限')
   const permissions = [
@@ -469,6 +616,13 @@ async function main() {
   // 屏幕共享授权框在自动化里点不了，这里显式允许「后台弹出界面」相关的特殊权限
   adb('shell', 'appops', 'set', PKG, 'SYSTEM_ALERT_WINDOW', 'allow')
 
+  // 重新打开看门狗：上面为了清数据把它关了。
+  // 它既是锁定复核的执行者，也是给每张截图标注前台应用的来源。
+  adb('shell', 'settings', 'put', 'secure', 'enabled_accessibility_services',
+    `${PKG}/${PKG}.service.LockWatchdogService`)
+  adb('shell', 'settings', 'put', 'secure', 'accessibility_enabled', '1')
+  await sleep(1500)
+
   step('4. 通过界面启动守护服务')
   adb('logcat', '-c')
   await clearSystemDialogs()
@@ -477,9 +631,15 @@ async function main() {
   adbOrThrow('shell', 'am', 'start', '-n', `${PKG}/.ui.MainActivity`)
   await sleep(3500)
 
-  const mainUi = dumpUi()
-  check(mainUi.includes('text="运行状态"'), '主界面已渲染')
+  // 界面断言必须「轮询等它出现」，不能 dump 一次就下结论：
+  // dumpUi() 只要拿到 <hierarchy> 就返回，而冷启动/刚清完数据时那个层级可能是空的。
+  // 这一条曾经随机失败，看起来像应用起不来，其实只是慢了一两秒。
+  const mainRendered = await waitFor(async () =>
+    (await dumpUi()).includes('text="运行状态"') && '主界面已渲染',
+  { timeoutMs: 60_000, intervalMs: 2000 })
+  check(mainRendered.ok, '主界面已渲染')
 
+  const mainUi = await dumpUi()
   const alreadyRunning = mainUi.includes('text="停止守护"') || mainUi.includes('text="守护运行中"')
   if (alreadyRunning) {
     ok('守护服务原本就在运行')
@@ -724,10 +884,13 @@ async function main() {
 
   adbOrThrow('shell', 'am', 'start', '-n', `${PKG}/.ui.MainActivity`)
   await sleep(6000)
-  const healedUi = dumpUi()
-  check(healedUi.includes('text="守护运行中"'),
+  const healed = await waitFor(async () =>
+    (await dumpUi()).includes('text="守护运行中"') && '守护运行中',
+  { timeoutMs: 60_000, intervalMs: 2500 })
+  const healedUi = await dumpUi()
+  check(healed.ok,
     '重新打开界面后状态显示为「守护运行中」（界面与真实状态一致）',
-    healedUi ? '' : '界面 dump 失败')
+    healed.ok ? '' : (healedUi ? visibleTexts(healedUi).join(' / ').slice(0, 200) : '界面 dump 失败'))
   await sleep(4000)
 
   let location = null
@@ -860,7 +1023,7 @@ async function main() {
 
   // 锁定页上应当同时具备强度说明（答题入口的可见性由家长端开关决定）。
   // 注意：锁定动作会 lockNow() 关屏，dumpUi 内部会先唤醒。
-  const lockUi = dumpUi()
+  const lockUi = await dumpUi()
   check(lockUi.includes('设备已被家长锁定'), '锁定页已显示在孩子设备上')
   check(lockUi.includes('Kiosk 锁定：无法退出'), '锁定页如实标注了当前锁定强度')
 
@@ -916,10 +1079,67 @@ async function main() {
     const pwLocked = await waitFor(async () => {
       const log = agentLog()
       if (log.includes('已把系统锁屏密码改为随机值')) return '已改写系统锁屏密码'
-      return dumpUi().includes('最高强度锁定') && '锁定页显示最高强度'
+      return (await dumpUi()).includes('最高强度锁定') && '锁定页显示最高强度'
     }, { timeoutMs: 120_000, intervalMs: 3000 })
     check(pwLocked.ok, '最高强度档生效：锁定瞬间随机改写了系统锁屏密码',
       pwLocked.ok ? pwLocked.detail : agentLog().slice(-300))
+
+    // ---- 这一步是整套方案里风险最高的场景，必须真跑一次 ----
+    // 随机改写了系统锁屏密码之后重启：如果没有在「用户解锁之前」把随机密码清掉，
+    // 设备会永久卡在系统锁屏上（解锁需要随机密码，而清密码的应用又要等解锁后才能跑）。
+    // 这条曾经真的把模拟器锁死过，所以放进端到端回归里。
+    // 设备加密存储的文件在 /data/user_de/0/<包名>/shared_prefs/，
+    // run-as 只认凭据加密目录，读不到它 —— 必须 root。
+    shell('su -c "ls /data/user_de/0/' + PKG + '/shared_prefs/" >/dev/null 2>&1 || true')
+    const dePrefs = rootCat(`/data/user_de/0/${PKG}/shared_prefs/balloon_dog_agent_device_protected.xml`)
+    if (dePrefs === null) {
+      ok('跳过「随机密码写入设备加密存储」的文件核对（本机拿不到 root）')
+    } else {
+      check(dePrefs.includes('current_random_password') && dePrefs.includes('reset_token'),
+        '随机密码与重置令牌都已写入设备加密存储（解锁前即可读到，安全阀才有机会生效）',
+        dePrefs.slice(0, 200))
+    }
+
+    adb('shell', 'reboot')
+    // 重启瞬间 adb 一定会掉线（device offline），此时 shell() 会抛。
+    // 所以先老老实实等设备重新连上，再用「不抛」的方式轮询开机完成。
+    adb('wait-for-device')
+    await waitFor(async () => {
+      const b = (adb('shell', 'getprop', 'sys.boot_completed').out || '').trim()
+      return b === '1' && '已重新开机'
+    }, { timeoutMs: 300_000, intervalMs: 5000 })
+
+    // 关键断言：开机后用户必须能进系统。停在这里就说明破解死循环的修复失效了。
+    const unlockedAfterReboot = await waitFor(async () => {
+      const out = shell('dumpsys user')
+      return /State: RUNNING_UNLOCKED/.test(out) && '用户已解锁'
+    }, { timeoutMs: 180_000, intervalMs: 5000 })
+    check(unlockedAfterReboot.ok,
+      '重启后设备仍能进入系统（随机锁屏密码在解锁前已被清除）',
+      unlockedAfterReboot.ok ? unlockedAfterReboot.detail : shell('dumpsys user | grep State:'))
+    check(/检测到随机锁屏密码仍生效，开机时立即清除/.test(agentLog(400)),
+      '开机日志证明安全阀确实执行了（不是碰巧没锁屏密码）', agentLog(30).slice(-300))
+
+    // 重启会打断服务，等它自己回来再继续
+    await waitFor(async () => Boolean((adb('shell', 'pidof', PKG).out || '').trim()),
+      { timeoutMs: 120_000, intervalMs: 4000 })
+    adbOrThrow('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
+    adbOrThrow('shell', 'wm', 'dismiss-keyguard')
+    // 重启后 adbd 退回非 root：这里补回来，否则阶段 22 的 kill -9 会被系统拒绝，
+    // 「保活」断言就会以假象失败（实测踩过）。
+    await ensureRoot()
+    await sleep(3000)
+
+    // 重新锁定一次，让「随机系统密码」再次生效。
+    // 不做这一步的话：上面的安全阀已经把随机密码清掉了、锁定页也不在了，
+    // 接下来的应急解锁就无从测起（找不到「应急解锁」入口）。
+    await apiOrThrow('POST', `/device/lock?deviceId=${deviceId}`, { token, body: { locked: true } })
+    const relockedForEmergency = await waitFor(async () => {
+      const log = agentLog()
+      return log.includes('已把系统锁屏密码改为随机值') || 'relocked'
+    }, { timeoutMs: 120_000, intervalMs: 3000 })
+    check(relockedForEmergency.ok, '重启后重新锁定，随机系统密码再次生效（应急解锁的前提）')
+    await sleep(3000)
 
     // 应急解锁：不需要网络，输入本机应急密码即可恢复
     await tapByText('应急解锁')
@@ -938,8 +1158,12 @@ async function main() {
   }
 
   step('22. 保活：进程被杀后自动恢复（需求 1）')
+  // 阶段 21 里重启过设备，adbd 已退回非 root —— 不提权的话下面的 kill 会被拒绝，
+  // 断言会以「没恢复」的假象失败。
+  const rootForKill = await ensureRoot()
+  check(rootForKill, '已取得 root（否则无法真正杀死进程来验证保活）')
   const pidBefore = (adb('shell', 'pidof', PKG).out || '').trim()
-  if (pidBefore) adb('shell', 'kill', '-9', pidBefore)
+  await killAgentProcess()
   // 这里不去断言「进程一定消失」：START_STICKY 的重建可能在 2 秒内就完成，
   // 断言窗口太短必然 flaky。断言「PID 换了一个」既稳定又真正说明问题。
   const revivedByWatchdog = await waitFor(async () => {
@@ -985,16 +1209,19 @@ async function main() {
     check(cleaned.success === true, '已解绑重新注册的设备')
   }
 
-  step('26. 清理模拟器上遗留的注册记录')
-  // 每跑一次，设备端都会 register 出一台「待认领」设备。正常收尾会把它们认领后解绑，
-  // 但中途失败的运行会留下孤儿行 —— 而家长端没有任何接口能删除未认领的设备，
-  // 所以这里走管理后台的处置接口（这也是这个接口存在的意义）。
-  // 只删「型号等于本机型号」的设备，保证不会误伤演示数据或别人的设备。
-  // Agent 注册时上报的 model 是「厂商 + 机型」（见 AgentApi.register），
-  // 所以这里拼出同一个字符串，才能和库里的记录精确对上。
-  const manufacturer = shell('getprop ro.product.manufacturer').trim()
-  const productModel = shell('getprop ro.product.model').trim()
-  const model = `${manufacturer} ${productModel}`.trim()
+/**
+ * 清掉本机型号下遗留的设备记录。
+ *
+ * <p>为什么必须在**开跑之前**也清一次：每跑一次都会 register 出一台新设备，
+ * 中途失败的运行会留下孤儿行。更要紧的是，这些遗留行可能停在「已绑定 + 已锁定」，
+ * 而 Agent 重装、清空数据后会重新注册并认出同一台设备 —— 于是**一开机就是锁定页**，
+ * 后面的界面断言全部作废（实测踩到：阶段 4「主界面已渲染」连续失败，
+ * 手动确认首屏就是锁定页）。测试必须从已知的干净状态开始，否则结论不可信。
+ *
+ * <p>家长端没有删除未认领设备的接口，所以走管理后台的处置接口
+ * （这正是那个接口存在的意义）。只删「型号等于本机型号」的记录，不误伤演示数据。
+ */
+async function purgeLeftoverDevices(model, keepIds = []) {
   let purged = 0
   try {
     const adminLogin = await apiOrThrow('POST', '/admin/login', {
@@ -1006,15 +1233,27 @@ async function main() {
       'GET', `/admin/devices?q=${encodeURIComponent(model)}&pageSize=100`, { token: adminToken })
     for (const device of list.items ?? []) {
       if (device.model !== model) continue
-      if (device.id === deviceId || device.id === rebound?.id) continue
+      if (keepIds.includes(device.id)) continue
       const res = await api('DELETE', `/admin/devices/${device.id}`, { token: adminToken })
       if (res.ok) purged++
     }
-    check(true, `已清理 ${purged} 台遗留的模拟器设备（型号 ${model}）`)
   } catch (error) {
-    // 清理失败不该让整个联调失败，但要说清楚
-    check(false, '清理遗留设备失败', error.message)
+    bad('清理遗留设备失败', error.message)
+    return -1
   }
+  return purged
+}
+
+/** 本机型号（Agent 注册时上报的是「厂商 + 机型」，见 AgentApi.register）。 */
+function deviceModel() {
+  const manufacturer = shell('getprop ro.product.manufacturer').trim()
+  const productModel = shell('getprop ro.product.model').trim()
+  return `${manufacturer} ${productModel}`.trim()
+}
+
+  step('26. 清理模拟器上遗留的注册记录')
+  const purged = await purgeLeftoverDevices(deviceModel(), [deviceId, rebound?.id].filter(Boolean))
+  if (purged >= 0) ok(`已清理 ${purged} 台遗留的模拟器设备（型号 ${deviceModel()}）`)
 
   console.log(`\n\x1b[1m结果：${passed} 项通过，${failed} 项失败\x1b[0m`)
   if (failed > 0) {

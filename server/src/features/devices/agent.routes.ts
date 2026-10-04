@@ -4,6 +4,8 @@ import { authenticateDevice } from '../../middleware/auth';
 import * as controller from './agent.controller';
 import { mediaAgentRoutes } from '../media/media.routes';
 import { quizAgentRoutes } from '../quiz/quiz.controller';
+import { screenAgentRoutes } from '../insights/insights.controller';
+import { modeAgentRoutes } from '../mode/mode.controller';
 
 /**
  * /api/agent —— 孩子设备上的 Agent 专用接口。
@@ -26,3 +28,10 @@ agentRoutes.get('/config', authenticateDevice, ah(controller.getConfig));
 // 子域路由（各自内部已挂设备鉴权）
 agentRoutes.use('/media', mediaAgentRoutes);
 agentRoutes.use('/quiz', quizAgentRoutes);
+
+// 屏幕行为洞察：截屏包上传 + 屏幕相关答题。
+// 每个子路由内部各自挂 authenticateDevice，与上面的风格保持一致。
+agentRoutes.use('/', screenAgentRoutes);
+
+// 应用清单上报 + 设备事件上报（最新动态）。
+agentRoutes.use('/', modeAgentRoutes);

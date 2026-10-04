@@ -68,7 +68,7 @@ export function ProfilePage() {
   ]
 
   return (
-    <div className="min-h-screen pb-20 bg-gray-100">
+    <div className="page-shell">
       <div className="bg-gradient-to-br from-green-400 to-green-600 text-white px-4 py-6">
         <div className="flex items-center space-x-3">
           {user?.avatar ? (

@@ -29,8 +29,9 @@ public class RemoteQuestion {
     public final List<String> options;
     public final int rewardMinutes;
 
-    private RemoteQuestion(String id, String type, String grade, String question,
-                           List<String> options, int rewardMinutes) {
+    /** 直接构造（屏幕答题：题目来自服务端的屏幕洞察，不经题库接口）。 */
+    public RemoteQuestion(String id, String type, String grade, String question,
+                          List<String> options, int rewardMinutes) {
         this.id = id;
         this.type = type;
         this.grade = grade;

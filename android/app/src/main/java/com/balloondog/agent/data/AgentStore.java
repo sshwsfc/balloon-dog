@@ -4,6 +4,8 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.text.TextUtils;
 
+import androidx.annotation.Nullable;
+
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -23,12 +25,46 @@ import java.util.UUID;
 public class AgentStore {
 
     private final SharedPreferences prefs;
+    /**
+     * <b>设备加密存储</b>（device-protected）里的偏好。
+     *
+     * <p>为什么需要第二份：`password` 最高强度档会随机改写系统锁屏密码，
+     * 而「重启后清除随机密码」这条安全阀必须在**用户解锁之前**执行 ——
+     * 否则用户卡在系统锁屏上、应用又因为读不到凭据加密存储而起不来，
+     * 形成一个死循环（实测确认过，见 android/README.md §2.4）。
+     *
+     * <p>所以应急密码哈希、resetPasswordWithToken 令牌、当前随机密码这三样
+     * 放进设备加密存储：开机后、用户解锁前就能读到，安全阀才真的能生效。
+     */
+    private final SharedPreferences devicePrefs;
     private final Context appContext;
 
     public AgentStore(Context context) {
         this.appContext = context.getApplicationContext();
-        this.prefs = this.appContext
-                .getSharedPreferences(Constants.PREFS, Context.MODE_PRIVATE);
+
+        // 1) 先建设备加密存储：它在用户解锁前也可用，是开机安全阀的唯一依赖。
+        Context deviceContext = this.appContext;
+        try {
+            deviceContext = this.appContext.createDeviceProtectedStorageContext();
+        } catch (Exception e) {
+            // 极老或异常 ROM 上拿不到设备加密存储时退回原存储：
+            // 功能退化（安全阀在解锁前读不到），但不能因此让整个 Store 构造失败。
+            deviceContext = this.appContext;
+        }
+        this.devicePrefs = deviceContext
+                .getSharedPreferences(Constants.PREFS_DEVICE_PROTECTED, Context.MODE_PRIVATE);
+
+        // 2) 再建凭据加密存储。它在 LOCKED_BOOT_COMPLETED（用户解锁前）会直接抛异常，
+        //    而开机安全阀恰恰跑在那时 —— 不兜住的话，用来打破死循环的代码自己先崩了。
+        //    退回设备加密存储：此刻读到的都是默认值，这正是我们要的语义
+        //    （解锁前那些设备令牌确实还不存在），关键是绝不能抛。
+        SharedPreferences main;
+        try {
+            main = this.appContext.getSharedPreferences(Constants.PREFS, Context.MODE_PRIVATE);
+        } catch (Exception e) {
+            main = this.devicePrefs;
+        }
+        this.prefs = main;
     }
 
     /**
@@ -230,8 +266,78 @@ public class AgentStore {
         prefs.edit().putString(Constants.KEY_LAST_CONFIG_JSON, json).apply();
     }
 
+    /**
+     * 上一份策略配置的原始 JSON。
+     *
+     * <p><b>会顺手丢掉「不属于当前设备」的陈旧缓存</b>：配置 JSON 里带着它属于哪个 deviceId，
+     * 一旦和本地记录的 deviceId 不一致，就说明这份缓存是上一台设备留下的 ——
+     * 必须当作「没有配置」处理，而不是继续拿它去判定锁定。
+     *
+     * <p>为什么这条不变量要写在这里：实测遇到过设备解绑后重新注册，
+     * 服务端明明已经 `locked=false`，本地却还在用旧缓存里的 `"locked":true`
+     * 稳定地把设备锁在锁定页上 —— 家长端已经看不到那台设备，等于谁也解不开。
+     * 放在读取处做自愈，连已经损坏的安装也能自己恢复，不必等下一次注册。
+     */
+    @Nullable
     public String getLastConfigJson() {
-        return prefs.getString(Constants.KEY_LAST_CONFIG_JSON, null);
+        String json = prefs.getString(Constants.KEY_LAST_CONFIG_JSON, null);
+        if (json == null) return null;
+        String owner = extractJsonString(json, "deviceId");
+        String mine = getDeviceId();
+        if (owner != null && mine != null && !owner.equals(mine)) {
+            EventLog.warn("丢弃陈旧的策略缓存：它属于设备 " + owner + "，而本机是 " + mine);
+            prefs.edit().remove(Constants.KEY_LAST_CONFIG_JSON).apply();
+            return null;
+        }
+        return json;
+    }
+
+    /**
+     * 自愈：丢掉「不属于当前设备」的锁定策略。
+     *
+     * <p>本地锁定判定读的是 {@code KEY_LOCKED} 这个独立标志，而不是配置 JSON，
+     * 所以只丢弃 JSON 是不够的 —— 那份标志也得一起清掉，否则设备会一直停在锁定页上。
+     *
+     * <p>触发条件是「缓存配置里的 deviceId 与本机 deviceId 不一致」：
+     * 这只有在设备身份变过（解绑后重新注册）却还留着旧策略时才成立，
+     * 是一个不含糊的判据，不会误伤正常的锁定状态。
+     *
+     * <p>在服务启动时和锁定页自检时都会调用，所以已经卡住的设备也能自己恢复，
+     * 不需要用户清数据或重装。
+     *
+     * @return true 表示确实清理了陈旧策略
+     */
+    public boolean healStalePolicyCache() {
+        String json = prefs.getString(Constants.KEY_LAST_CONFIG_JSON, null);
+        if (json == null) return false;
+        String owner = extractJsonString(json, "deviceId");
+        String mine = getDeviceId();
+        if (owner == null || mine == null || owner.equals(mine)) return false;
+
+        EventLog.warn("检测到陈旧的锁定策略（属于设备 " + owner + "，本机是 " + mine
+                + "），正在清除，避免设备被不存在的设备锁死");
+        prefs.edit()
+                .remove(Constants.KEY_LAST_CONFIG_JSON)
+                .remove(Constants.KEY_LOCKED)
+                .remove(Constants.KEY_TEMP_UNLOCK_UNTIL)
+                .remove(Constants.KEY_MANUAL_UNLOCK_UNTIL)
+                .remove(Constants.KEY_SCHEDULE_JSON)
+                .remove(Constants.KEY_SCHEDULE_ENABLED)
+                .remove(Constants.KEY_MODE_JSON)
+                .remove(Constants.KEY_EYE_CARE_JSON)
+                .remove(Constants.KEY_PLUGIN_RULES_JSON)
+                .remove(Constants.KEY_EYE_REST_UNTIL)
+                .apply();
+        return true;
+    }
+
+    /** 从 JSON 文本里取一个顶层字符串字段（不引 JSON 库，够用且不会因畸形 JSON 抛异常）。 */
+    @Nullable
+    private static String extractJsonString(String json, String key) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("\"" + java.util.regex.Pattern.quote(key) + "\"\\s*:\\s*\"([^\"]*)\"")
+                .matcher(json);
+        return m.find() ? m.group(1) : null;
     }
 
     public void setTimePlan(boolean enabled, int dailyLimitMinutes) {
@@ -323,6 +429,9 @@ public class AgentStore {
 
     /** 本机应急解锁密码的哈希。刻意只存本机、绝不上传：网络不可用时家长就靠它进门。 */
     public String getEmergencyPasswordHash() {
+        // 刻意留在凭据加密存储里：它只在锁定页（用户已解锁之后）被用到，
+        // 而安全阀要打破的那个死循环只需要 reset 令牌 ——
+        // 没必要为了用不到的场景把这份哈希放到解锁前可读的地方。
         return prefs.getString(Constants.KEY_EMERGENCY_PASSWORD_HASH, null);
     }
 
@@ -337,20 +446,20 @@ public class AgentStore {
 
     /** resetPasswordWithToken 用的令牌（设备所有者专用）。 */
     public String getResetToken() {
-        return prefs.getString(Constants.KEY_RESET_TOKEN, null);
+        return devicePrefs.getString(Constants.KEY_RESET_TOKEN, null);
     }
 
     public void setResetToken(String token) {
-        prefs.edit().putString(Constants.KEY_RESET_TOKEN, token).apply();
+        devicePrefs.edit().putString(Constants.KEY_RESET_TOKEN, token).apply();
     }
 
     /** 当前生效的随机锁屏密码，供家长在本机解锁后查看。 */
     public String getCurrentRandomPassword() {
-        return prefs.getString(Constants.KEY_CURRENT_RANDOM_PASSWORD, null);
+        return devicePrefs.getString(Constants.KEY_CURRENT_RANDOM_PASSWORD, null);
     }
 
     public void setCurrentRandomPassword(String password) {
-        prefs.edit().putString(Constants.KEY_CURRENT_RANDOM_PASSWORD, password).apply();
+        devicePrefs.edit().putString(Constants.KEY_CURRENT_RANDOM_PASSWORD, password).apply();
     }
 
     // ---------------- 最强防护 ----------------
@@ -369,6 +478,93 @@ public class AgentStore {
 
     public void setRebootClearsPassword(boolean clears) {
         prefs.edit().putBoolean(Constants.KEY_REBOOT_CLEARS_PASSWORD, clears).apply();
+    }
+
+    // ---------------- 屏幕行为洞察 ----------------
+
+    /**
+     * 是否开启周期截屏。
+     *
+     * <p>默认<b>关</b>：这是全项目敏感度最高的权限（会持续采集孩子屏幕），
+     * 必须家长显式打开，绝不能给一个默认开启的开关。
+     */
+    public boolean isCaptureEnabled() {
+        return prefs.getBoolean(Constants.KEY_CAPTURE_ENABLED, false);
+    }
+
+    public void setCaptureEnabled(boolean enabled) {
+        prefs.edit().putBoolean(Constants.KEY_CAPTURE_ENABLED, enabled).apply();
+    }
+
+    public int getCaptureIntervalSeconds() {
+        return prefs.getInt(Constants.KEY_CAPTURE_INTERVAL_SECONDS, 30);
+    }
+
+    public void setCaptureIntervalSeconds(int seconds) {
+        prefs.edit().putInt(Constants.KEY_CAPTURE_INTERVAL_SECONDS, Math.max(10, seconds)).apply();
+    }
+
+    /** 每攒多少张打一个包。 */
+    public int getFramesPerBatch() {
+        return prefs.getInt(Constants.KEY_FRAMES_PER_BATCH, 10);
+    }
+
+    public void setFramesPerBatch(int count) {
+        prefs.edit().putInt(Constants.KEY_FRAMES_PER_BATCH, Math.max(2, count)).apply();
+    }
+
+    public boolean isQuizFromScreen() {
+        return prefs.getBoolean(Constants.KEY_QUIZ_FROM_SCREEN, false);
+    }
+
+    public void setQuizFromScreen(boolean enabled) {
+        prefs.edit().putBoolean(Constants.KEY_QUIZ_FROM_SCREEN, enabled).apply();
+    }
+
+    /**
+     * 下发今日局数额度。
+     *
+     * <p>计数来自服务端的 AI 分析 —— 设备端自己数不准（判断「这一局打完了没」要看画面）。
+     * 设备端拿它做两件事：界面上展示剩余额度、以及离线时兜底锁屏。
+     */
+    public void setGameRoundsBudget(boolean enabled, int limit, int used) {
+        prefs.edit()
+                .putBoolean(Constants.KEY_GAME_ROUNDS_ENABLED, enabled)
+                .putInt(Constants.KEY_GAME_ROUNDS_LIMIT, limit)
+                .putInt(Constants.KEY_GAME_ROUNDS_USED, used)
+                .apply();
+    }
+
+    public boolean isGameRoundsLimited() {
+        return prefs.getBoolean(Constants.KEY_GAME_ROUNDS_ENABLED, false);
+    }
+
+    public int getGameRoundsLimit() {
+        return prefs.getInt(Constants.KEY_GAME_ROUNDS_LIMIT, 0);
+    }
+
+    public int getGameRoundsUsed() {
+        return prefs.getInt(Constants.KEY_GAME_ROUNDS_USED, 0);
+    }
+
+    public void setVideoEpisodesBudget(boolean enabled, int limit, int used) {
+        prefs.edit()
+                .putBoolean(Constants.KEY_VIDEO_EPISODES_ENABLED, enabled)
+                .putInt(Constants.KEY_VIDEO_EPISODES_LIMIT, limit)
+                .putInt(Constants.KEY_VIDEO_EPISODES_USED, used)
+                .apply();
+    }
+
+    public boolean isVideoEpisodesLimited() {
+        return prefs.getBoolean(Constants.KEY_VIDEO_EPISODES_ENABLED, false);
+    }
+
+    public int getVideoEpisodesLimit() {
+        return prefs.getInt(Constants.KEY_VIDEO_EPISODES_LIMIT, 0);
+    }
+
+    public int getVideoEpisodesUsed() {
+        return prefs.getInt(Constants.KEY_VIDEO_EPISODES_USED, 0);
     }
 
     public void setAppLimits(String joined) {
@@ -414,6 +610,117 @@ public class AgentStore {
         return new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
     }
 
+    /**
+     * 注册 / 续订成功后写入身份。
+     *
+     * <p><b>为什么不能只是 setDeviceId</b>：服务端返回的 deviceId 与本地记录的不一致时，
+     * 说明这台手机在服务端那边已经是「另一台设备」了（典型场景：家长解绑后，
+     * 设备端自动重新注册，拿到一条全新的设备记录）。
+     * 这时候必须把<b>上一台设备缓存下来的策略</b>一起丢掉 ——
+     * 否则新设备会继承旧设备的「已锁定」，孩子手机会莫名其妙一直锁着，
+     * 而家长端已经看不到那台设备了，等于谁也解不开。
+     *
+     * <p>实测踩过：解绑后重新注册，`last_config_json` 里还留着旧 deviceId 的
+     * `"locked":true`，设备稳定停在锁定页上，看起来像应用坏了。
+     *
+     * @return true 表示检测到身份变化，并已清理陈旧的锁定/作息缓存
+     */
+    public boolean applyRegistration(String deviceId, String deviceToken, boolean bound) {
+        String previous = getDeviceId();
+        boolean changed = previous != null && deviceId != null && !previous.equals(deviceId);
+        if (changed) {
+            prefs.edit()
+                    .remove(Constants.KEY_LAST_CONFIG_JSON)
+                    .remove(Constants.KEY_LOCKED)
+                    .remove(Constants.KEY_TEMP_UNLOCK_UNTIL)
+                    .remove(Constants.KEY_MANUAL_UNLOCK_UNTIL)
+                    .remove(Constants.KEY_SCHEDULE_JSON)
+                    .remove(Constants.KEY_SCHEDULE_ENABLED)
+                    .apply();
+            EventLog.warn("设备身份已变化（" + previous + " → " + deviceId
+                    + "），已丢弃上一台设备缓存的锁定策略");
+        }
+        setDeviceToken(deviceToken);
+        setDeviceId(deviceId);
+        setBound(bound);
+        return changed;
+    }
+
+    // ---------------- 模式切换 / 护眼 / 应用插件 ----------------
+
+    /** 模式配置。解析失败时退回「不启用的普通模式」，绝不让坏 JSON 把拦截逻辑带崩。 */
+    public com.balloondog.agent.model.ModeConfig getModeConfig() {
+        String json = prefs.getString(Constants.KEY_MODE_JSON, null);
+        if (json == null) return com.balloondog.agent.model.ModeConfig.disabled();
+        try {
+            return com.balloondog.agent.model.ModeConfig.parse(new org.json.JSONObject(json));
+        } catch (Exception e) {
+            EventLog.warn("模式配置解析失败，按普通模式处理：" + e.getMessage());
+            return com.balloondog.agent.model.ModeConfig.disabled();
+        }
+    }
+
+    public void setModeConfig(com.balloondog.agent.model.ModeConfig config) {
+        prefs.edit().putString(Constants.KEY_MODE_JSON, config.toJson().toString()).apply();
+    }
+
+    public com.balloondog.agent.model.EyeCareConfig getEyeCareConfig() {
+        String json = prefs.getString(Constants.KEY_EYE_CARE_JSON, null);
+        if (json == null) return com.balloondog.agent.model.EyeCareConfig.disabled();
+        try {
+            return com.balloondog.agent.model.EyeCareConfig.parse(new org.json.JSONObject(json));
+        } catch (Exception e) {
+            EventLog.warn("护眼配置解析失败，按未启用处理：" + e.getMessage());
+            return com.balloondog.agent.model.EyeCareConfig.disabled();
+        }
+    }
+
+    public void setEyeCareConfig(com.balloondog.agent.model.EyeCareConfig config) {
+        prefs.edit().putString(Constants.KEY_EYE_CARE_JSON, config.toJson().toString()).apply();
+    }
+
+    public java.util.List<com.balloondog.agent.model.PluginRule> getPluginRules() {
+        String json = prefs.getString(Constants.KEY_PLUGIN_RULES_JSON, null);
+        if (json == null) return java.util.Collections.emptyList();
+        try {
+            return com.balloondog.agent.model.PluginRule.parseAll(new org.json.JSONArray(json));
+        } catch (Exception e) {
+            EventLog.warn("插件规则解析失败，按无规则处理：" + e.getMessage());
+            return java.util.Collections.emptyList();
+        }
+    }
+
+    public void setPluginRules(java.util.List<com.balloondog.agent.model.PluginRule> rules) {
+        prefs.edit()
+                .putString(Constants.KEY_PLUGIN_RULES_JSON,
+                        com.balloondog.agent.model.PluginRule.toJson(rules))
+                .apply();
+    }
+
+    public long getEyeContinuousMs() {
+        return prefs.getLong(Constants.KEY_EYE_CONTINUOUS_MS, 0L);
+    }
+
+    public void setEyeContinuousMs(long ms) {
+        prefs.edit().putLong(Constants.KEY_EYE_CONTINUOUS_MS, Math.max(0L, ms)).apply();
+    }
+
+    public long getEyeRestUntil() {
+        return prefs.getLong(Constants.KEY_EYE_REST_UNTIL, 0L);
+    }
+
+    public void setEyeRestUntil(long at) {
+        prefs.edit().putLong(Constants.KEY_EYE_REST_UNTIL, Math.max(0L, at)).apply();
+    }
+
+    public long getAppsReportedAt() {
+        return prefs.getLong(Constants.KEY_APPS_REPORTED_AT, 0L);
+    }
+
+    public void setAppsReportedAt(long at) {
+        prefs.edit().putLong(Constants.KEY_APPS_REPORTED_AT, at).apply();
+    }
+
     // ---------------- 重置 ----------------
 
     /** 清空设备身份，下次连接会以一台全新设备重新注册（家长需重新输入新绑定码）。 */
@@ -430,6 +737,13 @@ public class AgentStore {
                 .remove(Constants.KEY_SCHEDULE_JSON)
                 .remove(Constants.KEY_SCHEDULE_ENABLED)
                 .remove(Constants.KEY_MANUAL_UNLOCK_UNTIL)
+                .remove(Constants.KEY_CAPTURE_ENABLED)
+                .remove(Constants.KEY_QUIZ_FROM_SCREEN)
+                .remove(Constants.KEY_MODE_JSON)
+                .remove(Constants.KEY_EYE_CARE_JSON)
+                .remove(Constants.KEY_PLUGIN_RULES_JSON)
+                .remove(Constants.KEY_EYE_CONTINUOUS_MS)
+                .remove(Constants.KEY_EYE_REST_UNTIL)
                 .apply();
         // 注意：刻意<b>不</b>清除应急密码与重置令牌 —— 它们属于「这台设备」而不是
         // 「这个设备身份」，重新配对后家长仍然需要它们来解锁。

@@ -180,7 +180,7 @@ export function LocationPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen pb-20 bg-gray-100 flex items-center justify-center">
+      <div className="page-shell page-shell--center">
         <div className="text-center">
           <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#07c160]" />
           <p className="mt-2 text-gray-500 text-sm">加载中...</p>
@@ -191,8 +191,8 @@ export function LocationPage() {
 
   if (error) {
     return (
-      <div className="min-h-screen pb-20 bg-gray-100">
-        <div className="bg-white px-4 py-4 border-b border-gray-200">
+      <div className="page-shell">
+        <div className="page-header flex items-center justify-between border-b border-gray-200 bg-white px-4 py-3 [@media(max-height:520px)]:py-2 sm:px-5">
           <h1 className="text-xl font-medium text-gray-900">位置监控</h1>
         </div>
         <div className="px-6 py-20 text-center">
@@ -213,8 +213,8 @@ export function LocationPage() {
   }
 
   return (
-    <div className="min-h-screen pb-20 bg-gray-100">
-      <div className="bg-white px-4 py-4 border-b border-gray-200 flex items-center justify-between">
+    <div className="page-shell">
+      <div className="page-header flex items-center justify-between border-b border-gray-200 bg-white px-4 py-3 [@media(max-height:520px)]:py-2 sm:px-5">
         <h1 className="text-xl font-medium text-gray-900">位置监控</h1>
         <button type="button" onClick={() => void load()} className="text-gray-400 p-1" aria-label="刷新">
           <RefreshCw className="w-5 h-5" />

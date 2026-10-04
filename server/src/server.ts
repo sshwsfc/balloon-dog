@@ -5,6 +5,7 @@ import { logger } from './logger';
 import { prisma } from './prisma';
 import { commandsService } from './features/devices/commands.service';
 import { ensureMediaDir } from './features/media/media.storage';
+import { insightsService } from './features/insights/insights.service';
 
 const app = createApp();
 
@@ -17,6 +18,11 @@ async function bootstrap() {
     logger.info({ msg: 'Server started', port: config.PORT, env: config.NODE_ENV });
   });
 
+  // 启动后立即清一次过期帧图：长期停机再启动时不该让过期数据继续躺在磁盘上
+  void insightsService.purgeExpired().catch((err) => {
+    logger.warn({ msg: 'startup purge failed', error: (err as Error).message });
+  });
+
   // 定时清理超时未领取/未完成的指令，并回滚它们的乐观状态
   const sweepTimer = setInterval(async () => {
     try {
@@ -27,9 +33,31 @@ async function bootstrap() {
     }
   }, config.COMMAND_SWEEP_INTERVAL_MS);
 
+  // 定时清理过期的截屏帧图。
+  //
+  // 截屏是最高敏感度的数据，留档天数一到就必须真的从磁盘上消失 ——
+  // 只删数据库行而留着图片，等于没删。
+  const retentionTimer = setInterval(() => {
+    void (async () => {
+      try {
+        const purged = await insightsService.purgeExpired();
+        if (purged.batches > 0) {
+          logger.info({
+            msg: 'screen frames purged',
+            batches: purged.batches,
+            freedMB: Math.round(purged.bytes / 1024 / 1024),
+          });
+        }
+      } catch (err) {
+        logger.error({ msg: 'purgeExpired failed', error: (err as Error).message });
+      }
+    })();
+  }, 60 * 60 * 1000); // 每小时一次
+
   async function shutdown(signal: string) {
     logger.info({ msg: 'Shutting down', signal });
     clearInterval(sweepTimer);
+    clearInterval(retentionTimer);
     server.close();
     await prisma.$disconnect();
     process.exit(0);

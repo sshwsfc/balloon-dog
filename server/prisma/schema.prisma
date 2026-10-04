@@ -77,19 +77,33 @@ model ChildDevice {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  features    DeviceFeature[]
-  timePlan    TimePlan?
-  appLimits   AppLimit[]
-  appAudits   AppAuditRequest[]
-  blockedUrls BlockedUrl[]
-  locations   LocationRecord[]
-  safeZones   SafeZone[]
-  commands    DeviceCommand[]
-  quizConfig  QuizConfig?
-  quizRecords QuizRecord[]
-  media       MediaAsset[]
-  lockPolicy  LockPolicy?
-  schedules   ScheduleRule[]
+  features       DeviceFeature[]
+  timePlan       TimePlan?
+  appLimits      AppLimit[]
+  appAudits      AppAuditRequest[]
+  blockedUrls    BlockedUrl[]
+  locations      LocationRecord[]
+  safeZones      SafeZone[]
+  commands       DeviceCommand[]
+  quizConfig     QuizConfig?
+  quizRecords    QuizRecord[]
+  media          MediaAsset[]
+  lockPolicy     LockPolicy?
+  schedules      ScheduleRule[]
+  screenConfig   ScreenMonitorConfig?
+  screenBatches  ScreenBatch[]
+  screenInsights ScreenInsight[]
+  usageAlerts    UsageAlert[]
+  usageEpisodes  UsageEpisode[]
+  usageBudgets   UsageBudget[]
+  screenQuiz     ScreenQuizQuestion[]
+  mode           DeviceMode?
+  studySlots     StudyModeSlot[]
+  modeApps       ModeApp[]
+  installedApps  DeviceApp[]
+  eyeCare        EyeCareConfig?
+  appPlugins     AppPluginState[]
+  events         DeviceEvent[]
 
   @@index([userId])
   @@index([userId, status])
@@ -339,13 +353,249 @@ model ScheduleRule {
   startMinute Int
   /// 取值 0..1440；1440 表示当天 24:00；
   /// endMinute < startMinute 表示跨天（例如 22:00 → 次日 07:00）
-  endMinute Int
+  endMinute   Int
 
   enabled   Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([deviceId])
+}
+
+// ============================================================
+// 屏幕行为 AI 洞察
+// ============================================================
+//
+// 数据流：设备端周期截屏 → 每 N 张打一个包上传 → 服务端解包落盘
+//        → AI 视觉分析（可插拔 provider）→ ScreenInsight
+//        → 抽取 UsageAlert（异常提醒）与 UsageEpisode（局数/集数）
+//        → 按 UsageBudget 累计，超限则下发锁屏指令。
+//
+// 隐私约定：这里存的是<b>孩子屏幕的内容</b>，是全项目最敏感的数据。
+// 默认关闭、必须家长在设备上显式授权、按 retentionDays 定时清理，
+// 且家长端与管理后台都不提供原图浏览（只给结构化结论）。
+
+/// 每台设备的截屏与分析设置。
+model ScreenMonitorConfig {
+  id       String      @id @default(cuid())
+  deviceId String      @unique
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// 是否开启周期截屏。默认关闭 —— 这是最敏感的权限，必须家长显式打开
+  captureEnabled         Boolean @default(false)
+  /// 截屏间隔（秒）
+  captureIntervalSeconds Int     @default(30)
+  /// 每攒够多少张打一个包上传
+  framesPerBatch         Int     @default(10)
+
+  /// 是否用 AI 分析收到的包
+  analyzeEnabled     Boolean @default(true)
+  /// 每个包最多送几张给 AI（成本控制，均匀采样）
+  analyzeSampleCount Int     @default(6)
+  /// 帧图留档天数，过期由定时任务清理
+  retentionDays      Int     @default(7)
+
+  /// 锁定页是否优先出「基于屏幕内容」的题
+  quizFromScreen Boolean @default(false)
+
+  // ---- 五类异常提醒开关 ----
+  alertMinorContent  Boolean @default(true) // 未成年 / 不适龄内容
+  alertScam          Boolean @default(true) // 疑似被骗（转账、验证码、陌生链接）
+  alertEmotional     Boolean @default(true) // 情绪问题（自伤、极端言论、被欺凌）
+  alertGameAddiction Boolean @default(true) // 游戏沉迷（连续多局、深夜在线）
+  alertHighSpending  Boolean @default(true) // 高额消费（充值、打赏、内购）
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// 一次上传的图片包。分析以「包」为单位 —— 单张图既判断不准也浪费额度。
+model ScreenBatch {
+  id       String      @id @default(cuid())
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  startedAt DateTime
+  endedAt   DateTime
+
+  expectedFrames Int    @default(0)
+  actualFrames   Int    @default(0)
+  sizeBytes      Int    @default(0)
+  /// 解包后帧图所在目录（相对 MEDIA_DIR）
+  storagePath    String @default("")
+
+  /// pending 待分析 | analyzing 分析中 | done 完成 | failed 失败 | skipped 已跳过（未配置 AI）
+  status     String @default("pending")
+  failReason String @default("")
+  provider   String @default("")
+  model      String @default("")
+  analysisMs Int    @default(0)
+
+  createdAt DateTime @default(now())
+
+  frames  ScreenFrame[]
+  insight ScreenInsight?
+
+  @@index([deviceId, startedAt])
+  @@index([status, createdAt])
+}
+
+/// 包内单张帧的元数据。图片本体在磁盘上，这里只存索引信息。
+model ScreenFrame {
+  id      String      @id @default(cuid())
+  batchId String
+  batch   ScreenBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  seq         Int
+  capturedAt  DateTime
+  /// 设备端尽力上报的前台包名（拿不到时为空）
+  packageName String   @default("")
+  /// 相对 MEDIA_DIR 的路径
+  storagePath String   @default("")
+  sizeBytes   Int      @default(0)
+
+  @@index([batchId, seq])
+}
+
+/// AI（或降级启发式）对一个包的结论。一个包最多一条。
+model ScreenInsight {
+  id      String      @id @default(cuid())
+  batchId String      @unique
+  batch   ScreenBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// 给人看的总结：「这段时间在玩《王者荣耀》，进行到对局结算界面」
+  summary String @default("")
+
+  activities   Json? // [{ app, packageName, category, description, frameFrom, frameTo }]
+  games        Json? // [{ name, scene, roundCompleted, confidence, evidence }]
+  videos       Json? // [{ name, episodeCompleted, confidence, evidence }]
+  contentFlags Json? // 五类风险的布尔 + 证据
+  topics       Json? // [{ subject, term, meaning }] —— 屏幕答题的原料
+
+  keywords String[] // 屏幕关键词（英文单词、古诗名、角色名…）
+
+  /// none | low | medium | high
+  riskLevel String @default("none")
+
+  /// disabled（未配置 AI）| heuristic（降级推断）| openai-compatible
+  provider         String @default("")
+  model            String @default("")
+  promptTokens     Int    @default(0)
+  completionTokens Int    @default(0)
+
+  /// 失败原因（status=failed 时）
+  error   String @default("")
+  /// 原始模型响应，便于排查与复算
+  rawJson String @default("")
+
+  createdAt DateTime @default(now())
+
+  alerts   UsageAlert[]
+  episodes UsageEpisode[]
+
+  @@index([deviceId, createdAt])
+  @@index([riskLevel, createdAt])
+}
+
+/// 异常提醒。由 AI 结论里的 contentFlags 生成，家长端可标记已读。
+model UsageAlert {
+  id        String         @id @default(cuid())
+  deviceId  String
+  device    ChildDevice    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  insightId String?
+  insight   ScreenInsight? @relation(fields: [insightId], references: [id], onDelete: SetNull)
+
+  /// minor_content | scam_suspect | emotional_issue | game_addiction | high_spending
+  type     String
+  /// low | medium | high
+  severity String @default("medium")
+
+  title    String
+  detail   String @default("")
+  /// 判定依据（引用模型给出的原文），便于家长判断是不是误报
+  evidence String @default("")
+
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([deviceId, createdAt])
+  @@index([deviceId, readAt])
+  @@index([type, createdAt])
+}
+
+/// 可计数的用量片段：玩了第几局、看完第几集。
+///
+/// 刻意与 ScreenInsight 的文本总结分开：局数/集数要能被打平、按天聚合、
+/// 拿来跟预算比大小，不能被一段自然语言绑死。
+model UsageEpisode {
+  id        String         @id @default(cuid())
+  deviceId  String
+  device    ChildDevice    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  insightId String?
+  insight   ScreenInsight? @relation(fields: [insightId], references: [id], onDelete: SetNull)
+
+  /// game_round 游戏局数 | video_episode 动画集数
+  kind        String
+  appName     String @default("")
+  packageName String @default("")
+  count       Int    @default(1)
+  confidence  Float  @default(0)
+  evidence    String @default("")
+
+  occurredAt DateTime
+  /// 设备本地日 YYYY-MM-DD，用于「今日已玩几局」的聚合
+  dayKey     String
+
+  createdAt DateTime @default(now())
+
+  @@index([deviceId, dayKey, kind])
+}
+
+/// 家长设的用量上限：「今天最多玩 3 局」「今天最多看 2 集」。
+model UsageBudget {
+  id       String      @id @default(cuid())
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// game_round | video_episode
+  kind    String
+  /// 应用名；留空表示对「全部应用」生效
+  appName String @default("")
+
+  dailyLimit Int
+  enabled    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([deviceId, kind, appName])
+}
+
+/// 由屏幕内容生成的题（需求 8：看小猪佩奇就出 pig 这个单词）。
+model ScreenQuizQuestion {
+  id       String      @id @default(cuid())
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// 产生这道题的洞察；洞察被清理后题目仍可用，故不设外键级联
+  insightId String?
+
+  grade         String
+  subject       String // english | poetry | math | general
+  question      String
+  options       String[]
+  correctAnswer Int
+  explanation   String   @default("")
+  /// 来自屏幕的哪个词/主题，例如 "pig"
+  sourceTerm    String   @default("")
+
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([deviceId, grade, usedAt])
 }
 
 // ============================================================
@@ -423,4 +673,156 @@ model OperationLog {
   @@index([createdAt])
   @@index([adminId])
   @@index([action])
+}
+
+// ============================================================
+// 模式切换（学习模式 / 普通模式）· 护眼 · 应用插件管控
+// ============================================================
+//
+// 三者共用一条主线：家长在「某个时段」对「某些应用」施加「某些限制」。
+// 求值一律离线优先 —— 规则原样下发到设备，Android 侧 StudyModeEngine 本地判定，
+// 服务端 mode.service.ts 里有同一套逻辑只用于展示「当前模式」。
+// 两边必须保持一致，由 crosscheck 脚本逐点比对（见 docs/PLAN-mode-eyecare-plugin.md）。
+
+/// 每台设备的模式配置。
+model DeviceMode {
+  id       String      @id @default(cuid())
+  deviceId String      @unique
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// 手动指定的模式：study 学习 | normal 普通；null 表示跟随时段规划。
+  manualMode      String?
+  /// 是否启用「按时间设置」的时段规划。
+  /// 注意：开启但一格都没选时，按约定<b>全天都是学习模式</b>（与参考产品一致），
+  /// 家长端会对这个状态显示红色警告。
+  scheduleEnabled Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// 学习模式的时段格子：0–23 时 × 星期。命中即为学习模式，未命中为普通模式。
+model StudyModeSlot {
+  id       String      @id @default(cuid())
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// 0=周日 … 6=周六（与 JS Date.getDay()、ScheduleRule.daysOfWeek 一致）
+  dayOfWeek Int
+  /// 0..23
+  hour      Int
+
+  createdAt DateTime @default(now())
+
+  @@unique([deviceId, dayOfWeek, hour])
+  @@index([deviceId])
+}
+
+/// 学习模式下的应用分组。
+model ModeApp {
+  id       String      @id @default(cuid())
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  packageName String
+  appName     String @default("")
+  /// study  = 学习模式允许使用（白名单）
+  /// normal = 普通模式专用（学习模式下会被拦）
+  /// 既不在任何一组的应用，学习模式下<b>默认被拦</b>（更安全的一侧）。
+  group       String @default("study")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([deviceId, packageName, group])
+  @@index([deviceId])
+}
+
+/// 设备上报的已安装应用清单（全量替换），是「选择应用」「插件管理」的数据来源。
+model DeviceApp {
+  id       String      @id @default(cuid())
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  packageName  String
+  appName      String  @default("")
+  /// 系统应用默认不在家长端展示（清单里仍保留，便于排查）
+  isSystem     Boolean @default(false)
+  /// 普通应用（可启动、有桌面图标）—— 只有这些才值得管控
+  isLaunchable Boolean @default(true)
+
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  @@unique([deviceId, packageName])
+  @@index([deviceId])
+}
+
+/// 护眼设置。
+model EyeCareConfig {
+  id       String      @id @default(cuid())
+  deviceId String      @unique
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  enabled Boolean @default(false)
+
+  /// 连续用眼多少分钟后提醒休息
+  continuousMinutes Int @default(40)
+  /// 休息时长（分钟）。期间锁定屏幕，休息结束自动解锁。
+  restMinutes       Int @default(10)
+
+  /// 夜间护眼时段的起止小时（0..23）。两者相等表示不启用夜间时段。
+  nightStartHour   Int     @default(22)
+  nightEndHour     Int     @default(7)
+  /// 夜间是否直接锁定（false 则只在设备上提示，不锁）
+  nightLockEnabled Boolean @default(false)
+
+  /// 屏幕亮度上限（百分比 10..100）；0 表示不限制
+  maxBrightnessPercent Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// 微信 / QQ 等功能管控的单条状态。
+///
+/// 目录（有哪些插件、匹配什么关键词）定义在代码里而不是表里：
+/// 它是<b>版本化的产品知识</b>，随应用改版调整，不适合让家长误改。
+/// 这里只存「家长把它开成什么」。
+model AppPluginState {
+  id       String      @id @default(cuid())
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  packageName String
+  pluginKey   String
+  /// true = 允许使用，false = 拦截
+  enabled     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([deviceId, packageName, pluginKey])
+  @@index([deviceId])
+}
+
+/// 设备事件流，供家长端「最新动态」展示。
+///
+/// 与 ScreenInsight 的分工：那个是「屏幕内容分析」，这个是**轻量的状态与动作事件**，
+/// 不需要截屏也不需要 AI，因此可以高频上报且长期保留（仍受清理策略约束）。
+model DeviceEvent {
+  id       String      @id @default(cuid())
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// unlock | lock | screen_on | screen_off | app_installed | app_removed
+  /// | mode_enter | eye_rest | plugin_blocked | app_blocked
+  type   String
+  /// 人话说明，家长端直接展示
+  detail String @default("")
+
+  createdAt DateTime @default(now())
+
+  @@index([deviceId, createdAt])
+  @@index([createdAt])
 }

@@ -21,6 +21,11 @@ public final class Constants {
     public static final String PATH_MEDIA = "/agent/media";
     public static final String PATH_QUIZ_QUESTION = "/agent/quiz/question";
     public static final String PATH_QUIZ_ANSWER = "/agent/quiz/answer";
+    /** 截屏包上传 */
+    public static final String PATH_SCREEN_BATCHES = "/agent/screen-batches";
+    /** 屏幕内容答题 */
+    public static final String PATH_SCREEN_QUIZ_NEXT = "/agent/screen-quiz/next";
+    public static final String PATH_SCREEN_QUIZ_ANSWER = "/agent/screen-quiz/answer";
 
     /** 指令结果回报：/agent/commands/{id}/result */
     public static String pathCommandResult(String commandId) {
@@ -52,6 +57,8 @@ public final class Constants {
     public static final String CMD_STOP_AUDIO = "stop_audio";
     public static final String CMD_FETCH_LOCATION = "fetch_location";
     public static final String CMD_SYNC_CONFIG = "sync_config";
+    /** 让设备重新上报已安装应用清单（家长点「刷新应用列表」）。 */
+    public static final String CMD_SYNC_APPS = "sync_apps";
 
     // ---------------- 节奏参数 ----------------
 
@@ -96,6 +103,8 @@ public final class Constants {
     public static final String ACTION_REFRESH_NOW = "com.balloondog.agent.action.REFRESH_NOW";
     /** 保活看门狗：由 AlarmManager / JobScheduler 定时触发，检查并拉起守护服务 */
     public static final String ACTION_WATCHDOG = "com.balloondog.agent.action.WATCHDOG";
+    /** 屏幕被点亮 / 解锁：立即复核锁定状态，不等下一个周期 */
+    public static final String ACTION_SCREEN_ON = "com.balloondog.agent.action.SCREEN_ON";
     /** 时间表边界到达（例如 22:00 该锁屏了），由 AlarmManager 精确触发 */
     public static final String ACTION_SCHEDULE_BOUNDARY = "com.balloondog.agent.action.SCHEDULE_BOUNDARY";
     /** 倒计时悬浮窗上的操作 */
@@ -105,6 +114,37 @@ public final class Constants {
     // ---------------- SharedPreferences ----------------
 
     public static final String PREFS = "balloon_dog_agent_prefs";
+
+    // ---- 设备端接口路径 ----
+    public static final String PATH_AGENT_APPS = "/agent/apps";
+    public static final String PATH_AGENT_EVENTS = "/agent/events";
+
+    /** 应用清单全量上报间隔：应用装卸不频繁，12 小时足够，也省电。 */
+    public static final long APP_REPORT_INTERVAL_MS = 12 * 60 * 60 * 1000L;
+
+    /** 设备事件批量上报间隔：攒 60 秒发一次，避免为每条解锁/亮屏都发一个请求。 */
+    public static final long EVENT_FLUSH_INTERVAL_MS = 60_000L;
+
+    // ---- 设备事件类型（与 server 端约定一致，改一处必须改两处） ----
+    public static final String EVENT_UNLOCK = "unlock";
+    public static final String EVENT_LOCK = "lock";
+    public static final String EVENT_SCREEN_ON = "screen_on";
+    public static final String EVENT_SCREEN_OFF = "screen_off";
+    public static final String EVENT_APP_INSTALLED = "app_installed";
+    public static final String EVENT_APP_REMOVED = "app_removed";
+    public static final String EVENT_MODE_ENTER = "mode_enter";
+    public static final String EVENT_EYE_REST = "eye_rest";
+    public static final String EVENT_PLUGIN_BLOCKED = "plugin_blocked";
+    public static final String EVENT_APP_BLOCKED = "app_blocked";
+    /**
+     * 设备加密存储（device-protected）里的偏好文件名。
+     *
+     * <p>只放「用户解锁前就必须读到」的少数几项：应急解锁密码哈希、
+     * resetPasswordWithToken 令牌、当前随机锁屏密码。
+     * 它们关系到 {@code password} 最高强度档的重启安全阀能否生效 ——
+     * 详见 {@link AgentStore} 与 android/README.md §2.4。
+     */
+    public static final String PREFS_DEVICE_PROTECTED = "balloon_dog_agent_device_protected";
 
     public static final String KEY_BASE_URL = "base_url";
     public static final String KEY_DEVICE_CODE = "device_code";
@@ -146,6 +186,38 @@ public final class Constants {
     public static final String KEY_CURRENT_RANDOM_PASSWORD = "current_random_password";
     /** 是否已启用「最强防护」（禁卸载 / 禁强行停止 / 禁恢复出厂 / 禁安全模式） */
     public static final String KEY_HARDENING_ENABLED = "hardening_enabled";
+
+    // ---- 模式切换 / 护眼 / 应用插件管控 ----
+    /**
+     * 模式配置（JSON），断网时必须照常生效 —— 否则孩子拔网线就绕过学习模式了。
+     * 结构与服务端 `/agent/config` 的 `mode` 块一致。
+     */
+    public static final String KEY_MODE_JSON = "mode_json";
+    /** 护眼设置（JSON）。 */
+    public static final String KEY_EYE_CARE_JSON = "eye_care_json";
+    /** 应用插件管控规则（JSON 数组），只含被家长改动过的项。 */
+    public static final String KEY_PLUGIN_RULES_JSON = "plugin_rules_json";
+    /** 连续用眼累计毫秒数（护眼计时）。 */
+    public static final String KEY_EYE_CONTINUOUS_MS = "eye_continuous_ms";
+    /** 护眼强制休息的截止时刻（墙上时间毫秒）；0 = 未在休息。 */
+    public static final String KEY_EYE_REST_UNTIL = "eye_rest_until";
+    /** 上一次上报应用清单的时间戳，避免频繁全量上报。 */
+    public static final String KEY_APPS_REPORTED_AT = "apps_reported_at";
+
+    // ---- 屏幕行为洞察 ----
+    /** 家长是否开启了周期截屏（默认关，最高敏感度权限） */
+    public static final String KEY_CAPTURE_ENABLED = "capture_enabled";
+    public static final String KEY_CAPTURE_INTERVAL_SECONDS = "capture_interval_seconds";
+    public static final String KEY_FRAMES_PER_BATCH = "frames_per_batch";
+    /** 锁定页是否优先出「基于屏幕内容」的题 */
+    public static final String KEY_QUIZ_FROM_SCREEN = "quiz_from_screen";
+    /** 服务端下发的今日局数额度（AI 分析算出来的权威计数） */
+    public static final String KEY_GAME_ROUNDS_ENABLED = "game_rounds_enabled";
+    public static final String KEY_GAME_ROUNDS_LIMIT = "game_rounds_limit";
+    public static final String KEY_GAME_ROUNDS_USED = "game_rounds_used";
+    public static final String KEY_VIDEO_EPISODES_ENABLED = "video_episodes_enabled";
+    public static final String KEY_VIDEO_EPISODES_LIMIT = "video_episodes_limit";
+    public static final String KEY_VIDEO_EPISODES_USED = "video_episodes_used";
     /** 是否要求「重启后自动清除随机密码」（安全阀，默认开） */
     public static final String KEY_REBOOT_CLEARS_PASSWORD = "reboot_clears_password";
 }

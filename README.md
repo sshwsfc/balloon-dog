@@ -69,10 +69,16 @@ npm run dev             # 只起前端
 | `npm run db:clean` | 清理冒烟测试留下的临时账号与设备（先预演） |
 | `npm run e2e` | **浏览器端到端测试**（家长端 + 管理后台，CDP 驱动无头 Chrome） |
 | `npm run e2e:parent` / `e2e:admin` | 只跑其中一套 |
+| `npm run e2e:responsive` | **响应式视口矩阵**（5 档视口 × 14 个页面：无横向溢出、内容限宽居中、标题栏铺满、导航形态正确，见 [`docs/RESPONSIVE.md`](docs/RESPONSIVE.md)） |
 | `npm run android:build` | 构建孩子设备端 Agent 的调试 APK（见 [`android/README.md`](android/README.md)） |
 | `npm run android:release` | 构建 Agent 的发布 APK |
 | `npm run android:e2e` | **Agent 端到端联调**（真机/模拟器 + 真实后端：协议闭环、拍照/录音/截图、Kiosk 锁定、倒计时悬浮窗、作息时间表、最高强度档、保活） |
 | `npm run android:crosstest` | **作息求值交叉验证**（Android 与后端两套实现逐点比对，2016 个采样点） |
+| `npm run android:e2e:screen` | **截屏洞察 + 锁定复核端到端联调**（真机/模拟器：采样→打包→上传→AI 分析→亮屏重锁→降级路径拉回） |
+| `npm run android:capture` | 在模拟器上批量截取界面截图到 `android/docs/screenshots/` |
+| `npm run server:e2e:insights` | **屏幕洞察后端全链路**（上传→入库→家长端可见→预算→屏幕出题→清理，28 项） |
+| `npm run server:e2e:ai` | **AI 分析全链路**，对着 `npm run server:mock:ai` 起的假视觉服务跑（28 项，不需要真 key） |
+| `npm run server:mock:ai` | 起一个 OpenAI 兼容的假视觉服务（默认 :4100），用 `MOCK_AI_SCENARIO` 切换场景 |
 | `npm run db:up` / `db:down` | 起停 PostgreSQL 容器 |
 | `npm run db:migrate` | 执行 Prisma 迁移 |
 | `npm run db:seed` | 灌入演示数据（幂等） |
@@ -128,10 +134,23 @@ balloon-dog/
 | 位置监控 + 安全区 | ✅ 完成 | 设备上报轨迹，服务端按 haversine 判定是否在安全区内 |
 | 远程拍照 / 截图 / 录像 / 录音 | ✅ 完成 | 指令队列 + 媒体落盘 + 短时效签名 URL |
 | 同屏监控 / 远程协助 / 通话短信 | ⚠️ 后端就绪 | 接口与指令类型齐备，**需设备端 Agent 实现**才能真正生效 |
+| **屏幕行为 AI 洞察** | ✅ 完成 | 设备周期截屏 → 打包上传 → 服务端视觉模型总结「用了什么、在做什么」；**没配 AI key 就明确标为未配置，绝不伪造结论** |
+| **异常提醒 / 用量预算 / 屏幕出题** | ✅ 完成 | 未成年内容、疑似被骗、情绪问题、游戏沉迷、高额消费五类提醒；按「玩几局 / 看几集」限用；答题由屏幕内容生成 |
+| **孩子设备端 Agent（`android/`）** | ✅ 完成 | Java 原生实现，设备端协议 13 组接口；Kiosk / 悬浮窗 / 锁屏页三档锁定 + 无障碍看门狗 + 亮屏即重锁 |
+| **模式切换（学习模式）** | ✅ 完成 | 手动或按时段（0–23 时 × 一周七天）；学习模式下只允许白名单应用，**判定在设备端本地做，断网照常生效** |
+| **护眼设置** | ✅ 完成 | 连续用眼到点强制锁屏休息（不可被临时解锁绕过）、夜间护眼时段、屏幕亮度上限 |
+| **微信 / QQ 功能管控** | ✅ 完成 | 按应用聚合的功能清单逐项开关；设备端用无障碍按界面文本拦截。**拦不住 WebView/画布内容**，见 `android/README.md` §2.4.1 |
+| **家长端响应式** | ✅ 完成 | 竖屏手机 / 横屏手机 / 平板 / 桌面 / 超宽屏五档均可用：宽屏内容居中限宽（不再通栏拉伸）、导航在宽屏变侧栏、横屏矮视口压缩留白 |
 | 管理后台（`/admin`） | ✅ 完成 | 独立管理员体系；数据看板、家长账号/设备/指令/题库管理、验证码审计、操作日志、角色分权 |
 
 > ⚠️ 的这几项后端无法单独完成 —— 任何声称「纯服务端就能读孩子短信」的实现都是假的。
 > 本仓库提供 `server/scripts/device-agent-example.mjs` 作为可运行的客户端参考实现。
+
+> 关于 `password` 最高强度档：该档会随机改写系统锁屏密码，
+> 「重启后自动清除」这条安全阀一度失效（会把设备锁在系统锁屏外），
+> 现已通过 `directBootAware` + `LOCKED_BOOT_COMPLETED` + 设备加密存储修复，
+> 并已纳入端到端回归（改写密码 → 重启 → 断言仍能进入系统）。
+> 详见 [`android/README.md`](android/README.md) §2.4。
 
 ---
 
@@ -162,6 +181,13 @@ balloon-dog/
 
 ---
 
+## 功能状态
+
+**每个功能到底实现了没有、孩子端有没有真正执行**，见
+[`docs/FEATURE-STATUS.md`](docs/FEATURE-STATUS.md) —— 那里有一张三端对照的总表，
+并单独列出「只存不用 / 未实现」的功能（网址拦截、应用限制、应用审核、
+局数预算的设备端兜底、环境监听等）。
+
 ## 验证方式
 
 ```bash
@@ -178,6 +204,23 @@ npm run server:typecheck && npm --prefix server run lint
 ```bash
 npm run e2e           # 家长端 25 项 + 管理后台 30 项
 ```
+
+孩子设备端与屏幕洞察（需要一台模拟器/真机，以及跑着的后端）：
+
+```bash
+npm run android:e2e          # Agent 协议闭环、锁定、保活、重启安全阀等 83 项
+npm run android:e2e:screen   # 截屏采集→上传→AI 分析→锁定复核（21 项）
+npm run android:e2e:mode     # 学习模式拦截 / 护眼 / 插件下发（23 项，真实模拟器）
+npm run server:e2e:insights  # 后端侧屏幕洞察全链路（28 项）
+npm run server:e2e:ai        # AI 分析全链路（对着假视觉服务，28 项）
+npm run server:e2e:mode      # 模式 / 护眼 / 插件管控后端全链路（64 项）
+```
+
+`npm run android:crosstest` 现在覆盖三件事：作息求值（2016 点）、
+模式求值（3024 点）、以及学习模式/插件判定的边界用例（16 项）。
+
+Android 端的作息求值实现与后端 `evaluateSchedule` 做过逐点交叉验证
+（`npm run android:crosstest`，2016 个采样点零差异）。
 
 它用 CDP 直接驱动无头 Chrome（不依赖 playwright/puppeteer），真实点击、真实登录、
 真实读写接口，覆盖：登录与鉴权守卫、真实数据渲染、功能开关的增删、深层路由刷新、

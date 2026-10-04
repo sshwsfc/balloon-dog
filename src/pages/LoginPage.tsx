@@ -213,15 +213,20 @@ export function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-green-400 to-green-600 flex flex-col">
-      <div className="flex-1 flex items-center justify-center px-4 py-8">
-        <div className="w-full max-w-sm">
-          <div className="text-center mb-6">
-            <div className="w-20 h-20 bg-white rounded-2xl mx-auto mb-4 flex items-center justify-center shadow-lg">
-              <div className="text-4xl">🐕</div>
+    <div className="flex min-h-screen flex-col overflow-y-auto bg-gradient-to-br from-green-400 to-green-600">
+      {/*
+        用「父容器不居中 + 子元素 my-auto」而不是 items-center：
+        flex 布局里 items-center 在内容高于容器时会把顶部裁掉（且滚不到），
+        横屏手机（可视高度 320–420px）正好会触发。my-auto 则会在空间不足时退化为顶部对齐。
+      */}
+      <div className="flex flex-1 px-4 py-8 [@media(max-height:600px)]:py-3">
+        <div className="my-auto w-full max-w-sm">
+          <div className="mb-6 text-center [@media(max-height:600px)]:mb-3">
+            <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-2xl bg-white shadow-lg [@media(max-height:600px)]:mb-2 [@media(max-height:600px)]:h-14 [@media(max-height:600px)]:w-14">
+              <div className="text-4xl [@media(max-height:600px)]:text-2xl">🐕</div>
             </div>
-            <h1 className="text-2xl font-bold text-white mb-2">气球狗</h1>
-            <p className="text-white/80 text-sm">孩子的守护者</p>
+            <h1 className="mb-2 text-2xl font-bold text-white">气球狗</h1>
+            <p className="text-sm text-white/80">孩子的守护者</p>
           </div>
 
           <div className="bg-white rounded-2xl shadow-xl p-5">

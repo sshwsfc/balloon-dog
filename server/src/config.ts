@@ -51,6 +51,45 @@ const schema = z.object({
   MEDIA_MAX_SIZE_MB: z.coerce.number().positive().default(10),
   MEDIA_URL_TTL_SECONDS: z.coerce.number().int().positive().default(600),
 
+  // ---- 屏幕行为 AI 洞察 ----
+  // 截屏包（10 张低分辨率 JPEG 的 zip）通常 200~400 KB，给 8 MB 足够宽松
+  SCREEN_BATCH_MAX_SIZE_MB: z.coerce.number().positive().default(8),
+  /** 一个包里最多接受多少张帧，防止构造一个大包打爆磁盘 */
+  SCREEN_BATCH_MAX_FRAMES: z.coerce.number().int().positive().default(30),
+  /** 帧图保留天数（配置里还能按设备覆盖，这里是不设时的默认值） */
+  SCREEN_FRAME_RETENTION_DAYS: z.coerce.number().int().positive().default(7),
+
+  /**
+   * AI 视觉分析。任何 OpenAI 兼容的 /v1 都可以：DeepSeek、DashScope 兼容模式、
+   * 智谱 GLM-4V、本地 Ollama/vLLM 等。
+   *
+   * <b>没有配置 AI_API_KEY 时不会伪造分析结果</b>：批次会被标成 skipped，
+   * 家长端明确显示「未配置 AI」。这是本工程一以贯之的原则 ——
+   * 宁可说不知道，也不给一个看起来像结论的东西。
+   */
+  AI_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  AI_BASE_URL: z.string().default(''),
+  AI_API_KEY: z.string().default(''),
+  AI_VISION_MODEL: z.string().default(''),
+  AI_TEXT_MODEL: z.string().default(''),
+  AI_TIMEOUT_MS: z.coerce.number().int().positive().default(90_000),
+  /** 每个包最多送几张给模型（成本控制，均匀采样） */
+  AI_MAX_FRAMES_PER_BATCH: z.coerce.number().int().positive().default(6),
+  /**
+   * 未配置 AI 时是否启用「启发式降级分析」。
+   *
+   * 它<b>不是 AI</b>：只根据设备端上报的前台包名做分类与时长估算，
+   * 结果里 provider='heuristic'，家长端会明确标注「启发式推断，非 AI 分析」。
+   * 开着它的意义是让整条链路在没有 key 的环境里也能被完整验证。
+   */
+  AI_HEURISTIC_FALLBACK: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+
   // ---- 设备指令队列 ----
   COMMAND_TTL_SECONDS: z.coerce.number().int().positive().default(300),
   COMMAND_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),

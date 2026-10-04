@@ -38,7 +38,9 @@ public final class LockState {
         /** 作息时间表 */
         SCHEDULE,
         /** 每日可用时长用完 */
-        DAILY_LIMIT
+        DAILY_LIMIT,
+        /** 护眼：连续用眼强制休息 / 夜间护眼时段 */
+        EYE_CARE
     }
 
     public final boolean locked;
@@ -90,10 +92,34 @@ public final class LockState {
         public long dailyLimitAt = 0L;
         /** 锁屏前预告秒数，0 表示不预告。 */
         public int countdownSeconds = 30;
+
+        /**
+         * 护眼锁定原因（null 表示不因护眼而锁）。
+         *
+         * <p>两种情形共用这一个入口：**强制休息**（连续用眼到点）与**夜间护眼**。
+         * 它们的优先级高于家长临时解锁 —— 见 {@link #isLockedAt}。
+         */
+        @Nullable
+        public String eyeLockReason = null;
+
+        /**
+         * 护眼锁定的截止时刻（毫秒）。0 表示「由当前条件决定」。
+         *
+         * <p>强制休息有明确结束时刻（休息 N 分钟），所以是固定时间戳；
+         * 夜间护眼是一个时段，每秒重新判定即可，因此用 0。
+         */
+        public long eyeLockUntil = 0L;
+    }
+
+    /** 护眼锁定在某个时刻是否生效。 */
+    private static boolean isEyeLockedAt(Inputs in, long at) {
+        if (in.eyeLockReason == null) return false;
+        return in.eyeLockUntil == 0L || in.eyeLockUntil > at;
     }
 
     /** 某个时刻如果处于锁定，原因是什么。与 {@link #isLockedAt} 的判断顺序保持一致。 */
     private static Reason reasonAt(Inputs in, long at) {
+        if (isEyeLockedAt(in, at)) return Reason.EYE_CARE;
         if (in.grantUntil > at) return Reason.NONE;
         if (in.remoteLocked) return Reason.REMOTE;
         if (in.scheduleEnabled && !in.rules.isEmpty()
@@ -118,6 +144,10 @@ public final class LockState {
             }
             case DAILY_LIMIT:
                 return "今日可用时长已用完";
+            case EYE_CARE:
+                // 直接复用上层算好的说明：强制休息与夜间护眼是两句不同的话，
+                // 在这里再判一次会与 EyeCareController 的逻辑重复并且迟早不一致
+                return in.eyeLockReason;
             default:
                 return null;
         }
@@ -154,6 +184,12 @@ public final class LockState {
 
     /** 某个时刻是否应处于锁定。 */
     static boolean isLockedAt(Inputs in, long at) {
+        // 0) 护眼强制休息 / 夜间护眼 —— 优先级<b>高于</b>一切放行。
+        //
+        // 顺序是刻意的：家长临时解锁、答题奖励都不该能取消「让眼睛休息」。
+        // 一个能被「再答一道题」绕过的护眼提醒没有意义。
+        if (isEyeLockedAt(in, at)) return true;
+
         // 1) 放行期：家长临时解锁 / 答题奖励 / 手动解锁
         if (in.grantUntil > at) return false;
 
@@ -179,7 +215,7 @@ public final class LockState {
      * 而作息表 2 小时后才锁 → 下一次锁定其实是 10 分钟后奖励到期的瞬间）。
      */
     static long findNextLockAt(Inputs in) {
-        if (isLockedAt(in, in.now)) return 0; // 已经锁了，没有「下一次」
+        if (isLockedAt(in, in.now)) return 0; // 已经锁了（含护眼强制休息），没有「下一次」
 
         long from = in.now;
         // 放行期内：最早可能的锁定时刻就是放行结束的那一刻，先单独判一下，
@@ -215,6 +251,8 @@ public final class LockState {
                 return "已锁定（作息：" + detail + "）";
             case DAILY_LIMIT:
                 return "已锁定（今日时长已用完）";
+            case EYE_CARE:
+                return "已锁定（护眼：" + detail + "）";
             default:
                 return "已锁定";
         }

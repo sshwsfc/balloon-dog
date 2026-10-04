@@ -50,6 +50,26 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+    watch: {
+      /**
+       * 不要监视 android/ 与 server/。
+       *
+       * android/.android-home 里放着本机测试用的 AVD —— emulator 每次启动都会往
+       * 那个目录写几百个文件（modem_simulator/**、read-snapshot.txt、快照等），
+       * Vite 会因此疯狂触发整页 reload，既费电又会把 dev server 拖到不稳定
+       * （实测日志里刷满了 `[vite] page reload android/.android-home/avd/...`）。
+       *
+       * server/ 由 tsx watch 自己管，前端不需要因为它改动而重载。
+       * 顺带把构建产物目录也排掉，避免自己触发自己。
+       */
+      ignored: [
+        '**/android/**',
+        '**/server/**',
+        '**/.gradle-home/**',
+        '**/build/**',
+        '**/dist/**',
+      ],
+    },
   },
   build: {
     outDir: 'dist',

@@ -26,7 +26,15 @@
     "android:crosstest": "bash android/scripts/crosstest/run.sh",
     "e2e": "node scripts/browser-e2e.mjs",
     "e2e:parent": "node scripts/browser-e2e.mjs --only=parent",
-    "e2e:admin": "node scripts/browser-e2e.mjs --only=admin"
+    "e2e:admin": "node scripts/browser-e2e.mjs --only=admin",
+    "android:e2e:screen": "node android/scripts/e2e-screen-sampler.mjs",
+    "android:capture": "node android/scripts/capture-screens.mjs",
+    "server:mock:ai": "node server/scripts/mock-ai-server.mjs",
+    "server:e2e:insights": "node server/scripts/e2e-screen-insights.mjs",
+    "server:e2e:ai": "node server/scripts/e2e-ai-analysis.mjs",
+    "server:e2e:mode": "node server/scripts/e2e-mode.mjs",
+    "android:e2e:mode": "node android/scripts/e2e-mode.mjs",
+    "e2e:responsive": "node scripts/browser-e2e.mjs --only=responsive"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",

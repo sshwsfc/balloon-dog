@@ -35,6 +35,22 @@
       SCHEDULE_EXACT_ALARM 在 Android 12+ 需要用户授权，拿不到会退化为不精确闹钟；
       USE_EXACT_ALARM 面向闹钟/日历类应用自动授予，本应用作为管控代理同样需要准点执行。
     -->
+    <!--
+      枚举已安装应用。
+
+      Android 11（API 30）起有「软件包可见性」限制：不加这个权限，
+      queryIntentActivities / getInstalledApplications 只会返回极少数包
+      （实测只拿到 1 个），于是「选择应用」「功能管控」列表几乎是空的，
+      而且学习模式的拦截判据 AppInventory.isLaunchable() 会一律为 false ——
+      拦截**静默失效**，家长设了却完全不起作用，是最难查的那种失败。
+
+      ⚠️ 这是敏感权限，Google Play 需要说明用途（本工程是家长管控类应用，
+      用途正当且必要）。若上架时被拒，退路是改用 <queries> 显式声明要管的应用，
+      代价是「选择应用」只能看到声明过的那些。
+    -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
@@ -145,11 +161,19 @@
         <receiver
             android:name=".service.BootReceiver"
             android:enabled="true"
-            android:exported="true">
+            android:exported="true"
+            android:directBootAware="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <!--
+                  用户解锁前就要收到：password 最高强度档随机改写了系统锁屏密码，
+                  如果等到解锁后才清，而解锁又需要那个随机密码 —— 就是一个死循环，
+                  设备会永久卡在系统锁屏上。directBootAware + LOCKED_BOOT_COMPLETED
+                  是唯一能打破它的时机（见 android/README.md §2.4）。
+                -->
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
 

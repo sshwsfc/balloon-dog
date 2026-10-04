@@ -81,6 +81,8 @@ public final class KioskController {
      */
     public static boolean enter(Activity activity) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return false;
+        // 每次进入前都重设一次白名单，保证与设备所有者权限的状态一致
+        prepare(activity);
         try {
             activity.startLockTask();
         } catch (IllegalStateException | SecurityException e) {
@@ -97,6 +99,32 @@ public final class KioskController {
         return locked;
     }
 
+    /**
+     * 清理「残留的」Lock Task。
+     *
+     * <p>什么时候会残留：进程在锁定期被杀掉（孩子用开发者工具、系统低内存回收、
+     * 覆盖安装等）时，Lock Task 状态是<b>系统持久化</b>的，不会随进程消失。
+     * 实测出现过 `mLockTaskModeState=LOCKED` 但 `mLockTaskModeTasks=` 为空、
+     * 前台停在我们自己的 MainActivity 上 —— 也就是「系统认为设备还在锁定任务里，
+     * 但那个任务已经不存在了」。后果不是安全变强，而是设备行为诡异：
+     * 其它界面被 Lock Task 规则挡住，锁定页又起不来。
+     *
+     * <p>恢复办法只有一个：设备所有者把 Lock Task 白名单清空，系统会立即结束锁定状态。
+     * 之后 {@link #enter} 会重新写回白名单，所以清理不会影响下一次正常锁定。
+     *
+     * <p>只在「进程刚起来、我们的锁定页并不在前台」时调用 —— 那时任何残留都必然是陈旧的。
+     *
+     * @return true 表示确实清理了一个残留状态
+     */
+    public static boolean releaseStaleLockTask(Context context) {
+        if (!LockController.isDeviceOwner(context)) return false;
+        if (!isLocked(context)) return false;
+        if (com.balloondog.agent.ui.LockScreenActivity.isShowing()) return false;
+        EventLog.warn("检测到残留的 Lock Task（无对应锁定界面，多为进程被杀导致），正在清理");
+        release(context);
+        return true;
+    }
+
     /** 退出 kiosk。远程解锁 / 家长撤销锁定时调用。 */
     public static void exit(Activity activity) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return;
@@ -104,6 +132,28 @@ public final class KioskController {
             activity.stopLockTask();
         } catch (IllegalStateException | SecurityException e) {
             EventLog.warn("退出 Lock Task 失败：" + e.getMessage());
+        }
+        if (!isLocked(activity)) return;
+
+        // stopLockTask() 有时一次不生效：系统拆 Lock Task 是异步的。
+        // 实测出现过「家长点了远程解锁、日志也打了『解除锁定』，设备却仍然停在 Kiosk」
+        // —— 这正是需求 3 最不能容忍的静默失效。所以这里重试几次。
+        for (int i = 0; i < 3 && isLocked(activity); i++) {
+            try {
+                Thread.sleep(150L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            try {
+                activity.stopLockTask();
+            } catch (IllegalStateException | SecurityException e) {
+                EventLog.warn("重试退出 Lock Task 失败：" + e.getMessage());
+                break;
+            }
+        }
+        if (isLocked(activity)) {
+            EventLog.warn("退出 Lock Task 未生效（本机不是设备所有者时没有更强的退出手段）");
         }
     }
 

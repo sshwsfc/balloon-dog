@@ -104,8 +104,8 @@ export function DeviceManagePage() {
   }
 
   return (
-    <div className="min-h-screen pb-20 bg-gray-100">
-      <div className="bg-white px-4 py-4 border-b border-gray-200 flex items-center">
+    <div className="page-shell">
+      <div className="page-header flex items-center border-b border-gray-200 bg-white px-4 py-3 [@media(max-height:520px)]:py-2 sm:px-5">
         <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
           <ArrowLeft className="w-5 h-5" />
         </Button>

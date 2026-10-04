@@ -61,6 +61,19 @@ public class LockScreenActivity extends AppCompatActivity {
     private boolean kioskEntered;
     private boolean dismissing;
 
+    /**
+     * 锁定页当前是否在前台。
+     *
+     * <p>供 {@link com.balloondog.agent.capability.LockReassertor} 判断「实际是否锁着」——
+     * 用静态标志而不是去问 WindowManager，是因为它就在同一个进程里，
+     * 精确且零成本。
+     */
+    private static volatile boolean showing;
+
+    public static boolean isShowing() {
+        return showing;
+    }
+
     /** 打开锁定页。 */
     public static void show(Context context, @Nullable String reason, @Nullable String strength) {
         Intent intent = new Intent(context, LockScreenActivity.class);
@@ -70,6 +83,13 @@ public class LockScreenActivity extends AppCompatActivity {
                 | Intent.FLAG_ACTIVITY_CLEAR_TOP
                 | Intent.FLAG_ACTIVITY_SINGLE_TOP
                 | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+        // 没有悬浮窗权限时，应用上下文起 Activity 会被系统的后台启动限制静默拦掉
+        // （锁定直接失效）。无障碍服务是合法豁免，优先借它起。
+        if (!LockOverlayWindow.canShow(context)
+                && LockWatchdogBridge.startActivityFromService(intent)) {
+            EventLog.info("经无障碍服务拉起锁定页（无悬浮窗权限降级路径）");
+            return;
+        }
         try {
             context.startActivity(intent);
         } catch (Exception e) {
@@ -155,6 +175,7 @@ public class LockScreenActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        showing = true;
         enterKioskIfPossible();
         handler.removeCallbacks(ticker);
         handler.post(ticker);
@@ -164,6 +185,12 @@ public class LockScreenActivity extends AppCompatActivity {
     protected void onPause() {
         handler.removeCallbacks(ticker);
         super.onPause();
+    }
+
+    @Override
+    protected void onStop() {
+        showing = false;
+        super.onStop();
     }
 
     @Override
@@ -201,6 +228,17 @@ public class LockScreenActivity extends AppCompatActivity {
         }
 
         // 2) 与服务使用完全相同的判定逻辑复查该不该解锁
+        // 先自愈一次：如果本机残留的是「上一台设备」的锁定策略，这里会把它清掉，
+        // 紧接着的判定就会得出「应当解锁」，锁定页自己关闭。
+        // 这是已经被锁死的设备唯一能自救的地方（不需要用户清数据或重装）。
+        try {
+            if (store.healStalePolicyCache()) {
+                EventLog.warn("已清除陈旧锁定策略，重新判定锁定状态");
+            }
+        } catch (Exception e) {
+            EventLog.warn("锁解锁前自愈失败：" + e.getMessage());
+        }
+
         LockState state = LockState.compute(
                 LockEnforcer.buildInputs(store, System.currentTimeMillis()));
         if (!state.locked) {
@@ -227,9 +265,28 @@ public class LockScreenActivity extends AppCompatActivity {
         if (dismissing) return;
         dismissing = true;
         handler.removeCallbacks(ticker);
+        exitKioskThenFinish(0);
+    }
+
+    /**
+     * 先把 Kiosk 真正退干净，再关闭本页。
+     *
+     * <p>不能 {@code stopLockTask()} 完就立刻 {@code finish()}：系统拆 Lock Task 是异步的，
+     * 还没拆完时 finish 会被 ActivityTaskManager 直接拒绝（实测日志
+     * {@code Not finishing task in lock task mode}），结果就是家长远程解锁了、
+     * 日志也写了「解除锁定」，锁定页却仍然挂在屏幕上 —— 需求 3 最不能容忍的那种静默失效。
+     *
+     * <p>所以这里等状态真的离开 Lock Task 再关，最多重试 3 秒；真退不掉也不能一直卡着，
+     * 到点仍然 finish（此时会记一条警告，由 {@link KioskController#exit} 负责）。
+     */
+    private void exitKioskThenFinish(int attempt) {
         if (kioskEntered || KioskController.isLocked(this)) {
             KioskController.exit(this);
             kioskEntered = false;
+        }
+        if (KioskController.isLocked(this) && attempt < 15) {
+            handler.postDelayed(() -> exitKioskThenFinish(attempt + 1), 200L);
+            return;
         }
         finish();
     }

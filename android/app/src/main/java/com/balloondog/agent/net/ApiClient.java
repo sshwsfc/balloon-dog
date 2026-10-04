@@ -142,6 +142,35 @@ public class ApiClient {
         return execute(request, uploadClient, true);
     }
 
+    /**
+     * 上传截屏包（multipart/form-data）。
+     *
+     * <p>字段：{@code file}=zip，{@code startedAt} / {@code endedAt} / {@code frames}（JSON 数组）
+     * / {@code agentVersion}。元数据与包内图片按顺序一一对应。
+     */
+    public JSONObject uploadScreenBatch(
+            @NonNull String baseUrl,
+            @NonNull byte[] zip,
+            @NonNull String startedAtIso,
+            @NonNull String endedAtIso,
+            @NonNull org.json.JSONArray framesMeta,
+            @NonNull String agentVersion) throws ApiException {
+
+        MultipartBody.Builder builder = new MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("file", "screen-batch.zip",
+                        RequestBody.create(zip, MediaType.get("application/zip")))
+                .addFormDataPart("startedAt", startedAtIso)
+                .addFormDataPart("endedAt", endedAtIso)
+                .addFormDataPart("frames", framesMeta.toString())
+                .addFormDataPart("agentVersion", agentVersion);
+
+        Request request = baseRequest(buildUrl(baseUrl, Constants.PATH_SCREEN_BATCHES, null))
+                .post(builder.build())
+                .build();
+        return execute(request, uploadClient, true);
+    }
+
     // ============================================================
     // 内部
     // ============================================================
@@ -167,6 +196,30 @@ public class ApiClient {
         return url;
     }
 
+    /** 上一次真正去续订令牌的时间。 */
+    private long lastRenewAt;
+    /** 续订的最小间隔。 */
+    private static final long RENEW_INTERVAL_MS = 30_000L;
+
+    /**
+     * 续订令牌，但带上最小间隔。
+     *
+     * <p>为什么必须节流：一旦出现「注册成功但令牌没能落盘」（磁盘满、prefs 文件被外部删掉等），
+     * 每个请求都会 401 → 续订 → 下个请求又 401，形成注册风暴。实测见过每秒十几次
+     * 「注册成功（设备已存在，令牌已续订）」把日志刷满，同时真正的业务请求全部拿不到结果。
+     * 宁可让这几十秒内的请求按 401 失败（上层本来就有自己的重试节奏），
+     * 也不能把服务端和自己的日志打垮。
+     */
+    private synchronized String renewTokenThrottled() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastRenewAt < RENEW_INTERVAL_MS) {
+            EventLog.warn("续订令牌过于频繁，已跳过本次（避免注册风暴）");
+            return null;
+        }
+        lastRenewAt = now;
+        return tokenProvider.renewToken();
+    }
+
     private JSONObject execute(Request request, OkHttpClient client, boolean allowTokenRenew)
             throws ApiException {
         Response response;
@@ -187,13 +240,16 @@ public class ApiClient {
             // 401 只有一次续订机会：续订后再放行，避免递归
             if (status == 401 && allowTokenRenew && tokenProvider != null) {
                 EventLog.warn("设备令牌已失效，正在用设备密钥重新注册续订…");
-                String renewed = tokenProvider.renewToken();
+                String renewed = renewTokenThrottled();
                 if (!TextUtils.isEmpty(renewed)) {
                     Request retry = request.newBuilder()
                             .header("Authorization", "Bearer " + renewed)
                             .build();
                     return execute(retry, client, false);
                 }
+                // 续订被节流挡下（刚试过）：直接按 401 报错，让上层按自己的节奏重试，
+                // 绝不在这里原地再打一轮 —— 那会退化成每秒十几次的注册风暴。
+                throw parseError(status, text);
             }
 
             if (status >= 200 && status < 300) {

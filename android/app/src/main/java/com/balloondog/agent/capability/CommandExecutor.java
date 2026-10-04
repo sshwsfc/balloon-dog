@@ -79,6 +79,13 @@ public class CommandExecutor {
     /** 由 AgentService 提供：应用一份新拉到的管控策略。 */
     public interface ConfigApplier {
         DeviceConfig applyConfig() throws ApiException;
+
+        /**
+         * 让 Agent 立刻上报一次已安装应用清单（`sync_apps` 指令用）。
+         *
+         * <p>它是唯一一条「读类」指令：不改变设备状态，只把清单发上去。
+         */
+        void reportAppsNow();
     }
 
     public CommandExecutor(Context context, AgentStore store, ConfigApplier configApplier) {
@@ -122,6 +129,8 @@ public class CommandExecutor {
                     return doFetchLocation();
                 case Constants.CMD_SYNC_CONFIG:
                     return doSyncConfig();
+                case Constants.CMD_SYNC_APPS:
+                    return doSyncApps();
                 default:
                     return Outcome.fail("不支持的指令类型：" + command.type);
             }
@@ -385,6 +394,26 @@ public class CommandExecutor {
         }
         EventLog.success(String.format(java.util.Locale.US,
                 "已上报位置 %.5f, %.5f", fix.latitude, fix.longitude));
+        return Outcome.ok(result);
+    }
+
+    /**
+     * 重新上报已安装应用清单。
+     *
+     * <p>这是唯一一条「读类」指令：它不改变设备状态，只是把清单发上去，
+     * 好让家长端的选择应用 / 功能管控看到最新的安装情况。
+     */
+    private Outcome doSyncApps() {
+        if (configApplier == null) {
+            return Outcome.fail("服务尚未就绪，无法上报应用清单");
+        }
+        configApplier.reportAppsNow();
+        JSONObject result = new JSONObject();
+        try {
+            result.put("synced", true);
+        } catch (JSONException ignored) {
+            // 原生类型
+        }
         return Outcome.ok(result);
     }
 

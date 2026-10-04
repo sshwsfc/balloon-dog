@@ -76,8 +76,8 @@ export function MediaPage() {
   const visible = filter ? media.filter((m) => m.kind === filter) : media
 
   return (
-    <div className="min-h-screen bg-gray-100">
-      <div className="bg-white px-4 py-4 border-b border-gray-200 flex items-center">
+    <div className="page-shell page-shell--immersive">
+      <div className="page-header flex items-center border-b border-gray-200 bg-white px-4 py-3 [@media(max-height:520px)]:py-2 sm:px-5">
         <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
           <ArrowLeft className="w-5 h-5" />
         </Button>
@@ -144,7 +144,7 @@ export function MediaPage() {
               </CardContent>
             </Card>
           ) : (
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {visible.map((item) => (
                 <Card key={item.id} className="overflow-hidden">
                   <button

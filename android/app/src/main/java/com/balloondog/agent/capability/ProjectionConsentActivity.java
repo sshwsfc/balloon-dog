@@ -12,6 +12,7 @@ import android.widget.TextView;
 
 import androidx.annotation.Nullable;
 
+import com.balloondog.agent.data.AgentStore;
 import com.balloondog.agent.data.EventLog;
 
 import java.util.concurrent.CountDownLatch;
@@ -43,6 +44,22 @@ public class ProjectionConsentActivity extends Activity {
         pendingLatch = latch;
         pendingResultCode = Activity.RESULT_CANCELED;
         pendingData = null;
+
+        // 第二道防线：锁定期间绝不弹这个系统框。它一旦弹出就会盖在锁定页上，
+        // 相当于帮孩子把锁屏顶掉了。采样器已经会跳过，但指令触发的截图
+        // （家长点「立即截图」）也会走到这里，所以这里也必须挡住。
+        try {
+            AgentStore store = new AgentStore(context.getApplicationContext());
+            LockState state = LockState.compute(
+                    LockEnforcer.buildInputs(store, System.currentTimeMillis()));
+            if (state.locked) {
+                throw new CapabilityException("设备当前处于锁定状态，不申请截图授权");
+            }
+        } catch (CapabilityException e) {
+            throw e;
+        } catch (Exception e) {
+            EventLog.warn("申请截图授权前判定锁定状态失败：" + e.getMessage());
+        }
 
         Intent intent = new Intent(context, ProjectionConsentActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK

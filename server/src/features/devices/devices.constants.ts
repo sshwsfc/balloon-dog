@@ -24,6 +24,9 @@ export const FEATURE_DEFS: FeatureDef[] = [
   { key: 'appLimit', label: '应用限制', group: 'basic', defaultEnabled: false, description: '限制应用使用时长' },
   { key: 'appAudit', label: '应用审核', group: 'basic', defaultEnabled: false, description: '审核新安装应用' },
   { key: 'webBlock', label: '网址拦截', group: 'basic', defaultEnabled: false, description: '拦截不良网站' },
+  { key: 'modeSwitch', label: '模式切换', group: 'basic', defaultEnabled: false, description: '学习模式 / 普通模式，学习模式下只允许白名单应用' },
+  { key: 'eyeCare', label: '护眼设置', group: 'basic', defaultEnabled: false, description: '连续用眼提醒、强制休息、夜间护眼' },
+  { key: 'appPlugin', label: '功能管控', group: 'basic', defaultEnabled: false, description: '按应用关闭微信 / QQ 等具体功能' },
   // ---- 高级功能 ----
   { key: 'quizUnlock', label: '答题解锁', group: 'advanced', defaultEnabled: false, description: '通过答题获得使用时长' },
   { key: 'screenMonitor', label: '同屏监控', group: 'advanced', defaultEnabled: false, description: '实时查看屏幕内容' },
@@ -61,6 +64,9 @@ export const COMMAND_TYPES = [
   'stop_audio',
   'fetch_location',
   'sync_config',
+  // 让设备重新上报已安装应用清单（家长点「刷新应用列表」时下发）。
+  // 刻意不叫 sync_apps 之类会让人以为是「同步配置」的名字：它只做一件事。
+  'sync_apps',
 ] as const;
 
 export type CommandType = (typeof COMMAND_TYPES)[number];

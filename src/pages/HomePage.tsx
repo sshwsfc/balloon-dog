@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ToggleSwitch } from '@/components/ToggleSwitch'
 import {
   Dialog,
   DialogContent,
@@ -12,24 +13,39 @@ import {
 } from '@/components/ui/dialog'
 import { toast } from 'sonner'
 import {
+  AlertTriangle,
+  Ban,
   Battery,
   BookOpen,
   CalendarClock,
   Camera,
   Check,
   ChevronRight,
+  ClipboardCheck,
   Clock,
+  Download,
   Eye,
+  EyeOff,
+  Globe,
   Image as ImageIcon,
+  Info,
   Loader2,
   Lock,
   MapPin,
+  MessageCircle,
+  MessageSquare,
   Mic,
-  Phone,
-  Play,
+  Monitor,
+  Moon,
+  Puzzle,
   RefreshCw,
+  Repeat,
+  Settings,
   Shield,
   Smartphone,
+  Trash2,
+  Unlock,
+  Users,
   Video,
   Wifi,
   X,
@@ -39,13 +55,90 @@ import type {
   CommandDispatchResult,
   Device,
   DeviceCommand,
+  DeviceEvent,
   Features,
+  Insight,
   MediaAsset,
   ToggleState,
 } from '@/types'
 
+/**
+ * 首页功能格。
+ *
+ * 这里刻意只放**有真实接口**的入口：没有后端能力的东西要么不放，
+ * 要么在点击时如实说明「当前版本尚未实现」，不做假的成功反馈。
+ */
+interface GridTile {
+  id: string
+  icon: typeof Lock
+  name: string
+  color: string
+  bg: string
+  /** 当前版本没有对应接口，点击只给诚实提示 */
+  unsupported?: boolean
+}
+
+const TILE_GROUPS: { title: string; tiles: GridTile[] }[] = [
+  {
+    title: '设备和应用限制',
+    tiles: [
+      { id: 'mode', icon: Repeat, name: '模式切换', color: 'text-[#07c160]', bg: 'bg-green-50' },
+      { id: 'eyeCare', icon: Eye, name: '护眼设置', color: 'text-cyan-500', bg: 'bg-cyan-50' },
+      { id: 'timePlan', icon: Clock, name: '屏幕时间', color: 'text-purple-500', bg: 'bg-purple-50' },
+      { id: 'appLimit', icon: Smartphone, name: '应用限制', color: 'text-green-500', bg: 'bg-green-50' },
+      { id: 'appAudit', icon: Shield, name: '应用审核', color: 'text-yellow-500', bg: 'bg-yellow-50' },
+      { id: 'webBlock', icon: Globe, name: '网址拦截', color: 'text-red-500', bg: 'bg-red-50' },
+      { id: 'schedule', icon: CalendarClock, name: '定时锁屏', color: 'text-teal-500', bg: 'bg-teal-50' },
+      { id: 'lock', icon: Lock, name: '一键锁屏', color: 'text-orange-500', bg: 'bg-orange-50' },
+      { id: 'tempUnlock', icon: Unlock, name: '临时可用', color: 'text-blue-500', bg: 'bg-blue-50' },
+    ],
+  },
+  {
+    title: '应用管控',
+    tiles: [
+      { id: 'wechat', icon: MessageCircle, name: '微信管控', color: 'text-green-600', bg: 'bg-green-50' },
+      { id: 'qq', icon: MessageSquare, name: 'QQ 管控', color: 'text-blue-500', bg: 'bg-blue-50' },
+      { id: 'plugins', icon: Puzzle, name: '功能管控', color: 'text-violet-500', bg: 'bg-violet-50' },
+      { id: 'appApproval', icon: ClipboardCheck, name: '应用审批', color: 'text-amber-500', bg: 'bg-amber-50' },
+    ],
+  },
+  {
+    title: '远程监控',
+    tiles: [
+      { id: 'insights', icon: Monitor, name: '同屏监控', color: 'text-indigo-500', bg: 'bg-indigo-50' },
+      { id: 'photo', icon: Camera, name: '远程拍照', color: 'text-cyan-500', bg: 'bg-cyan-50' },
+      { id: 'videoRecord', icon: Video, name: '连续录像', color: 'text-fuchsia-500', bg: 'bg-fuchsia-50' },
+      { id: 'audioRecord', icon: Mic, name: '远程录音', color: 'text-rose-500', bg: 'bg-rose-50' },
+      { id: 'screenshot', icon: ImageIcon, name: '截图', color: 'text-sky-500', bg: 'bg-sky-50' },
+      { id: 'location', icon: MapPin, name: '定位', color: 'text-emerald-500', bg: 'bg-emerald-50' },
+    ],
+  },
+  {
+    title: '孩子管理',
+    tiles: [
+      { id: 'devices', icon: Settings, name: '孩子设置', color: 'text-gray-600', bg: 'bg-gray-100' },
+      { id: 'family', icon: Users, name: '家庭成员', color: 'text-gray-400', bg: 'bg-gray-100', unsupported: true },
+      { id: 'hideIcon', icon: EyeOff, name: '隐藏图标', color: 'text-gray-400', bg: 'bg-gray-100', unsupported: true },
+    ],
+  },
+]
+
+/** 设备事件类型 → 图标与配色。未知类型按灰色圆点兜底展示，不假装认识它。 */
+const EVENT_META: Record<string, { icon: typeof Lock; className: string }> = {
+  unlock: { icon: Unlock, className: 'text-green-500' },
+  lock: { icon: Lock, className: 'text-red-500' },
+  screen_on: { icon: Eye, className: 'text-blue-500' },
+  screen_off: { icon: Moon, className: 'text-gray-400' },
+  app_installed: { icon: Download, className: 'text-cyan-500' },
+  app_removed: { icon: Trash2, className: 'text-orange-500' },
+  mode_enter: { icon: Repeat, className: 'text-[#07c160]' },
+  eye_rest: { icon: Eye, className: 'text-cyan-600' },
+  plugin_blocked: { icon: Shield, className: 'text-violet-500' },
+  app_blocked: { icon: Ban, className: 'text-red-500' },
+}
+
 interface FeatureMeta {
-  id: keyof Features | string
+  id: string
   icon: typeof Lock
   name: string
   desc: string
@@ -53,24 +146,23 @@ interface FeatureMeta {
   bg: string
 }
 
-const basicFeatures: FeatureMeta[] = [
-  { id: 'lockScreen', icon: Lock, name: '一键锁屏', desc: '立即锁定设备屏幕', color: 'text-orange-500', bg: 'bg-orange-50' },
-  { id: 'tempUnlock', icon: Shield, name: '临时使用', desc: '授权临时使用权限', color: 'text-blue-500', bg: 'bg-blue-50' },
-  { id: 'schedule', icon: CalendarClock, name: '锁屏设置', desc: '锁屏强度与定时锁屏时间表', color: 'text-teal-500', bg: 'bg-teal-50' },
-  { id: 'timePlan', icon: Clock, name: '时间规划', desc: '设置使用时间限制', color: 'text-purple-500', bg: 'bg-purple-50' },
-  { id: 'appLimit', icon: Smartphone, name: '应用限制', desc: '限制应用使用时长', color: 'text-green-500', bg: 'bg-green-50' },
-  { id: 'appAudit', icon: Shield, name: '应用审核', desc: '审核新安装应用', color: 'text-yellow-500', bg: 'bg-yellow-50' },
-  { id: 'webBlock', icon: MapPin, name: '网址拦截', desc: '拦截不良网站', color: 'text-red-500', bg: 'bg-red-50' },
-]
-
-const advancedFeatures: FeatureMeta[] = [
+/**
+ * 纯开关类功能。
+ *
+ * 九宫格负责「执行动作」，这里负责「启用/停用能力」，两者是同一功能的不同维度，
+ * 不能合并成一个按钮（原实现把开关和动作套在同一个可点击区域里，一次点击发两次请求）。
+ */
+const toggleFeatures: FeatureMeta[] = [
   { id: 'quizUnlock', icon: BookOpen, name: '答题解锁', desc: '通过答题获得使用时长', color: 'text-amber-500', bg: 'bg-amber-50' },
-  { id: 'screenMonitor', icon: Eye, name: '同屏监控', desc: '实时查看屏幕内容', color: 'text-indigo-500', bg: 'bg-indigo-50' },
-  { id: 'remoteHelp', icon: Smartphone, name: '远程协助', desc: '远程操作帮助', color: 'text-pink-500', bg: 'bg-pink-50' },
-  { id: 'callSms', icon: Phone, name: '电话短信', desc: '查看通话和短信', color: 'text-teal-500', bg: 'bg-teal-50' },
+  { id: 'screenMonitor', icon: Eye, name: '屏幕洞察', desc: '周期截屏并交给 AI 分析', color: 'text-indigo-500', bg: 'bg-indigo-50' },
+  { id: 'modeSwitch', icon: Repeat, name: '模式切换', desc: '学习模式 / 普通模式', color: 'text-[#07c160]', bg: 'bg-green-50' },
+  { id: 'eyeCare', icon: Eye, name: '护眼设置', desc: '连续用眼提醒与强制休息', color: 'text-cyan-500', bg: 'bg-cyan-50' },
+  { id: 'appPlugin', icon: Puzzle, name: '功能管控', desc: '按应用关闭具体功能', color: 'text-violet-500', bg: 'bg-violet-50' },
   { id: 'remotePhoto', icon: Camera, name: '远程拍照', desc: '远程拍摄照片', color: 'text-cyan-500', bg: 'bg-cyan-50' },
   { id: 'remoteRecord', icon: Mic, name: '远程录音', desc: '远程录制音频', color: 'text-rose-500', bg: 'bg-rose-50' },
   { id: 'videoRecord', icon: Video, name: '连续录像', desc: '持续视频录制', color: 'text-fuchsia-500', bg: 'bg-fuchsia-50' },
+  { id: 'remoteHelp', icon: Smartphone, name: '远程协助', desc: '远程操作帮助', color: 'text-pink-500', bg: 'bg-pink-50' },
+  { id: 'callSms', icon: MessageCircle, name: '电话短信', desc: '查看通话和短信', color: 'text-teal-500', bg: 'bg-teal-50' },
 ]
 
 /** 指令状态 → 展示文案与配色 */
@@ -81,6 +173,26 @@ const COMMAND_STATUS_VIEW: Record<string, { label: string; className: string }> 
   failed: { label: '执行失败', className: 'bg-red-100 text-red-700' },
   expired: { label: '已超时', className: 'bg-gray-100 text-gray-600' },
   cancelled: { label: '已撤销', className: 'bg-gray-100 text-gray-600' },
+}
+
+function padTwo(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+/** 「1 小时 35 分」这类中文时长；不再显示成裸分钟数 */
+function formatMinutes(minutes: number): string {
+  if (!Number.isFinite(minutes) || minutes <= 0) return '0 分钟'
+  const hours = Math.floor(minutes / 60)
+  const rest = Math.round(minutes % 60)
+  if (hours > 0 && rest > 0) return `${hours} 小时 ${rest} 分`
+  if (hours > 0) return `${hours} 小时`
+  return `${rest} 分钟`
+}
+
+function formatClock(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '--:--'
+  return `${padTwo(date.getHours())}:${padTwo(date.getMinutes())}`
 }
 
 function formatCountdown(untilIso: string, now: number): string | null {
@@ -95,33 +207,6 @@ function formatCountdown(untilIso: string, now: number): string | null {
   return `${seconds}秒后自动锁定`
 }
 
-/**
- * 基础功能列表右侧的状态副标题。
- * 从 JSX 里抽出来是因为分支已经很多，内联三元表达式既难读又容易写错条件顺序。
- */
-function basicFeatureStatus(
-  featureId: string,
-  desc: string,
-  device: Device,
-  features: Features,
-  tempUnlockLabel: string | null,
-): string {
-  switch (featureId) {
-    case 'lockScreen':
-      return device.locked ? '设备已锁定' : '设备正常使用'
-    case 'tempUnlock':
-      return tempUnlockLabel ?? '设备正常锁定'
-    case 'schedule':
-      return '锁屏强度、定时锁屏 / 解锁时间表'
-    case 'timePlan':
-      return `今日已使用 ${features.timePlan.usedToday} 分钟${
-        features.timePlan.dailyLimit > 0 ? `，限制 ${features.timePlan.dailyLimit} 分钟` : '，未设置限制'
-      }`
-    default:
-      return desc
-  }
-}
-
 export function HomePage() {
   const navigate = useNavigate()
 
@@ -129,6 +214,9 @@ export function HomePage() {
   const [features, setFeatures] = useState<Features | null>(null)
   const [commands, setCommands] = useState<DeviceCommand[]>([])
   const [media, setMedia] = useState<MediaAsset[]>([])
+  /** null = 读取失败（与「确实没有动态」区分开，避免把加载失败说成没有动静） */
+  const [events, setEvents] = useState<DeviceEvent[] | null>([])
+  const [insights, setInsights] = useState<Insight[] | null>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
 
@@ -145,6 +233,10 @@ export function HomePage() {
   const [appLimit, setAppLimit] = useState('')
   const [newUrl, setNewUrl] = useState('')
   const [busyFeature, setBusyFeature] = useState<string | null>(null)
+  /** 通栏锁屏按钮自己的忙碌态：它是最重要的按钮，不能和别处共用 busyFeature */
+  const [lockingBusy, setLockingBusy] = useState(false)
+  /** 九宫格里正在执行的动作（拍照 / 录像 / 截图…），用于逐格转圈 */
+  const [busyTile, setBusyTile] = useState<string | null>(null)
 
   /** 倒计时需要一个会走的时钟（原实现读一次就不动了，数字永远不变） */
   const [now, setNow] = useState(() => Date.now())
@@ -154,26 +246,31 @@ export function HomePage() {
   }, [])
 
   const loadData = useCallback(async (options?: { silent?: boolean }) => {
-      try {
-        const [deviceData, featuresData, commandsData, mediaData] = await Promise.all([
-          api.getDevice(),
-          api.getFeatures(),
-          api.getCommands({ limit: 5 }),
-          api.getMedia({ limit: 6 }),
-        ])
-        setDevice(deviceData)
-        setFeatures(featuresData)
-        setCommands(commandsData.commands ?? [])
-        setMedia(mediaData.media ?? [])
-        setLoadError(null)
-      } catch (error) {
-        const message = toUserMessage(error, '加载数据失败，请刷新页面重试')
-        setLoadError(message)
-        // 首次加载失败才弹 toast；静默刷新失败不打扰用户
-        if (!options?.silent) toast.error(message)
-      } finally {
-        setLoading(false)
-      }
+    try {
+      const [deviceData, featuresData, commandsData, mediaData, eventsData, insightsData] = await Promise.all([
+        api.getDevice(),
+        api.getFeatures(),
+        api.getCommands({ limit: 5 }),
+        api.getMedia({ limit: 6 }),
+        // 动态与洞察是「附加信息」，它们失败不该把整页变成错误页
+        api.getDeviceEvents({ pageSize: 20 }).catch(() => null),
+        api.getInsights({ limit: 10 }).catch(() => null),
+      ])
+      setDevice(deviceData)
+      setFeatures(featuresData)
+      setCommands(commandsData.commands ?? [])
+      setMedia(mediaData.media ?? [])
+      setEvents(eventsData ? eventsData.items ?? [] : null)
+      setInsights(insightsData ? insightsData.items ?? [] : null)
+      setLoadError(null)
+    } catch (error) {
+      const message = toUserMessage(error, '加载数据失败，请刷新页面重试')
+      setLoadError(message)
+      // 首次加载失败才弹 toast；静默刷新失败不打扰用户
+      if (!options?.silent) toast.error(message)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -210,10 +307,12 @@ export function HomePage() {
   const handleLockScreen = async () => {
     if (!device) return
     const target = !device.locked
+    setLockingBusy(true)
     const ok = await dispatch(
       () => api.lockScreen(target),
       target ? '锁屏指令已下发' : '解锁指令已下发',
     )
+    setLockingBusy(false)
     if (ok) setLockDialogOpen(false)
   }
 
@@ -353,29 +452,84 @@ export function HomePage() {
     }
   }
 
-  const handleAdvancedAction = (featureId: string) => {
-    switch (featureId) {
-      case 'quizUnlock':
-        navigate('/quiz-unlock')
-        break
-      case 'remotePhoto':
-        void handleTakePhoto()
-        break
-      case 'screenMonitor':
-        void dispatch(() => api.screenshot(), '截图指令已下发')
-        break
+  /**
+   * 九宫格动作分发。
+   *
+   * 没有对应接口的能力（家庭成员 / 隐藏图标）在这里如实说明「尚未实现」，
+   * 而不是弹一个假的成功提示 —— 家长会按提示去做别的操作，错误反馈代价更高。
+   */
+  const handleTileAction = async (tile: GridTile) => {
+    switch (tile.id) {
+      case 'mode':
+        navigate('/mode')
+        return
+      case 'eyeCare':
+        navigate('/eye-care')
+        return
+      case 'timePlan':
+        setTimePlanDialogOpen(true)
+        return
+      case 'appLimit':
+        setAppLimitDialogOpen(true)
+        return
+      case 'appAudit':
+        setAppAuditDialogOpen(true)
+        return
+      case 'webBlock':
+        setWebBlockDialogOpen(true)
+        return
+      case 'schedule':
+        navigate('/schedule')
+        return
+      case 'lock':
+        setLockDialogOpen(true)
+        return
+      case 'tempUnlock':
+        setTempUnlockDialogOpen(true)
+        return
+      case 'wechat':
+        navigate('/app-plugins/com.tencent.mm')
+        return
+      case 'qq':
+        navigate('/app-plugins/com.tencent.mobileqq')
+        return
+      case 'plugins':
+        navigate('/app-plugins')
+        return
+      case 'appApproval':
+        navigate('/app-audit')
+        return
+      case 'insights':
+        // 项目没有实时同屏能力，只有周期截屏 + AI 分析，所以进洞察页而不是假装「同屏」
+        navigate('/insights')
+        return
+      case 'location':
+        navigate('/location')
+        return
+      case 'devices':
+        navigate('/devices')
+        return
+      case 'family':
+      case 'hideIcon':
+        toast.info('该能力需要孩子设备端 Agent 支持，当前版本尚未实现')
+        return
+      case 'photo':
       case 'videoRecord':
-        void handleRecording('video')
-        break
-      case 'remoteRecord':
-        void handleRecording('audio')
-        break
-      case 'remoteHelp':
-      case 'callSms':
-        toast.info('该能力需要孩子设备端 Agent 在线，已记录请求')
-        break
+      case 'audioRecord':
+      case 'screenshot': {
+        setBusyTile(tile.id)
+        try {
+          if (tile.id === 'photo') await handleTakePhoto()
+          else if (tile.id === 'videoRecord') await handleRecording('video')
+          else if (tile.id === 'audioRecord') await handleRecording('audio')
+          else await dispatch(() => api.screenshot(), '截图指令已下发，稍后可在「设备照片」中查看')
+        } finally {
+          setBusyTile(null)
+        }
+        return
+      }
       default:
-        break
+        return
     }
   }
 
@@ -384,9 +538,50 @@ export function HomePage() {
     return formatCountdown(device.tempUnlock, now)
   }, [device?.tempUnlock, now])
 
+  /**
+   * 屏幕亮灭。
+   *
+   * `Device` 接口没有亮屏字段，只能从设备事件流里取最近一条 screen_on / screen_off；
+   * 取不到就显示「未知」，不去猜一个看起来合理但可能是错的结论。
+   */
+  const screenOn = useMemo(() => {
+    if (!events) return null
+    const latest = events.find((event) => event.type === 'screen_on' || event.type === 'screen_off')
+    if (!latest) return null
+    return latest.type === 'screen_on'
+  }, [events])
+
+  /**
+   * 「最近活跃应用」。
+   *
+   * 后端没有「按使用时长排行」的接口，这里用的是**屏幕洞察记录**里出现的应用次数，
+   * 只是一个近似信号，所以界面上的文案必须写成「最近活跃」而不是「使用最多」，
+   * 并明确标注数据来源，避免家长把它当成精确的使用时长统计。
+   */
+  const activeApps = useMemo(() => {
+    if (!insights) return []
+    const counts = new Map<string, number>()
+    for (const insight of insights) {
+      for (const activity of insight.activities) {
+        const name = activity.app || activity.packageName
+        if (!name) continue
+        counts.set(name, (counts.get(name) ?? 0) + 1)
+      }
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .map(([name, count]) => ({ name, count }))
+  }, [insights])
+
+  const usagePercent = useMemo(() => {
+    if (!features || features.timePlan.dailyLimit <= 0) return 0
+    return Math.min(100, Math.round((features.timePlan.usedToday / features.timePlan.dailyLimit) * 100))
+  }, [features])
+
   if (loading) {
     return (
-      <div className="min-h-screen pb-20 bg-gray-100 flex items-center justify-center">
+      <div className="page-shell page-shell--wide page-shell--center">
         <div className="text-center">
           <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#07c160]" />
           <p className="mt-2 text-gray-500 text-sm">加载中...</p>
@@ -398,7 +593,7 @@ export function HomePage() {
   // 加载失败时给出可操作的错误态，而不是继续渲染 null 导致白屏
   if (!device || !features) {
     return (
-      <div className="min-h-screen pb-20 bg-gray-100 flex items-center justify-center px-6">
+      <div className="page-shell page-shell--wide page-shell--center">
         <div className="text-center max-w-sm">
           <Smartphone className="w-12 h-12 text-gray-300 mx-auto mb-3" />
           <p className="text-gray-700 font-medium">暂时拿不到设备信息</p>
@@ -424,8 +619,8 @@ export function HomePage() {
   }
 
   return (
-    <div className="min-h-screen pb-20 bg-gray-100">
-      <div className="bg-white px-4 py-4 border-b border-gray-200 flex items-center justify-between">
+    <div className="page-shell page-shell--wide">
+      <div className="page-header flex items-center justify-between border-b border-gray-200 bg-white px-4 py-3 [@media(max-height:520px)]:py-2 sm:px-5">
         <h1 className="text-xl font-medium text-gray-900">设备监控</h1>
         <button
           type="button"
@@ -437,7 +632,7 @@ export function HomePage() {
         </button>
       </div>
 
-      {/* 设备概览 */}
+      {/* ---------------- 设备概览 ---------------- */}
       <div className="px-3 py-3">
         <Card className="overflow-hidden">
           <CardContent className="p-4">
@@ -451,29 +646,39 @@ export function HomePage() {
                   {device.model} · {device.os}
                 </div>
               </div>
-              <Badge
-                className={
-                  device.status === 'offline'
-                    ? 'bg-gray-400 text-white'
-                    : device.locked
-                      ? 'bg-red-500 text-white'
-                      : 'bg-[#07c160] text-white'
-                }
-              >
-                {device.status === 'offline' ? '离线' : device.locked ? '已锁定' : '在线'}
-              </Badge>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                {device.locked && <Badge className="bg-red-500 text-white">已锁定</Badge>}
+                <Badge className={device.status === 'offline' ? 'bg-gray-400 text-white' : 'bg-[#07c160] text-white'}>
+                  {device.status === 'offline' ? '离线' : '在线'}
+                </Badge>
+              </div>
             </div>
 
-            <div className="flex items-center justify-around mt-4 pt-4 border-t border-gray-100">
-              <div className="flex items-center space-x-1.5">
+            <div className="grid grid-cols-4 gap-2 mt-4 pt-4 border-t border-gray-100">
+              <div className="flex flex-col items-center">
                 <Battery className="w-4 h-4 text-gray-500" />
-                <span className="text-xs text-gray-500">{device.battery}%</span>
+                <span className="text-xs text-gray-500 mt-1">{device.battery}%</span>
               </div>
-              <div className="flex items-center space-x-1.5">
+              <div className="flex flex-col items-center">
                 <Wifi className="w-4 h-4 text-gray-500" />
-                <span className="text-xs text-gray-500">{device.network || '未知网络'}</span>
+                <span className="text-xs text-gray-500 mt-1 truncate max-w-full">
+                  {device.network || '未知网络'}
+                </span>
               </div>
-              <div className="text-xs text-gray-400">{device.lastActive}</div>
+              <div className="flex flex-col items-center">
+                {screenOn === null ? (
+                  <EyeOff className="w-4 h-4 text-gray-300" />
+                ) : (
+                  <Eye className={`w-4 h-4 ${screenOn ? 'text-blue-500' : 'text-gray-400'}`} />
+                )}
+                <span className="text-xs text-gray-500 mt-1">
+                  {screenOn === null ? '屏幕未知' : screenOn ? '屏幕已亮' : '屏幕已灭'}
+                </span>
+              </div>
+              <div className="flex flex-col items-center">
+                <Clock className="w-4 h-4 text-gray-500" />
+                <span className="text-xs text-gray-500 mt-1">{device.lastActive || '未知'}</span>
+              </div>
             </div>
 
             {tempUnlockLabel && (
@@ -485,61 +690,208 @@ export function HomePage() {
         </Card>
       </div>
 
-      {/* 基础功能 */}
+      {/* ---------------- 一键锁屏（通栏，最重要） ---------------- */}
       <div className="px-3">
-        <div className="mb-2 px-1">
-          <span className="text-sm font-medium text-gray-500">基础功能</span>
+        <button
+          type="button"
+          disabled={lockingBusy}
+          onClick={() => void handleLockScreen()}
+          className={`w-full rounded-xl px-4 py-5 flex items-center text-left shadow-lg transition-transform active:scale-[0.99] disabled:opacity-80 ${
+            device.locked
+              ? 'bg-gradient-to-r from-green-500 to-green-600'
+              : 'bg-gradient-to-r from-red-500 to-orange-500'
+          }`}
+        >
+          <div className="w-14 h-14 rounded-full bg-white/25 flex items-center justify-center flex-shrink-0">
+            {lockingBusy ? (
+              <Loader2 className="w-7 h-7 text-white animate-spin" />
+            ) : device.locked ? (
+              <Unlock className="w-7 h-7 text-white" />
+            ) : (
+              <Lock className="w-7 h-7 text-white" />
+            )}
+          </div>
+          <div className="flex-1 min-w-0 ml-4">
+            <div className="text-white text-2xl font-semibold leading-tight">
+              {device.locked ? '已锁定' : '立即锁定'}
+            </div>
+            <div className="text-white/85 text-xs mt-1">
+              {device.locked
+                ? '点击可远程解锁；孩子设备将在下次心跳时执行'
+                : '点击后立即下发锁屏指令，让孩子放下手机'}
+            </div>
+          </div>
+          <ChevronRight className="w-6 h-6 text-white/80 flex-shrink-0" />
+        </button>
+
+        <div className="grid grid-cols-2 gap-2 mt-2">
+          <Button
+            variant="outline"
+            className="bg-white border-gray-200"
+            onClick={() => setTempUnlockDialogOpen(true)}
+          >
+            <Unlock className="w-4 h-4 mr-1 text-blue-500" />
+            {device.tempUnlock ? '取消临时可用' : '临时可用'}
+          </Button>
+          <Button
+            variant="outline"
+            className="bg-white border-gray-200"
+            onClick={() => navigate('/quiz-unlock')}
+          >
+            <BookOpen className="w-4 h-4 mr-1 text-amber-500" />
+            答题解锁
+          </Button>
         </div>
+      </div>
+
+      {/* ---------------- 今日概览：使用时长 / 活跃应用 / 最新动态 ---------------- */}
+      <div className="px-3 mt-3">
         <Card className="overflow-hidden">
-          <CardContent className="p-0">
-            {basicFeatures.map((feature, index) => {
-              const Icon = feature.icon
-              const status = basicFeatureStatus(feature.id, feature.desc, device, features, tempUnlockLabel)
+          <CardContent className="p-4 space-y-4">
+            <div>
+              <div className="flex items-end justify-between">
+                <div>
+                  <div className="text-xs text-gray-400">今日使用时长</div>
+                  <div className="text-2xl font-semibold text-gray-900 mt-0.5">
+                    {formatMinutes(features.timePlan.usedToday)}
+                  </div>
+                </div>
+                <div className="text-xs text-gray-400 text-right">
+                  {features.timePlan.dailyLimit > 0
+                    ? `上限 ${formatMinutes(features.timePlan.dailyLimit)}`
+                    : '未设置上限'}
+                </div>
+              </div>
+              <div className="h-1.5 bg-gray-100 rounded-full mt-2 overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${
+                    usagePercent >= 100 ? 'bg-red-500' : usagePercent >= 80 ? 'bg-orange-500' : 'bg-[#07c160]'
+                  }`}
+                  style={{ width: `${usagePercent}%` }}
+                />
+              </div>
+            </div>
 
-              const onClick = () => {
-                if (feature.id === 'lockScreen') setLockDialogOpen(true)
-                else if (feature.id === 'tempUnlock') setTempUnlockDialogOpen(true)
-                else if (feature.id === 'schedule') navigate('/schedule')
-                else if (feature.id === 'timePlan') setTimePlanDialogOpen(true)
-                else if (feature.id === 'appLimit') setAppLimitDialogOpen(true)
-                else if (feature.id === 'appAudit') setAppAuditDialogOpen(true)
-                else if (feature.id === 'webBlock') setWebBlockDialogOpen(true)
-              }
-
-              return (
-                <div key={feature.id}>
-                  <button
-                    type="button"
-                    onClick={onClick}
-                    className="w-full flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors text-left"
-                  >
-                    <div className="flex items-center space-x-3 flex-1 min-w-0">
-                      <div className={`w-10 h-10 rounded-lg ${feature.bg} flex items-center justify-center flex-shrink-0`}>
-                        <Icon className={`w-5 h-5 ${feature.color}`} />
+            <div className="border-t border-gray-100 pt-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-400">最近活跃应用</span>
+                <button
+                  type="button"
+                  className="text-[11px] text-[#07c160]"
+                  onClick={() => navigate('/insights')}
+                >
+                  查看洞察
+                </button>
+              </div>
+              {insights === null ? (
+                <p className="text-xs text-gray-400 mt-2">屏幕洞察记录读取失败</p>
+              ) : activeApps.length === 0 ? (
+                <p className="text-xs text-gray-400 mt-2">最近没有屏幕洞察记录</p>
+              ) : (
+                <div className="flex items-start gap-3 mt-2 flex-wrap">
+                  {activeApps.map(({ name, count }) => (
+                    <div key={name} className="flex items-center space-x-1.5">
+                      <div className="w-7 h-7 rounded-lg bg-gray-100 flex items-center justify-center text-xs text-gray-600 font-medium">
+                        {name.slice(0, 1)}
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium text-gray-900">{feature.name}</div>
-                        <div className="text-xs text-gray-400 mt-0.5 truncate">{status}</div>
+                      <div className="leading-tight">
+                        <div className="text-xs text-gray-700 max-w-[72px] truncate">{name}</div>
+                        <div className="text-[10px] text-gray-400">{count} 次记录</div>
                       </div>
                     </div>
-                    <ChevronRight className="w-5 h-5 text-gray-300 flex-shrink-0 ml-2" />
-                  </button>
-                  {index < basicFeatures.length - 1 && <div className="mx-4 border-t border-gray-100" />}
+                  ))}
                 </div>
-              )
-            })}
+              )}
+              <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
+                按最近的屏幕洞察记录统计出现次数，不是精确的使用时长排行。
+              </p>
+            </div>
+
+            <div className="border-t border-gray-100 pt-3">
+              <span className="text-xs text-gray-400">最新动态</span>
+              {events === null ? (
+                <p className="text-xs text-gray-400 mt-2">动态加载失败，稍后可下拉刷新重试</p>
+              ) : events.length === 0 ? (
+                <p className="text-xs text-gray-400 mt-2">设备还没有上报任何动态</p>
+              ) : (
+                <div className="mt-2 space-y-2">
+                  {events.slice(0, 3).map((event) => {
+                    const meta = EVENT_META[event.type] ?? { icon: Info, className: 'text-gray-400' }
+                    const Icon = meta.icon
+                    return (
+                      <div key={event.id} className="flex items-start space-x-2">
+                        <Icon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${meta.className}`} />
+                        <span className="text-xs text-gray-500 flex-shrink-0">
+                          {formatClock(event.createdAt)}
+                        </span>
+                        <span className="text-xs text-gray-700 flex-1 min-w-0">{event.detail}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* 高级功能 */}
-      <div className="px-3 mt-3">
-        <div className="mb-2 px-1">
-          <span className="text-sm font-medium text-gray-500">高级功能</span>
+      {/* ---------------- 九宫格功能分组 ---------------- */}
+      {TILE_GROUPS.map((group) => (
+        <div key={group.title} className="px-3 mt-4">
+          <div className="mb-2 px-1 flex items-center justify-between">
+            <span className="text-sm font-medium text-gray-500">{group.title}</span>
+          </div>
+          <Card className="overflow-hidden">
+            <CardContent className="p-3">
+              <div className="grid grid-cols-3 gap-y-4 gap-x-2 sm:grid-cols-4 lg:grid-cols-6">
+                {group.tiles.map((tile) => {
+                  const Icon = tile.icon
+                  const busy = busyTile === tile.id
+                  return (
+                    <button
+                      key={tile.id}
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void handleTileAction(tile)}
+                      className="flex flex-col items-center py-1 rounded-lg hover:bg-gray-50 active:bg-gray-100 transition-colors disabled:opacity-60"
+                    >
+                      <div
+                        className={`w-11 h-11 rounded-xl ${tile.bg} flex items-center justify-center relative`}
+                      >
+                        {busy ? (
+                          <Loader2 className={`w-5 h-5 animate-spin ${tile.color}`} />
+                        ) : (
+                          <Icon className={`w-5 h-5 ${tile.color}`} />
+                        )}
+                        {tile.unsupported && (
+                          <span className="absolute -top-1 -right-1 text-[9px] bg-gray-300 text-white rounded px-1 leading-4">
+                            未开放
+                          </span>
+                        )}
+                      </div>
+                      <span
+                        className={`text-[11px] mt-1.5 ${tile.unsupported ? 'text-gray-400' : 'text-gray-700'}`}
+                      >
+                        {tile.name}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      ))}
+
+      {/* ---------------- 功能开关 ---------------- */}
+      <div className="px-3 mt-4">
+        <div className="mb-2 px-1 flex items-center justify-between">
+          <span className="text-sm font-medium text-gray-500">功能开关</span>
+          <span className="text-xs text-gray-400">启用 / 停用设备能力</span>
         </div>
         <Card className="overflow-hidden">
           <CardContent className="p-0">
-            {advancedFeatures.map((feature, index) => {
+            {toggleFeatures.map((feature, index) => {
               const Icon = feature.icon
               const state = (features as unknown as Record<string, ToggleState | undefined>)[feature.id]
               const enabled = state?.enabled ?? false
@@ -548,61 +900,36 @@ export function HomePage() {
               return (
                 <div key={feature.id}>
                   <div className="flex items-center py-3 px-4 hover:bg-gray-50 transition-colors">
-                    {/*
-                      行主体负责「执行动作」，右侧开关负责「启用功能」。
-                      两者是独立按钮，不再像原实现那样把 onClick 嵌套在可点击 div 里
-                      （那会导致事件冒泡，一次点击发两次请求 / 同时触发两个完全不同的动作）。
-                    */}
-                    <button
-                      type="button"
-                      onClick={() => handleAdvancedAction(feature.id)}
-                      className="flex items-center space-x-3 flex-1 min-w-0 text-left"
-                    >
-                      <div className={`w-10 h-10 rounded-lg ${feature.bg} flex items-center justify-center flex-shrink-0`}>
-                        {feature.id === 'videoRecord' || feature.id === 'remoteRecord' ? (
-                          <Play className={`w-5 h-5 ${feature.color}`} />
-                        ) : (
-                          <Icon className={`w-5 h-5 ${feature.color}`} />
-                        )}
+                    <div className={`w-10 h-10 rounded-lg ${feature.bg} flex items-center justify-center flex-shrink-0`}>
+                      <Icon className={`w-5 h-5 ${feature.color}`} />
+                    </div>
+                    <div className="flex-1 min-w-0 ml-3">
+                      <div className="font-medium text-gray-900 text-sm">{feature.name}</div>
+                      <div className="text-xs text-gray-400 mt-0.5 truncate">
+                        {enabled ? feature.desc : '未开启'}
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium text-gray-900">{feature.name}</div>
-                        <div className="text-xs text-gray-400 mt-0.5 truncate">
-                          {enabled ? feature.desc : '未开启'}
-                        </div>
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={enabled}
-                      aria-label={`${feature.name}开关`}
+                    </div>
+                    <ToggleSwitch
+                      checked={enabled}
+                      busy={busy}
                       disabled={busy}
-                      onClick={() => void handleToggleFeature(feature.id)}
-                      className="w-11 h-6 rounded-full relative flex-shrink-0 ml-2 disabled:opacity-50"
-                    >
-                      <span
-                        className={`absolute w-5 h-5 rounded-full top-0.5 bg-white shadow transition-all ${
-                          enabled ? 'right-0.5' : 'left-0.5'
-                        }`}
-                      />
-                      <span className={`block w-full h-full rounded-full ${enabled ? 'bg-[#07c160]' : 'bg-gray-300'}`} />
-                      {busy && (
-                        <Loader2 className="w-3 h-3 absolute inset-0 m-auto animate-spin text-white mix-blend-difference" />
-                      )}
-                    </button>
+                      label={`${feature.name}开关`}
+                      onChange={() => void handleToggleFeature(feature.id)}
+                    />
                   </div>
-                  {index < advancedFeatures.length - 1 && <div className="mx-4 border-t border-gray-100" />}
+                  {index < toggleFeatures.length - 1 && <div className="mx-4 border-t border-gray-100" />}
                 </div>
               )
             })}
           </CardContent>
         </Card>
+        <p className="text-[10px] text-gray-400 mt-2 px-1 leading-relaxed">
+          「远程协助」「电话短信」目前只有开关占位，孩子设备端 Agent 还没有对应实现，点击不会产生实际效果。
+        </p>
       </div>
 
-      {/* 最近指令：让家长看到「指令下发」之后的真实执行情况 */}
-      <div className="px-3 mt-3">
+      {/* ---------------- 最近指令 ---------------- */}
+      <div className="px-3 mt-4">
         <div className="mb-2 px-1 flex items-center justify-between">
           <span className="text-sm font-medium text-gray-500">最近指令</span>
           <span className="text-xs text-gray-400">由孩子设备执行并回报</span>
@@ -638,8 +965,8 @@ export function HomePage() {
         </Card>
       </div>
 
-      {/* 最近媒体 */}
-      <div className="px-3 mt-3">
+      {/* ---------------- 最近媒体 ---------------- */}
+      <div className="px-3 mt-4">
         <div className="mb-2 px-1 flex items-center justify-between">
           <span className="text-sm font-medium text-gray-500">设备照片</span>
           <Link to="/media" className="text-xs text-[#07c160]">
@@ -654,7 +981,7 @@ export function HomePage() {
                 <p className="text-xs text-gray-400">暂无照片，点击「远程拍照」试试</p>
               </div>
             ) : (
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6">
                 {media.map((item) => (
                   <Link key={item.id} to="/media" className="block">
                     <div className="aspect-square rounded-lg bg-gray-100 overflow-hidden">
@@ -693,7 +1020,11 @@ export function HomePage() {
             <Button variant="outline" onClick={() => setLockDialogOpen(false)}>
               取消
             </Button>
-            <Button className="bg-[#07c160] hover:bg-[#06a050]" onClick={() => void handleLockScreen()}>
+            <Button
+              className="bg-[#07c160] hover:bg-[#06a050]"
+              disabled={lockingBusy}
+              onClick={() => void handleLockScreen()}
+            >
               {device.locked ? '解锁' : '锁定'}
             </Button>
           </DialogFooter>
@@ -754,11 +1085,11 @@ export function HomePage() {
         </DialogContent>
       </Dialog>
 
-      {/* ---------------- 时间规划 ---------------- */}
+      {/* ---------------- 屏幕时间 ---------------- */}
       <Dialog open={timePlanDialogOpen} onOpenChange={setTimePlanDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>时间规划</DialogTitle>
+            <DialogTitle>屏幕时间限制</DialogTitle>
           </DialogHeader>
           <p className="text-gray-600 mb-4">设置每日使用时长上限（分钟）：</p>
           <div className="grid grid-cols-3 gap-2 mb-4">
@@ -871,6 +1202,13 @@ export function HomePage() {
           <DialogHeader>
             <DialogTitle>应用审核</DialogTitle>
           </DialogHeader>
+          <div className="flex items-start space-x-2 bg-amber-50 border border-amber-200 rounded-lg p-2.5 mb-3">
+            <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+            <p className="text-xs text-amber-700 leading-relaxed">
+              Android 没有「安装前弹给家长审批」的系统接口。这里只处理孩子设备上报的安装请求；
+              完整的说明与开关在「应用审批」页面。
+            </p>
+          </div>
           {features.appAudit.pendingApps.length > 0 ? (
             <div className="space-y-3">
               <p className="text-gray-600">以下应用等待审核：</p>
@@ -896,6 +1234,9 @@ export function HomePage() {
             <p className="text-gray-600 text-center py-4">暂无待审核的应用</p>
           )}
           <DialogFooter>
+            <Button variant="outline" onClick={() => navigate('/app-audit')}>
+              去应用审批设置
+            </Button>
             <Button onClick={() => setAppAuditDialogOpen(false)}>关闭</Button>
           </DialogFooter>
         </DialogContent>
@@ -928,7 +1269,6 @@ export function HomePage() {
                   {features.webBlock.blockedUrls.map((url) => (
                     <div key={url} className="flex items-center justify-between p-2 bg-gray-50 rounded text-sm">
                       <span className="text-gray-700 truncate">{url}</span>
-                      {/* 原实现这里只是个装饰性图标，点不了；现在真的能取消拦截 */}
                       <button
                         type="button"
                         onClick={() => void handleUnblockUrl(url)}
@@ -948,6 +1288,13 @@ export function HomePage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <div className="px-3 mt-4">
+        <p className="text-[10px] text-gray-400 leading-relaxed px-1">
+          提示：所有远程操作（锁屏、拍照、录像、截图）都需要孩子设备端 Agent 在线。
+          离线时指令会排队，设备上线后执行。
+        </p>
+      </div>
     </div>
   )
 }

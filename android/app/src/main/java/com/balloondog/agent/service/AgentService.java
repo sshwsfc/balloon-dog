@@ -98,6 +98,44 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
      */
     private final com.balloondog.agent.capability.LockEnforcer lockEnforcer =
             new com.balloondog.agent.capability.LockEnforcer();
+
+    /**
+     * 锁定状态复核器：每 3 秒核实「策略要求锁定，实际是不是真的锁着」，
+     * 没锁就再锁一次。这是「只要进程还在，就一定锁得住」的那一半。
+     */
+    /**
+     * 当前运行中的实例。
+     *
+     * <p>给无障碍看门狗用：它要上报「拦截了某个插件」这类事件，而事件上报必须走
+     * AgentService 里那套统一的令牌刷新与网络栈，不能在服务里再开一条。
+     * 服务没跑时为 null，调用方需要自己判空。
+     */
+    private static volatile AgentService current;
+
+    private com.balloondog.agent.capability.LockReassertor lockReassertor;
+    /** 护眼执行者：连续用眼计时 → 强制休息；夜间护眼；亮度上限。 */
+    private com.balloondog.agent.capability.EyeCareController eyeCare;
+    /** 已安装应用清单：学习模式拦截的权威判据 + 上报家长端的数据来源。 */
+    private final com.balloondog.agent.capability.AppInventory appInventory =
+            new com.balloondog.agent.capability.AppInventory();
+    /**
+     * 待上报的设备事件。
+     *
+     * <p>刻意在内存里排队、批量上报：解锁、亮屏这类事件一天可能上百条，
+     * 每条一个请求既费电又容易被限流。攒够一批或隔一段时间统一发。
+     * 进程被杀会丢掉未发送的事件 —— 这是可接受的取舍（它是展示用的动态流，
+     * 不是计费数据），换来的是不必为此再建一张本地表。
+     */
+    private final java.util.List<org.json.JSONObject> pendingEvents =
+            java.util.Collections.synchronizedList(new java.util.ArrayList<org.json.JSONObject>());
+    private long lastEventFlushAt;
+
+    /** 周期截屏采样（家长开启后才工作）。 */
+    private com.balloondog.agent.capability.ScreenSampler screenSampler;
+    private com.balloondog.agent.capability.FrameBatchUploader frameUploader;
+
+    /** 亮屏 / 解锁接收器。Android 8+ 隐式广播不能静态注册，只能动态注册。 */
+    private ScreenStateReceiver screenStateReceiver;
     private Thread tickerThread;
     private volatile boolean ticking;
     private long lastUsageTickMs;
@@ -148,6 +186,31 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
         executor = new CommandExecutor(this, store, this);
         AgentNotifications.ensureChannels(this);
 
+        lockReassertor = new com.balloondog.agent.capability.LockReassertor(this, store, lockEnforcer);
+        eyeCare = new com.balloondog.agent.capability.EyeCareController(this, store);
+        screenSampler = new com.balloondog.agent.capability.ScreenSampler(this, store);
+        frameUploader = new com.balloondog.agent.capability.FrameBatchUploader(this, store);
+        registerScreenStateReceiver();
+
+        // 进程刚起来时清理可能残留的 Lock Task。
+        // 进程在锁定期被杀掉的话，Lock Task 状态是系统持久化的，不会随进程消失，
+        // 会留下「系统认为还在锁定任务里、但任务已经不存在」的诡异状态。
+        // 此刻我们的锁定页必然不在前台，所以任何残留都是陈旧的，可以安全清掉。
+        try {
+            com.balloondog.agent.capability.KioskController.releaseStaleLockTask(this);
+        } catch (Exception e) {
+            EventLog.warn("清理残留 Lock Task 失败：" + e.getMessage());
+        }
+
+        // 丢掉不属于当前设备的陈旧锁定策略：身份变过（解绑后重新注册）却还留着旧策略时，
+        // 设备会被一台已经不存在的设备锁死。放在这里是为了让已经卡住的设备也能自己恢复。
+        try {
+            store.healStalePolicyCache();
+        } catch (Exception e) {
+            EventLog.warn("清理陈旧锁定策略失败：" + e.getMessage());
+        }
+
+        current = this;
         startForegroundCompat();
         serviceRunning = true;
         store.markServiceAlive();
@@ -205,6 +268,18 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
             return START_NOT_STICKY;
         }
 
+        // 亮屏 / 解锁：立即复核一次锁定状态，不等 3 秒周期。
+        // 这条路径是「孩子想绕过管控点亮屏幕」的第一道反应。
+        if (Constants.ACTION_SCREEN_ON.equals(action) && lockReassertor != null) {
+            store.setAgentEnabled(true);
+            // 「点亮屏幕」与「解锁完成」是家长最想看到的两种动态，分开记：
+            // 前者说明孩子动了手机，后者说明他真的进到系统里了。
+            recordEvent(isUserPresentExtra(intent)
+                            ? Constants.EVENT_UNLOCK : Constants.EVENT_SCREEN_ON,
+                    isUserPresentExtra(intent) ? "解锁并点亮屏幕" : "点亮屏幕");
+            lockReassertor.onScreenOn();
+        }
+
         store.setAgentEnabled(true);
         if (!running) {
             running = true;
@@ -249,6 +324,7 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
         running = false;
         ticking = false;
         serviceRunning = false;
+        current = null;
         EventLog.info("Agent 服务已停止");
         store.setAgentEnabled(false);
 
@@ -270,6 +346,7 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
         } catch (Exception e) {
             EventLog.error("停止守护时解除锁定失败：" + e.getMessage());
         }
+        unregisterScreenStateReceiver();
         WatchdogScheduler.cancel(this);
 
         // 正在进行的采集要收干净，否则相机/麦克风会被一直占着
@@ -369,9 +446,11 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
                     store.getDeviceSecret(),
                     store.getDeviceName());
 
-            store.setDeviceToken(result.deviceToken);
-            store.setDeviceId(result.deviceId);
-            store.setBound(result.bound);
+            if (store.applyRegistration(result.deviceId, result.deviceToken, result.bound)) {
+                // 身份变了：本地锁定态已经清掉，立刻重新拉一次配置，
+                // 不要让设备在旧策略下多锁一秒
+                lastConfigAt = 0L;
+            }
 
             if (result.created) {
                 EventLog.success("注册成功（新设备），绑定码 " + result.deviceCode);
@@ -457,6 +536,41 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
         store.setBlockedUrls(joinBlockedUrls(config));
         store.setAppLimits(describeAppLimits(config));
 
+        // 模式切换 / 护眼 / 应用插件：三样都必须落盘 ——
+        // 学习模式与插件拦截是「孩子拿不到网也必须生效」的规则，
+        // 只放在内存里等于拔网线即失效。
+        String previousMode = com.balloondog.agent.capability.StudyModeEngine
+                .evaluate(store.getModeConfig(), System.currentTimeMillis());
+        store.setModeConfig(config.mode);
+        store.setEyeCareConfig(config.eyeCare);
+        store.setPluginRules(config.appPlugins);
+        String currentMode = com.balloondog.agent.capability.StudyModeEngine
+                .evaluate(config.mode, System.currentTimeMillis());
+        if (!previousMode.equals(currentMode)) {
+            EventLog.warn("study".equals(currentMode) ? "已进入学习模式（只允许白名单应用）" : "已退出学习模式");
+            recordEvent(Constants.EVENT_MODE_ENTER,
+                    "study".equals(currentMode) ? "进入学习模式" : "退出学习模式");
+        }
+
+        // 屏幕行为洞察：截屏设置与今日额度。
+        // 额度必须落盘 —— 离线时设备端还要靠它兜底锁屏。
+        boolean captureChanged = config.captureEnabled != store.isCaptureEnabled();
+        store.setCaptureEnabled(config.captureEnabled);
+        store.setCaptureIntervalSeconds(config.captureIntervalSeconds);
+        store.setFramesPerBatch(config.framesPerBatch);
+        store.setQuizFromScreen(config.quizFromScreen);
+        store.setGameRoundsBudget(config.gameRoundsLimited, config.gameRoundsLimit, config.gameRoundsUsed);
+        store.setVideoEpisodesBudget(config.videoEpisodesLimited, config.videoEpisodesLimit, config.videoEpisodesUsed);
+        if (captureChanged) {
+            EventLog.warn(config.captureEnabled
+                    ? "家长已开启周期截屏（每 " + config.captureIntervalSeconds + " 秒一张，"
+                            + config.framesPerBatch + " 张一包）"
+                    : "家长已关闭周期截屏，正在清空本地缓存帧");
+            if (!config.captureEnabled) {
+                com.balloondog.agent.capability.ScreenSampler.clear(this);
+            }
+        }
+
         // 锁屏强度与时间表：必须落盘，锁屏要在断网时照常生效
         boolean strengthChanged = !config.lockStrength.equals(store.getLockStrength());
         store.setLockStrength(config.lockStrength);
@@ -541,10 +655,36 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
                     }
                 }
 
+                // ---- 1.5) 护眼计时 ----
+                // 必须排在 LockState 判定之前：这一秒刚好到点的话，
+                // 同一次 tick 就应该直接进入强制休息，而不是等下一秒。
+                boolean eyeChanged = false;
+                try {
+                    eyeChanged = eyeCare.tick(isScreenInteractive(), store.isLocked(), nowWall);
+                    if (eyeChanged) {
+                        recordEvent(Constants.EVENT_EYE_REST, "护眼：进入强制休息");
+                    }
+                } catch (Exception e) {
+                    EventLog.warn("护眼计时异常：" + e.getMessage());
+                }
+
                 // ---- 2) 判定 + 落地 ----
                 LockState state = LockState.compute(
                         com.balloondog.agent.capability.LockEnforcer.buildInputs(store, nowWall));
                 boolean changed = lockEnforcer.apply(this, store, state, store.isQuizEnabled());
+
+                // ---- 3) 锁定状态复核：即便状态没翻转，也要核实「实际是不是真锁着」。
+                //      孩子用任何办法把锁屏弄掉，这里都会在 3 秒内发现并重新锁上。
+                if (lockReassertor != null && lockReassertor.tick()) {
+                    changed = true;
+                }
+
+                // ---- 4) 周期截屏采样与打包上传（家长开启后才做）----
+                tickScreenSampling(nowWall);
+
+                // ---- 4.5) 应用清单与设备事件上报 ----
+                tickAppInventory(nowWall);
+                tickEventFlush(nowWall);
                 if (changed) {
                     EventLog.warn("锁定状态变化 → " + state.describe());
                     updateNotification("已绑定 · " + state.describe());
@@ -563,6 +703,165 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
             }
             sleepQuietly(1_000L);
         }
+    }
+
+    // ============================================================
+    // 模式 / 护眼 / 应用的支撑逻辑
+    // ============================================================
+
+    /** 转发过来的广播里是否带了「用户已解锁」标记（见 ScreenStateReceiver）。 */
+    private static boolean isUserPresentExtra(android.content.Intent intent) {
+        return intent != null && intent.getBooleanExtra("userPresent", false);
+    }
+
+    /** 屏幕是否亮着（护眼计时与「亮屏才算用眼」的判据）。 */
+    private boolean isScreenInteractive() {
+        try {
+            android.os.PowerManager pm =
+                    (android.os.PowerManager) getSystemService(POWER_SERVICE);
+            return pm != null && pm.isInteractive();
+        } catch (Exception e) {
+            // 读不到就当作熄屏：宁可少算一次用眼，也不要因为异常把休息计时算错
+            return false;
+        }
+    }
+
+    /**
+     * 记一条设备事件，攒着批量上报。
+     *
+     * <p>供本类与无障碍看门狗（拦截事件）调用。用静态实例指针而不是让看门狗自己发请求：
+     * 上报要走同一个令牌刷新与 401 重试链路，散落成多处迟早会出现「某一处没重试」。
+     */
+    public static void recordEventStatic(String type, String detail) {
+        AgentService instance = current;
+        if (instance != null) instance.recordEvent(type, detail);
+    }
+
+    private void recordEvent(String type, String detail) {
+        try {
+            org.json.JSONObject o = new org.json.JSONObject();
+            o.put("type", type);
+            o.put("detail", detail == null ? "" : detail);
+            o.put("at", System.currentTimeMillis());
+            pendingEvents.add(o);
+            // 事件流是展示用的，堆太多没意义；超出就丢最旧的
+            while (pendingEvents.size() > 200) pendingEvents.remove(0);
+        } catch (Exception ignored) {
+            // 记事件失败绝不能影响主流程
+        }
+    }
+
+    /** 定期把攒下的事件发上去。 */
+    private void tickEventFlush(long nowWall) {
+        if (pendingEvents.isEmpty()) return;
+        if (lastEventFlushAt != 0
+                && nowWall - lastEventFlushAt < Constants.EVENT_FLUSH_INTERVAL_MS) {
+            return;
+        }
+        lastEventFlushAt = nowWall;
+
+        java.util.List<org.json.JSONObject> batch;
+        synchronized (pendingEvents) {
+            batch = new java.util.ArrayList<>(pendingEvents);
+            pendingEvents.clear();
+        }
+        try {
+            api.reportEvents(store.getBaseUrl(), new org.json.JSONArray(batch));
+        } catch (Exception e) {
+            // 发失败就丢掉这一批：事件是展示用的动态流，不值得为它做重试队列
+            // （重试队列是给指令结果那种「必须送达」的东西准备的）。
+            EventLog.warn("上报设备事件失败（本批 " + batch.size() + " 条，已丢弃）："
+                    + e.getMessage());
+        }
+    }
+
+    /**
+     * 应用清单上报。
+     *
+     * <p>平时每 12 小时一次（应用安装/卸载并不频繁），家长点「刷新应用列表」时会
+     * 通过 sync_apps 指令立刻触发一次。
+     */
+    private void tickAppInventory(long nowWall) {
+        long last = store.getAppsReportedAt();
+        if (last != 0 && nowWall - last < Constants.APP_REPORT_INTERVAL_MS) return;
+        reportAppsNow();
+    }
+
+    /** 立刻上报应用清单（也会顺带刷新本地可启动应用缓存）。 */
+    public void reportAppsNow() {
+        try {
+            appInventory.scan(this);
+            java.util.List<com.balloondog.agent.capability.AppInventory.AppEntry> apps =
+                    appInventory.snapshot(this);
+            api.reportApps(store.getBaseUrl(), apps);
+            store.setAppsReportedAt(System.currentTimeMillis());
+            EventLog.info("已上报应用清单，共 " + apps.size() + " 个");
+        } catch (Exception e) {
+            EventLog.warn("上报应用清单失败：" + e.getMessage());
+        }
+    }
+
+    /** 供无障碍看门狗做学习模式拦截时查询「这个包是不是可启动的普通应用」。 */
+    public com.balloondog.agent.capability.AppInventory appInventory() {
+        return appInventory;
+    }
+
+    /**
+     * 周期截屏与上传。
+     *
+     * <p>采样与上传都在 ticker 线程里串行做：截图本身要几百毫秒，
+     * 并发只会让投影争用（和采集类指令同一个道理）。
+     * 上传走网络可能较慢，但它有自己的退避，失败不会卡住 ticker。
+     */
+    private void tickScreenSampling(long nowWall) {
+        if (screenSampler == null || frameUploader == null) return;
+        if (!store.isCaptureEnabled()) return;
+
+        try {
+            java.util.List<com.balloondog.agent.capability.ScreenSampler.SampledFrame> batch =
+                    screenSampler.maybeSample(nowWall);
+            if (batch != null && !batch.isEmpty()) {
+                frameUploader.upload(batch);
+            }
+        } catch (Exception e) {
+            // 采样绝不能把 ticker 弄挂 —— 它挂了锁定复核也就停了
+            EventLog.warn("截屏采样异常：" + e.getMessage());
+        }
+    }
+
+    private void registerScreenStateReceiver() {
+        if (screenStateReceiver != null) return;
+        screenStateReceiver = new ScreenStateReceiver();
+        android.content.IntentFilter filter = new android.content.IntentFilter();
+        filter.addAction(android.content.Intent.ACTION_SCREEN_ON);
+        filter.addAction(android.content.Intent.ACTION_USER_PRESENT);
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                // 必须是 EXPORTED：ACTION_USER_PRESENT 由 com.android.systemui（另一个 uid）发出，
+                // RECEIVER_NOT_EXPORTED 会被系统直接判为「Exported Denial」丢弃 ——
+                // 实测日志：BroadcastQueue: Exported Denial: sending Intent { act=...USER_PRESENT }
+                // ... not specifying RECEIVER_EXPORTED。也就是「解锁完成」这一刻我们根本收不到。
+                //
+                // 被第三方伪造的风险可接受：这个接收器只会触发一次「锁定状态复核」，
+                // 而复核只会让设备更锁、绝不会解锁，所以伪造最多造成一次多余的重新锁定。
+                registerReceiver(screenStateReceiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                registerReceiver(screenStateReceiver, filter);
+            }
+        } catch (Exception e) {
+            EventLog.warn("注册亮屏监听失败：" + e.getMessage());
+            screenStateReceiver = null;
+        }
+    }
+
+    private void unregisterScreenStateReceiver() {
+        if (screenStateReceiver == null) return;
+        try {
+            unregisterReceiver(screenStateReceiver);
+        } catch (IllegalArgumentException ignored) {
+            // 未注册成功时忽略
+        }
+        screenStateReceiver = null;
     }
 
     /**

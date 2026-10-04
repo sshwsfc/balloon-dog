@@ -54,9 +54,7 @@ public class AgentApp extends Application implements ApiClient.TokenProvider {
         try {
             AgentApi.RegisterResult result = new AgentApi().register(
                     store.getBaseUrl(), store.getDeviceCode(), store.getDeviceSecret(), store.getDeviceName());
-            store.setDeviceToken(result.deviceToken);
-            store.setDeviceId(result.deviceId);
-            store.setBound(result.bound);
+            store.applyRegistration(result.deviceId, result.deviceToken, result.bound);
             EventLog.success("已用设备密钥续订令牌");
             return result.deviceToken;
         } catch (ApiException e) {

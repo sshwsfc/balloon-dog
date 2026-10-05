@@ -49,33 +49,38 @@ model User {
 // ============================================================
 
 model ChildDevice {
-  id               String    @id @default(cuid())
+  id                   String    @id @default(cuid())
   // 可为空：设备端 Agent 先自助注册（userId 为空 = 待认领），家长再凭绑定码认领。
   // mock 版没有归属概念，任何未登录请求都能读写「全局那一台设备」，这里从模型层面就堵死。
-  userId           Int?
-  user             User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name             String // 家长起的名字，如「小明的小米手机」
-  model            String    @default("Unknown")
-  os               String    @default("Unknown") // Android | iOS | HarmonyOS
-  osVersion        String    @default("")
-  avatar           String    @default("")
-  deviceCode       String    @unique // 设备绑定码：设备端生成并展示，家长输入后完成认领
-  deviceSecretHash String // 设备端密钥的 bcrypt 哈希（设备端用于续订 device token）
-  boundAt          DateTime? // 家长认领时间；null 表示尚未被任何家长绑定
-  status           String    @default("offline") // online | offline
-  battery          Int       @default(0)
-  network          String    @default("unknown") // wifi | cellular | ethernet | unknown
-  locked           Boolean   @default(false) // 家长的<b>期望</b>状态（远程锁定）
-  tempUnlockUntil  DateTime? // 临时解锁到期时间（null 表示未临时解锁）
+  userId               Int?
+  user                 User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                 String // 家长起的名字，如「小明的小米手机」
+  model                String    @default("Unknown")
+  os                   String    @default("Unknown") // Android | iOS | HarmonyOS
+  osVersion            String    @default("")
+  avatar               String    @default("")
+  /// 隐藏孩子设备桌面上的图标（§9）。设备端按此值切换 activity-alias 的启用状态。
+  hideIcon             Boolean   @default(false)
+  deviceCode           String    @unique // 设备绑定码：设备端生成并展示，家长输入后完成认领
+  deviceSecretHash     String // 设备端密钥的 bcrypt 哈希（设备端用于续订 device token）
+  boundAt              DateTime? // 家长认领时间；null 表示尚未被任何家长绑定
+  status               String    @default("offline") // online | offline
+  battery              Int       @default(0)
+  network              String    @default("unknown") // wifi | cellular | ethernet | unknown
+  locked               Boolean   @default(false) // 家长的<b>期望</b>状态（远程锁定）
+  tempUnlockUntil      DateTime? // 临时解锁到期时间（null 表示未临时解锁）
   // 设备上<b>实际</b>的锁定状态。与 locked 刻意分开：
   // 设备可能因为作息时间表或每日额度而锁定，那与家长的远程指令无关。
   // 只报期望值会让家长在「作息时间到了」时看到「未锁定」这种错误结论。
-  effectiveLocked  Boolean   @default(false)
-  lockReason       String    @default("") // 生效锁定原因的人话说明
-  agentVersion     String    @default("")
-  lastActiveAt     DateTime?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  effectiveLocked      Boolean   @default(false)
+  lockReason           String    @default("") // 生效锁定原因的人话说明
+  /// 应用审核批准后的「允许安装」窗口截止时间（§3）。null = 当前没有放行窗口。
+  /// 家长批准某条 AppAuditRequest 时置为 now + 30 分钟，随 /agent/config 下发。
+  installApprovalUntil DateTime?
+  agentVersion         String    @default("")
+  lastActiveAt         DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
   features       DeviceFeature[]
   timePlan       TimePlan?
@@ -104,6 +109,8 @@ model ChildDevice {
   eyeCare        EyeCareConfig?
   appPlugins     AppPluginState[]
   events         DeviceEvent[]
+  callLogs       CallLogEntry[]
+  smsMessages    SmsMessage[]
 
   @@index([userId])
   @@index([userId, status])
@@ -155,6 +162,12 @@ model AppLimit {
   packageName       String      @default("") // Android 包名 / iOS Bundle ID
   dailyLimitMinutes Int         @default(0)
   enabled           Boolean     @default(true)
+  /// 今日已用秒数（§4）。设备端上报、服务端只存与展示，**不参与判定**：
+  /// 真正的逐应用限时由设备端本地用上报值判定（离线也要拦得住）。
+  usedTodaySeconds  Int         @default(0)
+  /// usedTodaySeconds 归属的自然日（YYYY-MM-DD，服务端时区）。
+  /// 与 TimePlan.resetAt 一样走「读取时惰性归零」，不依赖定时任务。
+  usageDay          String      @default("")
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
@@ -244,6 +257,8 @@ model SafeZone {
   radiusMeters Int         @default(200)
   address      String      @default("")
   type         String      @default("other") // home | school | other
+  /// 只有 enabled 的安全区才下发到设备端做围栏判定（§2）
+  enabled      Boolean     @default(true)
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
 
@@ -825,4 +840,48 @@ model DeviceEvent {
 
   @@index([deviceId, createdAt])
   @@index([createdAt])
+}
+
+// ============================================================
+// 电话与短信（§8）
+// ============================================================
+
+/// 通话记录。
+///
+/// 只存设备端上报的摘要，**永不向管理后台返回内容**（管理后台只给计数）。
+/// 「全量替换最近 N 条」的上报模型：设备端每次上报它看到的最近若干条，
+/// 服务端按 occurredAt 倒序截断后整表替换这台设备的数据，
+/// 这样删除/去重都不需要逐条 diff。
+model CallLogEntry {
+  id       String      @id @default(cuid())
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  phoneNumber     String // 归一化后的号码（保留原始字符，只去空白）
+  name            String   @default("") // 通讯录里显示的名字，取不到就是空
+  type            String // incoming 呼入 | outgoing 呼出 | missed 未接
+  durationSeconds Int      @default(0)
+  /// 通话发生时刻（设备端时间）。设备时钟可能不准，服务端只钳制「未来时间」。
+  occurredAt      DateTime
+  createdAt       DateTime @default(now())
+
+  @@index([deviceId, occurredAt])
+}
+
+/// 短信。
+///
+/// 与 SmsCode（登录验证码）完全是两回事：那是「发给家长登录用」的验证码，
+/// 这是「孩子设备上收到的短信」。同样不对管理后台暴露内容。
+model SmsMessage {
+  id       String      @id @default(cuid())
+  deviceId String
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  address    String // 对方号码
+  body       String // 短信正文
+  type       String // inbox 收件 | sent 发件
+  occurredAt DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([deviceId, occurredAt])
 }

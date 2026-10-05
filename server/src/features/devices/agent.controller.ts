@@ -1,10 +1,15 @@
 import { Request, Response } from 'express';
 import {
+  agentAppUsageSchema,
+  agentAuditRequestSchema,
+  agentCallLogSchema,
   agentCommandResultSchema,
   agentHeartbeatSchema,
   agentLocationSchema,
   agentPollQuerySchema,
   agentRegisterSchema,
+  agentSmsSchema,
+  auditRequestIdSchema,
 } from './devices.dto';
 import { devicesService } from './devices.service';
 import { commandsService } from './commands.service';
@@ -48,6 +53,11 @@ export async function heartbeat(req: Request, res: Response) {
  * GET /api/agent/commands/next?wait=25
  * 长轮询领取一条指令：没有指令时挂起最多 wait 秒，有新指令会被立即唤醒。
  * 设备端因此能做到「家长一点锁屏，孩子手机立刻响应」，而不是等下一个轮询周期。
+ *
+ * 连接断开（Agent 被 kill -9、切网、NAT 超时）时**必须**把自己的等待者摘掉，
+ * 否则这条死连接的 resolver 会一直挂在 notifier 里，被后续的 notifyDevice
+ * 一起唤醒去 claimNext —— 指令被写进空气，永久卡在 dispatched。
+ * 详见 devices.notifier.ts 顶部注释。
  */
 export async function nextCommand(req: Request, res: Response) {
   const { wait } = agentPollQuerySchema.parse(req.query);
@@ -57,7 +67,20 @@ export async function nextCommand(req: Request, res: Response) {
   if (first) return res.json({ command: first });
 
   if (wait > 0) {
-    await waitForDevice(deviceId, wait * 1000);
+    // req 'close' 覆盖各种断开方式（正常结束 / abort / ECONNRESET）；res 'close'
+    // 作为兜底。两者都只是把 AbortSignal 拉起来，真正的清理在 notifier 里。
+    const ac = new AbortController();
+    const onClose = () => ac.abort();
+    req.on('close', onClose);
+    res.on('close', onClose);
+    try {
+      await waitForDevice(deviceId, wait * 1000, ac.signal);
+    } finally {
+      req.off('close', onClose);
+      res.off('close', onClose);
+    }
+    // 连接已经断了就别再 claim 了：抢到了也没人收，反而把指令推成 dispatched。
+    if (ac.signal.aborted || res.destroyed || res.writableEnded) return;
     const afterWake = await commandsService.claimNext(deviceId);
     if (afterWake) return res.json({ command: afterWake });
   }
@@ -81,6 +104,49 @@ export async function reportLocation(req: Request, res: Response) {
   const input = agentLocationSchema.parse(req.body);
   const result = await devicesService.reportLocation(currentDeviceId(req), input);
   res.status(result.deduplicated ? 200 : 201).json(result);
+}
+
+// ============================================================
+// 应用审核 / 逐应用用量 / 电话短信（§3 §4 §8）
+// ============================================================
+
+/**
+ * POST /api/agent/audit-requests —— 孩子想装某个被拦下的应用，向家长发起申请。
+ *
+ * 幂等：同一台设备 + 同一个包名已有 pending 时返回既有那条（200），
+ * 新申请返回 201。设备端因此可以放心重试，不怕在家长端刷出一串重复项。
+ */
+export async function createAuditRequest(req: Request, res: Response) {
+  const input = agentAuditRequestSchema.parse(req.body);
+  const result = await devicesService.createAuditRequest(currentDeviceId(req), input);
+  res.status(result.created ? 201 : 200).json({ id: result.id, status: result.status });
+}
+
+/** GET /api/agent/audit-requests/:id —— 设备端轮询审核结果。 */
+export async function getAuditRequest(req: Request, res: Response) {
+  const { id } = auditRequestIdSchema.parse(req.params);
+  res.json(await devicesService.getAuditRequestStatus(currentDeviceId(req), id));
+}
+
+/**
+ * POST /api/agent/app-usage —— 上报今日逐应用秒数（全量替换）。
+ * 服务端只存不算：逐应用限时由设备端本地用这个值判定，离线也要拦得住。
+ */
+export async function reportAppUsage(req: Request, res: Response) {
+  const { usage } = agentAppUsageSchema.parse(req.body);
+  res.json(await devicesService.reportAppUsage(currentDeviceId(req), usage));
+}
+
+/** POST /api/agent/calls —— 上报通话记录（全量替换最近 N 条）。 */
+export async function reportCalls(req: Request, res: Response) {
+  const { calls } = agentCallLogSchema.parse(req.body);
+  res.json(await devicesService.reportCalls(currentDeviceId(req), calls));
+}
+
+/** POST /api/agent/sms —— 上报短信（全量替换最近 N 条）。 */
+export async function reportSms(req: Request, res: Response) {
+  const { messages } = agentSmsSchema.parse(req.body);
+  res.json(await devicesService.reportSms(currentDeviceId(req), messages));
 }
 
 /**
@@ -128,7 +194,7 @@ export async function getConfig(req: Request, res: Response) {
 
   await devicesRepo.ensureDefaults(device.id);
   const [featureRows, timePlan, appLimits, blockedUrls, quizConfig, lockPolicy, screenConfig, usage,
-    modePayload, eyeCare, pluginRules] =
+    modePayload, eyeCare, pluginRules, safeZones] =
     await Promise.all([
     devicesRepo.listFeatures(device.id),
     devicesRepo.getTimePlan(device.id),
@@ -153,6 +219,12 @@ export async function getConfig(req: Request, res: Response) {
     modeService.getEyeCare(device),
     // 应用插件管控：只下发与默认值不同的项
     modeService.buildPluginRules(device),
+    // 安全区（§2）：只下发启用中的，设备端据此做本地围栏判定并发 geofence_enter/exit 事件。
+    // 注意只传「判定所需」的字段：address / type 是给家长看的，设备端不需要。
+    prisma.safeZone.findMany({
+      where: { deviceId: device.id, enabled: true },
+      orderBy: { createdAt: 'asc' },
+    }),
   ]);
 
   const enabledFeatures = featureRows.filter((f) => f.enabled).map((f) => f.key);
@@ -177,13 +249,32 @@ export async function getConfig(req: Request, res: Response) {
       unlimited: limit === 0,
     },
     appLimits: appLimits
-      .filter((a) => a.enabled)
+      // 没有包名的限额在设备端会被 parseAll 丢弃（那是防脏数据的兜底），
+      // 这里就不再下发 —— 下发了也只会变成一条设备端永远用不上的规则。
+      .filter((a) => a.enabled && a.packageName.trim().length > 0)
       .map((a) => ({
         appName: a.appName,
         packageName: a.packageName,
         dailyLimitMinutes: a.dailyLimitMinutes,
       })),
     blockedUrls: blockedUrls.filter((u) => u.enabled).map((u) => u.url),
+    // 安全区（§2）：设备端本地做围栏进出判定
+    safeZones: safeZones.map((z) => ({
+      id: z.id,
+      name: z.name,
+      latitude: z.latitude,
+      longitude: z.longitude,
+      radiusMeters: z.radiusMeters,
+    })),
+    // 隐藏桌面图标（§9）：设备端按此值切换图标组件是否启用
+    hideIcon: device.hideIcon,
+    // 安装放行窗口（§3）：家长批准安装申请后 30 分钟内允许安装。
+    // 已过期的窗口直接回 null —— 是否过期由服务端时钟判定，
+    // 不把「客户端时钟准不准」变成安全边界。
+    installApprovalUntil:
+      device.installApprovalUntil && device.installApprovalUntil.getTime() > Date.now()
+        ? device.installApprovalUntil.toISOString()
+        : null,
     // 模式切换：规则原样下发，设备端本地求值
     mode: modePayload,
     // 护眼设置

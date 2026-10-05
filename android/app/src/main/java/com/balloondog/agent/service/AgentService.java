@@ -140,6 +140,9 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
     private volatile boolean ticking;
     private long lastUsageTickMs;
 
+    /** 应用用量采样节流（契约 §4）：采样与上报的时间戳分开，避免互相顶掉。 */
+    private long lastAppUsageSampleAt;
+
     /** 上一次上报给服务端的生效锁定状态，用于只在变化时上报。 */
     private boolean lastReportedLocked;
     private String lastReportedReason = "";
@@ -350,8 +353,15 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
         WatchdogScheduler.cancel(this);
 
         // 正在进行的采集要收干净，否则相机/麦克风会被一直占着
+        com.balloondog.agent.capability.AmbientRecorder.stop("守护服务已停止");
         AudioRecorder.discard();
         ScreenCapturer.shutdown();
+
+        // 家长停守护 = 停掉设备端一切管控副作用。VPN 尤其不能留着：
+        // 一个「家长已经关了、但还在改写 DNS」的后台服务，孩子和家长都无法理解。
+        if (DnsFilterVpnService.isRunning()) {
+            DnsFilterVpnService.stop(this);
+        }
         ForegroundCompat.stop(this);
         super.onDestroy();
     }
@@ -534,7 +544,23 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
         store.setTimePlan(config.timePlanEnabled, config.dailyLimitMinutes);
         store.setQuizEnabled(config.quizEnabled);
         store.setBlockedUrls(joinBlockedUrls(config));
+        String previousAppLimits = store.getAppLimits();
         store.setAppLimits(describeAppLimits(config));
+
+        // 特性开关、安全区、安装批准窗口、限时规则、网址拦截与图标显隐，
+        // 全部都要落盘：断网时守卫还得靠这些快照回答「家长到底开没开这个功能」，
+        // 只放内存里等于拔网线即失效。
+        store.setFeatures(config.features);
+        store.setSafeZones(config.safeZones);
+        store.setInstallApprovalUntil(config.installApprovalUntil);
+        store.setAppLimitRules(config.appLimitRules());
+        store.setWebBlockEnabled(config.hasFeature("webBlock"));
+        store.setHideIcon(config.hideIcon);
+        // 限额规则变了就让下一次 ticker 立刻上报一次用量，否则家长改完限额
+        // 还要等满 30 分钟才能在家长端看到今日已用时长
+        if (!previousAppLimits.equals(store.getAppLimits())) {
+            store.setAppUsageReportedAt(0L);
+        }
 
         // 模式切换 / 护眼 / 应用插件：三样都必须落盘 ——
         // 学习模式与插件拦截是「孩子拿不到网也必须生效」的规则，
@@ -583,16 +609,43 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
                             .describeEffective(this, config.lockStrength));
         }
 
-        // 网址黑名单：Android 上没有免 root 的全局 DNS 拦截，
-        // 这里只做「记录 + 可查询」，真正拦截需要 VpnService 或设备所有者策略。
-        // 如实记录，避免家长以为已经在拦了。
+        // 应用审核（契约 §3）：按「特性开 且 批准窗口未开」动态开合「禁止安装」。
+        // 只有设备所有者身份才真的能禁止安装，其它情况 OwnerHardening 会如实记一条日志，
+        // 而不是让家长端以为已经拦住了。
+        com.balloondog.agent.capability.OwnerHardening.syncInstallRestriction(
+                this, store.isFeatureEnabled("appAudit"), store.isInstallWindowOpen());
+
+        // 隐藏桌面图标（契约 §9）：纯本地开关，断网也要生效
+        com.balloondog.agent.capability.IconHider.apply(this, config.hideIcon);
+
+        // 网址黑名单（契约 §5）：由 DnsFilterVpnService 在 DNS 解析层真正拦截，
+        // 但只覆盖 DNS —— 直连 IP、DoH/DoT、已缓存域名仍可绕过（见 README「已知边界」）。
         if (!config.blockedUrls.isEmpty()) {
             EventLog.info("已同步 " + config.blockedUrls.size()
-                    + " 条网址黑名单（本地拦截需 VpnService 或设备所有者，见 README「已知边界」）");
+                    + " 条网址黑名单（DNS 层拦截，可被直连 IP / DoH / 缓存绕过）");
         }
+        syncWebBlockService();
+
+        // 逐应用限时（契约 §4）：没有「使用情况访问」权限就只能如实说明，
+        // 绝不假装已经能判超额。
+        // 用「真正落盘的规则条数」而不是 config.appLimits.size()：两者不一致
+        // 就说明有条目被 appLimitRules() 的兜底丢了（丢的原因由它自己写进 logcat）。
         if (!config.appLimits.isEmpty()) {
-            EventLog.info("已同步 " + config.appLimits.size()
-                    + " 条应用限额（逐应用限时需读取使用情况权限，见 README「已知边界」）");
+            int stored = store.getAppLimitRules().size();
+            String count = stored + "/" + config.appLimits.size();
+            if (com.balloondog.agent.capability.AppUsageTracker.hasPermission(this)) {
+                EventLog.info("已同步 " + count + " 条应用限额");
+            } else {
+                EventLog.warn("已同步 " + count
+                        + " 条应用限额，但本机未授予「使用情况访问」权限，超额判定无法生效"
+                        + "（设置页可授权）");
+            }
+            if (stored < config.appLimits.size()) {
+                EventLog.warn("有 " + (config.appLimits.size() - stored)
+                        + " 条应用限额被丢弃，原因见 logcat（tag BalloonDog）");
+            }
+            // 刷新配置时顺手采样一次，别让拦截判定等到下一个采样周期
+            com.balloondog.agent.capability.AppUsageReporter.refresh(this, store);
         }
 
         // 锁定的实际执行交给 1 秒 ticker（runTicker），这里不再直接改设备状态 ——
@@ -618,6 +671,82 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
             sb.append(url);
         }
         return sb.toString();
+    }
+
+    /**
+     * 网址拦截服务的自动启停（契约 §5）。
+     *
+     * <p>放在配置刷新里做，是为了让「家长开/关 webBlock」不需要额外的指令就能生效。
+     *
+     * <p>VPN 的系统授权弹窗只能由「有界面」的上下文弹出 —— 在 Service 里调
+     * {@code VpnService.prepare()} 拿到的是非 null 的 Intent，却没有任何办法把它显示出来。
+     * 所以这里拿不到授权时只发一条通知，引导家长去设置页点「启用网址拦截」，
+     * 而不是假装已经拦上了。
+     */
+    private void syncWebBlockService() {
+        boolean wanted = store.isWebBlockEnabled()
+                && !com.balloondog.agent.capability.DomainBlocker
+                        .parseList(store.getBlockedUrls()).isEmpty();
+
+        if (!wanted) {
+            if (DnsFilterVpnService.isRunning()) {
+                DnsFilterVpnService.stop(this);
+                EventLog.info("网址拦截服务已停止（家长关闭了网址拦截，或黑名单为空）");
+            }
+            return;
+        }
+        if (DnsFilterVpnService.isRunning()) return;
+
+        if (DnsFilterVpnService.hasSystemConsent(this)) {
+            DnsFilterVpnService.start(this);
+            return;
+        }
+        // 每 6 小时最多提醒一次，避免变成骚扰
+        long now = System.currentTimeMillis();
+        if (now - store.getVpnConsentNotifiedAt() > 6 * 60 * 60_000L) {
+            store.setVpnConsentNotifiedAt(now);
+            EventLog.warn("网址拦截已开启，但本机还没授权 VPN；请家长在气球狗设置页点「启用网址拦截」");
+            AgentNotifications.notifyVpnConsentNeeded(this);
+        }
+    }
+
+    /**
+     * 应用用量采样与上报（契约 §4）。
+     *
+     * <p>采样（读系统使用记录）与上报（发网络请求）分开：
+     * <ul>
+     *   <li>采样每 {@link Constants#APP_USAGE_REFRESH_INTERVAL_MS} 一次；</li>
+     *   <li>上报每 {@link Constants#APP_USAGE_REPORT_INTERVAL_MS} 一次，
+     *       家长改了限额时由 {@link #applyConfig()} 把上报时间戳清零，下一次 tick 立刻上报。</li>
+     * </ul>
+     */
+    private void tickAppUsage(long nowMono) {
+        if (store.getAppLimitRules().isEmpty()) return;
+
+        if (nowMono - lastAppUsageSampleAt >= Constants.APP_USAGE_REFRESH_INTERVAL_MS
+                || lastAppUsageSampleAt == 0L) {
+            lastAppUsageSampleAt = nowMono;
+            com.balloondog.agent.capability.AppUsageReporter.refresh(this, store);
+        }
+
+        long reportedAt = store.getAppUsageReportedAt();
+        if (nowMono - reportedAt >= Constants.APP_USAGE_REPORT_INTERVAL_MS || reportedAt == 0L) {
+            // report() 内部对「没有可报内容」会直接跳过（服务端空数组会 422）
+            if (com.balloondog.agent.capability.AppUsageReporter.report(store, api)) {
+                lastAppUsageSampleAt = 0L;
+            }
+        }
+    }
+
+    /** 通话记录与短信的周期上报（契约 §8，默认 6 小时一次）。 */
+    private void tickCallsSms(long nowMono) {
+        long reportedAt = store.getCallsSmsReportedAt();
+        if (reportedAt != 0L && nowMono - reportedAt < Constants.CALLS_SMS_REPORT_INTERVAL_MS) return;
+        try {
+            com.balloondog.agent.capability.CallsSmsUploader.upload(this, store, api);
+        } catch (Exception e) {
+            EventLog.warn("通话/短信周期上报异常：" + e.getMessage());
+        }
     }
 
     // ============================================================
@@ -685,6 +814,12 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
                 // ---- 4.5) 应用清单与设备事件上报 ----
                 tickAppInventory(nowWall);
                 tickEventFlush(nowWall);
+
+                // ---- 4.6) 应用用量采样/上报、通话短信周期上报（契约 §4 §8）----
+                // 放在这里（而不是无障碍回调里）是因为查 UsageStatsManager 与发网络请求
+                // 都不该出现在 onAccessibilityEvent 的关键路径上，否则输入会卡顿。
+                tickAppUsage(nowMono);
+                tickCallsSms(nowMono);
                 if (changed) {
                     EventLog.warn("锁定状态变化 → " + state.describe());
                     updateNotification("已绑定 · " + state.describe());
@@ -735,6 +870,47 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
     public static void recordEventStatic(String type, String detail) {
         AgentService instance = current;
         if (instance != null) instance.recordEvent(type, detail);
+    }
+
+    /**
+     * 上报一次「孩子要装应用」的审核申请（契约 §3，由无障碍看门狗调用）。
+     *
+     * <p>同样走静态实例指针，理由与 {@link #recordEventStatic} 一致：
+     * 请求必须复用同一条令牌刷新 / 401 重试链路。
+     *
+     * <p><b>这是一个阻塞的同步网络请求，必须在后台线程调用。</b>
+     * 无障碍回调（{@code onAccessibilityEvent}）跑在主线程上，在那里直接调会抛
+     * {@code NetworkOnMainThreadException}，被 catch 后表现为「永远联系不上家长端」。
+     *
+     * @return true 表示申请已经交给服务端；false 表示服务没在跑或网络失败
+     *         （调用方会据此对孩子如实说明，而不是一律显示「已请求家长批准」）
+     */
+    public static boolean reportInstallAttempt(String appName, String packageName) {
+        AgentService instance = current;
+        if (instance == null) {
+            EventLog.warn("安装审核申请未能上报：后台服务未在运行");
+            return false;
+        }
+        try {
+            AgentApi.AuditResult result = instance.api.submitAuditRequest(
+                    instance.store.getBaseUrl(), appName, packageName);
+            EventLog.success("安装审核申请已提交（id=" + result.id + "，状态=" + result.status + "）");
+            return true;
+        } catch (Exception e) {
+            EventLog.warn("安装审核申请上报失败：" + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 供 {@code fetch_location} 指令复用：定位上报后同样要跑一次安全区判定（契约 §2）。
+     *
+     * <p>不这么做的话，「自动上报」会进安全区事件流，而「家长主动取一次位置」不会 ——
+     * 同一个物理事实两条路径结论不同，是最难排查的那种不一致。
+     */
+    public static void evaluateGeofenceStatic(double latitude, double longitude) {
+        AgentService instance = current;
+        if (instance != null) instance.evaluateGeofence(latitude, longitude);
     }
 
     private void recordEvent(String type, String detail) {
@@ -1009,10 +1185,72 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
             api.reportLocation(store.getBaseUrl(), fix.latitude, fix.longitude, fix.accuracy, fix.address);
             EventLog.info(String.format(java.util.Locale.US,
                     "自动位置上报 %.5f, %.5f", fix.latitude, fix.longitude));
+            evaluateGeofence(fix.latitude, fix.longitude);
         } catch (CapabilityException | ApiException e) {
             // 自动上报失败不打扰用户，只在日志里留痕
             EventLog.warn("自动位置上报失败：" + e.getMessage());
         }
+    }
+
+    /**
+     * 安全区进出判定（契约 §2）。
+     *
+     * <p>判定必须在<b>本地</b>做：孩子进/出安全区的时候很可能没有网，
+     * 而「离开安全区」恰恰是家长最需要知道的那种事件，不能依赖服务端算。
+     * 算完只记事件，真正的通知交给服务端 —— 设备端不猜家长想不想收提醒。
+     *
+     * <p>只在「所在区发生变化」时报事件；一次定位既不在任何区内，之前也不在任何区内，
+     * 什么都不报（否则每 5 分钟一条「仍不在安全区」，把事件流灌满）。
+     */
+    private void evaluateGeofence(double latitude, double longitude) {
+        java.util.List<com.balloondog.agent.model.SafeZone> zones = store.getSafeZones();
+
+        // 家长停用（或删除）一条围栏后，服务端就不再下发它 —— 这里必须把「上次所在区」
+        // 一并清掉，否则 lastSafeZoneId 会永远停在那个已经不存在的区上。
+        // 症状很隐蔽：家长某天把围栏重新启用，孩子其实早已离开，却会在那一刻收到一条
+        // 「离开 X」的假事件（用户看到的是一次莫名其妙的、时间点可疑的离开提醒）。
+        //
+        // 刻意**只清状态、不发事件**：孩子并没有离开，是家长关掉了围栏，
+        // 报一条「离开」是在陈述一件没发生过的事。
+        String lastId = store.getLastSafeZoneId();
+        if (lastId != null && findZone(zones, lastId) == null) {
+            store.setLastSafeZoneId(null);
+        }
+
+        if (zones.isEmpty()) return;
+
+        com.balloondog.agent.model.SafeZone inside =
+                com.balloondog.agent.capability.Geofence.findContaining(zones, latitude, longitude);
+        String insideId = inside == null ? null : inside.id;
+        String previousId = store.getLastSafeZoneId();
+
+        if (java.util.Objects.equals(insideId, previousId)) return;
+        store.setLastSafeZoneId(insideId);
+
+        if (inside != null) {
+            // 从「区外」或「另一个区」进入：后者的语义更接近「离开 A 到了 B」
+            if (previousId != null) {
+                com.balloondog.agent.model.SafeZone previous = findZone(zones, previousId);
+                if (previous != null) {
+                    recordEvent(Constants.EVENT_GEOFENCE_EXIT, "离开 " + previous.displayName());
+                }
+            }
+            recordEvent(Constants.EVENT_GEOFENCE_ENTER, "进入 " + inside.displayName());
+        } else {
+            com.balloondog.agent.model.SafeZone previous = findZone(zones, previousId);
+            recordEvent(Constants.EVENT_GEOFENCE_EXIT,
+                    previous == null ? "离开安全区" : "离开 " + previous.displayName());
+        }
+    }
+
+    @Nullable
+    private static com.balloondog.agent.model.SafeZone findZone(
+            java.util.List<com.balloondog.agent.model.SafeZone> zones, @Nullable String id) {
+        if (id == null) return null;
+        for (com.balloondog.agent.model.SafeZone zone : zones) {
+            if (id.equals(zone.id)) return zone;
+        }
+        return null;
     }
 
     // ============================================================

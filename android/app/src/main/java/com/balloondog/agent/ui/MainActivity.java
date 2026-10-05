@@ -368,6 +368,11 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         if (store.isHardeningEnabled()) {
             OwnerHardening.apply(this);
         }
+        // 设备所有者可以静默自授运行时权限（定位 / 相机 / 麦克风 / 通话记录 / 短信）。
+        // 放在自检里是因为权限随时可能被系统或孩子撤掉：撤掉后定位、拍照、录音、
+        // 通话短信上报会静默失效，而家长端只会看到「一直没有数据」。
+        // 不是设备所有者时这里返回 0，由设置页的「一键授权」走系统弹框。
+        com.balloondog.agent.capability.PermissionGranter.grantAsDeviceOwner(this);
         KioskController.prepare(this);
         WatchdogScheduler.scheduleWatchdog(this);
         if (!AgentService.isRunning()) {

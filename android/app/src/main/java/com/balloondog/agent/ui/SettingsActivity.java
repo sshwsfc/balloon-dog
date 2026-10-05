@@ -28,6 +28,12 @@ import com.balloondog.agent.service.AgentService;
  */
 public class SettingsActivity extends AppCompatActivity {
 
+    /** VPN 授权弹窗（系统弹窗，必须由 Activity 触发）。 */
+    private static final int REQUEST_VPN_CONSENT = 4001;
+
+    /** 运行时权限弹窗（定位 / 相机 / 麦克风 / 通话记录 / 短信 / 通知）。 */
+    private static final int REQUEST_RUNTIME_PERMISSIONS = 4002;
+
     private ActivitySettingsBinding binding;
     private AgentStore store;
 
@@ -47,6 +53,154 @@ public class SettingsActivity extends AppCompatActivity {
 
         binding.buttonSave.setOnClickListener(v -> save());
         binding.buttonReset.setOnClickListener(v -> confirmReset());
+        binding.buttonUsageAccess.setOnClickListener(v -> requestUsageAccess());
+        binding.buttonVpn.setOnClickListener(v -> requestVpnConsent());
+        binding.buttonGrantRuntime.setOnClickListener(v -> requestRuntimePermissions());
+        updatePermissionState();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 家长可能刚从系统设置页回来，授权状态要重新读一遍
+        updatePermissionState();
+    }
+
+    /** 把「运行时权限 / 应用限时 / 网址拦截 / 通话短信 / 桌面图标」的实际状态如实写出来。 */
+    private void updatePermissionState() {
+        StringBuilder sb = new StringBuilder();
+
+        // 运行时权限（定位 / 相机 / 麦克风 / 通话记录 / 短信 / 通知）。
+        // 这几个是「危险权限」：不在代码里主动申请就永远是拒绝状态，
+        // 于是定位上报、远程拍照、远程录音、通话与短信上报会静默失效 ——
+        // 家长端只会看到「一直没有数据」，看不出是权限没给。
+        java.util.List<String> missing =
+                com.balloondog.agent.capability.PermissionGranter.missing(this);
+        sb.append("运行时权限：")
+                .append(missing.isEmpty()
+                        ? "已全部授权"
+                        : "还差 " + missing.size() + " 项（"
+                                + joinPermissionLabels(missing) + "）")
+                .append('\n');
+
+        sb.append("使用情况访问：")
+                .append(com.balloondog.agent.capability.AppUsageTracker.hasPermission(this)
+                        ? "已授权" : "未授权（应用限时无法判定超额）")
+                .append('\n');
+
+        boolean vpnRunning = com.balloondog.agent.service.DnsFilterVpnService.isRunning();
+        boolean vpnConsent = com.balloondog.agent.service.DnsFilterVpnService.hasSystemConsent(this);
+        sb.append("网址拦截：")
+                .append(vpnRunning ? "运行中（仅 DNS 解析层）"
+                        : vpnConsent ? "已授权，等家长开启「网址拦截」特性"
+                        : "未授权（需要系统 VPN 授权）")
+                .append('\n');
+
+        sb.append("通话记录：")
+                .append(com.balloondog.agent.capability.CallLogReader.hasPermission(this)
+                        ? "已授权" : "未授权（上报时会跳过并记日志）")
+                .append('\n');
+        sb.append("短信：")
+                .append(com.balloondog.agent.capability.SmsReader.hasPermission(this)
+                        ? "已授权" : "未授权（上报时会跳过并记日志）")
+                .append('\n');
+
+        sb.append("桌面图标：")
+                .append(com.balloondog.agent.capability.IconHider.isHidden(this)
+                        ? "已隐藏（本机无入口，需家长端远程恢复或 adb 启用 MainActivityLauncher）"
+                        : "显示中");
+        binding.textPermissionState.setText(sb.toString());
+    }
+
+    /** 跳到系统的「使用情况访问」授权页（该权限没有运行时弹窗，只能手动开）。 */
+    private void requestUsageAccess() {
+        if (com.balloondog.agent.capability.AppUsageTracker.hasPermission(this)) {
+            Toast.makeText(this, "使用情况访问已授权", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        com.balloondog.agent.capability.AppUsageTracker.openSettings(this);
+        Toast.makeText(this, "请在列表里找到「气球狗」并允许使用情况访问", Toast.LENGTH_LONG).show();
+    }
+
+    /**
+     * 授予定位 / 相机 / 麦克风 / 通话记录 / 短信 / 通知这些运行时权限。
+     *
+     * <p>设备所有者时直接<b>静默自授</b>，孩子端看不到任何弹框；否则只能弹系统框让用户点。
+     * 全部被拒时引导到「应用信息」页手动开 —— 如实说明，不假装成功。
+     */
+    private void requestRuntimePermissions() {
+        int silent = com.balloondog.agent.capability.PermissionGranter.grantAsDeviceOwner(this);
+        if (com.balloondog.agent.capability.PermissionGranter.allGranted(this)) {
+            Toast.makeText(this, "运行时权限已全部授予（设备所有者静默授予 " + silent + " 项）",
+                    Toast.LENGTH_SHORT).show();
+            updatePermissionState();
+            return;
+        }
+
+        java.util.List<String> missing =
+                com.balloondog.agent.capability.PermissionGranter.missing(this);
+        requestPermissions(missing.toArray(new String[0]), REQUEST_RUNTIME_PERMISSIONS);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode != REQUEST_RUNTIME_PERMISSIONS) return;
+        updatePermissionState();
+        if (com.balloondog.agent.capability.PermissionGranter.allGranted(this)) {
+            Toast.makeText(this, "权限已全部授予", Toast.LENGTH_SHORT).show();
+        } else {
+            // 用户点过「拒绝」之后，再调 requestPermissions 系统不再弹框，
+            // 只能引导到应用信息页手动开。
+            Toast.makeText(this, "仍有权限被拒绝，请在「应用信息 → 权限」里手动打开",
+                    Toast.LENGTH_LONG).show();
+            com.balloondog.agent.capability.PermissionGranter.openAppDetails(this);
+        }
+    }
+
+    /** 把权限清单拼成「定位、相机」这样的人话，别在界面上露 {@code android.permission.*}。 */
+    private static String joinPermissionLabels(java.util.List<String> permissions) {
+        StringBuilder sb = new StringBuilder();
+        for (String permission : permissions) {
+            if (sb.length() > 0) sb.append('、');
+            sb.append(com.balloondog.agent.capability.PermissionGranter.labelOf(permission));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 申请 VPN 授权并启动网址拦截服务。
+     *
+     * <p>系统弹窗只能从界面弹出：服务端下发 webBlock 后，AgentService 里
+     * {@code VpnService.prepare()} 拿到 Intent 却没有办法显示它，
+     * 所以那一步只会发通知把家长引到这里。
+     */
+    private void requestVpnConsent() {
+        android.content.Intent consent = android.net.VpnService.prepare(this);
+        if (consent == null) {
+            // 已经授权过（或本次没有可申请的内容）：直接拉起服务
+            com.balloondog.agent.service.DnsFilterVpnService.start(this);
+            Toast.makeText(this, "网址拦截已启动（只覆盖 DNS 解析层）", Toast.LENGTH_LONG).show();
+            updatePermissionState();
+            return;
+        }
+        startActivityForResult(consent, REQUEST_VPN_CONSENT);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_VPN_CONSENT) return;
+        if (resultCode == RESULT_OK) {
+            com.balloondog.agent.service.DnsFilterVpnService.start(this);
+            Toast.makeText(this, "已授权，网址拦截开始生效（只覆盖 DNS 解析层）",
+                    Toast.LENGTH_LONG).show();
+        } else {
+            // 不假装成功：没授权就是没拦住，日志里也留一条
+            EventLog.warn("家长拒绝了 VPN 授权，网址拦截无法启用");
+            Toast.makeText(this, "未授权：网址拦截不会生效", Toast.LENGTH_LONG).show();
+        }
+        updatePermissionState();
     }
 
     private String buildAboutText() {
@@ -59,17 +213,30 @@ public class SettingsActivity extends AppCompatActivity {
         sb.append("锁屏能力：").append(LockController.capabilityLabel(this)).append('\n');
         sb.append("投影授权：").append(ScreenCapturer.hasProjection() ? "有效" : "未授权").append('\n');
 
-        // 把服务端下发的策略如实列出来。网址拦截 / 应用限额在本工程里只做到
-        // 「同步 + 可查」，并没有真正强制执行（原因见 android/README.md「已知边界」），
-        // 所以这里必须把状态写清楚，不能让家长误以为已经在管了。
+        // 把服务端下发的策略如实列出来，并且把「本机到底做没做到」写清楚：
+        // 网址拦截只在 DNS 解析层生效（还有 4 条已知绕过），应用限时则依赖
+        // 「使用情况访问」权限。状态写模糊了，家长会以为已经在管了。
         String blocked = store.getBlockedUrls();
         int blockedCount = blocked.isEmpty() ? 0 : blocked.split(",").length;
-        sb.append("网址黑名单：").append(blockedCount).append(" 条")
-                .append(blockedCount > 0 ? "（已同步，未强制拦截）" : "").append('\n');
+        sb.append("网址黑名单：").append(blockedCount).append(" 条");
+        if (blockedCount == 0) {
+            sb.append('\n');
+        } else if (com.balloondog.agent.service.DnsFilterVpnService.isRunning()) {
+            sb.append("（DNS 层拦截中，可被直连 IP / DoH / 缓存绕过）\n");
+        } else {
+            sb.append("（未生效：需要系统 VPN 授权）\n");
+        }
+
         String limits = store.getAppLimits();
         int limitCount = limits.isEmpty() ? 0 : limits.split(",").length;
-        sb.append("应用限额：").append(limitCount).append(" 条")
-                .append(limitCount > 0 ? "（已同步，未强制限时）" : "").append('\n');
+        sb.append("应用限额：").append(limitCount).append(" 条");
+        if (limitCount == 0) {
+            sb.append('\n');
+        } else if (com.balloondog.agent.capability.AppUsageTracker.hasPermission(this)) {
+            sb.append("（超额会拦，今日用量每 30 分钟上报）\n");
+        } else {
+            sb.append("（未生效：需要「使用情况访问」权限）\n");
+        }
 
         sb.append("最近活跃：").append(describeLastAlive()).append('\n');
         sb.append("系统：Android ").append(Build.VERSION.RELEASE)

@@ -23,7 +23,7 @@
 
 ## 1. 它做了什么
 
-### 1.1 完整实现设备端协议（11 组接口）
+### 1.1 完整实现设备端协议（17 组接口）
 
 | 方法 | 路径 | 本工程中的实现 |
 | --- | --- | --- |
@@ -38,6 +38,12 @@
 | POST | `/api/agent/screen-batches` | `FrameBatchUploader` — 把攒够的一包截图（zip：`frames/*.jpg` + `manifest.json`）上传给服务端做 AI 行为分析 |
 | GET | `/api/agent/screen-quiz/next` | `AgentApi.fetchScreenQuizQuestion()` — 取一道**基于当前屏幕内容**生成的题 |
 | POST | `/api/agent/screen-quiz/answer` | `AgentApi.submitScreenQuizAnswer()` — 交卷，答对即解锁并重置锁定倒计时 |
+| POST | `/api/agent/apps` | `AgentService.reportAppsNow()` — 上报已安装应用清单（12 小时一次或 `sync_apps` 触发） |
+| POST | `/api/agent/events` | `AgentService.tickEventFlush()` — 批量上报本地事件（进出安全区、被拦应用/网址等），60 秒一批 |
+| POST | `/api/agent/audit-requests` | `AgentService.reportInstallAttempt()` — 检测到安装行为时向家长申请批准（同一包 10 分钟只报一次） |
+| POST | `/api/agent/app-usage` | `AppUsageReporter.report()` — 上报**有限额的应用**今日前台秒数，全量替换当日 |
+| POST | `/api/agent/calls` | `CallsSmsUploader.upload()` — 上报最近通话记录（最多 200 条，0 条时跳过而不是发空数组） |
+| POST | `/api/agent/sms` | `CallsSmsUploader.upload()` — 上报最近短信（最多 200 条，正文截到 500 字） |
 
 错误体（`{title,status,message,detail,errors,request_id}`）被翻译成 `ApiException`，
 `userMessage()` 就是后端给的那句中文，直接展示，不自己拼「HTTP 400」。
@@ -56,6 +62,11 @@
 | `start_audio` / `stop_audio` | **MediaRecorder**(MIC) 录 AAC/M4A → 上传 | `{recordingId}` / `{mediaId, recordingId, durationSeconds}` |
 | `fetch_location` | **LocationManager** 取点（含逆地理编码）→ 上报 | `{reported, latitude, longitude, accuracy, address}` |
 | `sync_config` | 立即重新拉取并应用管控策略 | `{synced, bound, locked, features}` |
+| `sync_apps` | 重新扫描并上报已安装应用清单 | `{synced, count}` |
+| `start_ambient` | 分片循环录音（默认 5 分钟/段），每段录完立即上传；有 1 小时安全阀 | `{chunkSeconds, maxTotalMinutes, message}` |
+| `stop_ambient` | 当前段录完即上传后停止 | `{stopped, message}` |
+| `remote_action` | 无障碍全局动作（返回/主页/最近任务/通知栏）或拉起指定应用 | `{action, performed}` |
+| `sync_calls_sms` | 立刻读取通话记录与短信并上报 | `{synced, summary}` |
 
 失败一律带可读中文原因（如「相机权限未授予」「屏幕共享授权被拒绝」）回报，
 **绝不静默吞掉** —— 否则家长端会显示「已下发」而设备毫无反应。
@@ -68,6 +79,28 @@
 - **答题解锁**（`QuizActivity`）：取题 → 选择 → 交卷，判定完全在服务端做，
   客户端拿不到正确答案，改本地状态也没用，下一轮 `config` 就会把真实状态同步回来。
 - **开机自启**（`BootReceiver`）：重启后自动恢复守护，否则家长端只会看到设备永久离线。
+- **安全区（电子围栏）**（`Geofence` + `SafeZone`）：每次定位上报后本地算 haversine，
+  与上一次所在区比对，进出时上报 `geofence_enter`/`geofence_exit` 事件。
+  判定完全在本地做 —— 离开安全区时往往正好没网，把判定放服务端等于漏报。
+  家长停用某条围栏后服务端就不再下发它，设备侧会**只清掉**「上次所在区」而**不补发**
+  `geofence_exit`（孩子没有离开，是家长关掉了围栏；不清的话下次重新启用会凭空冒出
+  一条时间和地点都对不上的「离开 X」）。
+- **应用限时**（`AppUsageTracker` + `AppLimitRule`）：用 `UsageStatsManager` 累计当日
+  前端秒数，超限后与学习模式同样的方式拦截（按返回键 + `app_blocked` 事件）。
+- **网址拦截**（`DnsFilterVpnService`）：`VpnService` 建 tun，只在 DNS 解析层回 NXDOMAIN。
+  见 §7.2 的四条绕过说明，别把它当成「一定拦得住」。
+- **应用审核**（`OwnerHardening` + `LockWatchdogService`）：设备所有者下用
+  `DISALLOW_INSTALL_APPS` 挡住安装；家长批准后服务端下发 `installApprovalUntil`，
+  窗口期内自动放开。
+- **通话短信 / 环境监听 / 远程协助 / 隐藏图标**：分别见下方指令表与 §7.2。
+
+**本节新增的这些能力已经上机验证**，跑的是 `android/scripts/e2e-gaps.mjs`
+（`npm run android:e2e:gaps`，在设了设备所有者的 Android 13 模拟器上 **85 通过 / 0 失败 / 2 项显式跳过**）。
+逐项的证据等级写在 §7.2 的备注里，**没有验证到的部分也照样写在那里** ——
+包括网址拦截只证到「tun 建立 + DNS 指向」而没能断言「某域名真被拦」、
+局数预算只证到「配置下发 + 未达上限不锁屏」。
+最初那一轮是 **77 通过 / 3 失败**，那 3 条失败**全部是真实产品缺陷**，修复过程与修后证据见
+[`docs/FEATURE-STATUS.md`](../docs/FEATURE-STATUS.md) §4.5。
 
 ---
 
@@ -536,18 +569,37 @@ echo "sdk.dir=$HOME/Library/Android/sdk" > local.properties
 ### 3.3 安装与首次配置
 
 ```bash
-adb install -r -g app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`-g` 会一次性授予全部运行时权限，省去逐个点弹框。装好后：
+> 开发时可以用 `adb install -r -g` 图省事（`-g` 一次性授予全部运行时权限）。
+> **但不要用它来判断功能是否真能用** —— 它会把「App 自己没申请权限」这类缺陷盖住。
+> 孩子端点 APK 安装时没有任何 `-g`，权限必须由 App 自己申请。
+>
+> 历史上这里就是带 `-g` 的，而且下面第 2 步把「申请采集权限」误写成「授予相机 / 麦克风 /
+> 位置 / 通知」—— 那个按钮其实只申请**屏幕采集（MediaProjection）**。
+> 两边加起来，掩盖了「App 从不申请运行时权限」这个缺陷：非 `-g` 安装时
+> 定位上报、远程拍照、远程录音、通话与短信上报会**静默失效**。
+> 现已补上 `capability/PermissionGranter`，见下面第 2 步的说明。
+
+装好后：
 
 1. 打开「气球狗守护」，界面顶部会显示 **8 位绑定码**（例如 `RS4B63PG`）；
-2. 点「申请采集权限」授予相机 / 麦克风 / 位置 / 通知；
+2. 点「申请采集权限」授予**屏幕采集**（MediaProjection，周期截屏用）；
 3. 点「激活设备管理器」（**必须**，否则 `lockNow()` 调不动，锁屏会退化成应用内遮罩）；
 4. 点「授予悬浮窗权限」（Android 10+ 后台弹锁定页需要它）；
 5. 点「忽略电池优化」（否则息屏后长轮询会被 Doze 冻结，表现为「点了锁屏半天没反应」）；
 6. 点 **「启动守护」**；
 7. 在家长端「设备管理 → 绑定设备」里输入那个绑定码完成配对。
+
+> **运行时权限（定位 / 相机 / 麦克风 / 通话记录 / 短信 / 通知）**：
+> 设为设备所有者后由 `PermissionGranter.grantAsDeviceOwner()` **静默自授**，孩子端看不到弹框；
+> 每次进入锁定（`LockEnforcer`）与自检（`MainActivity.selfCheckAndHeal()`）都会重授一次，
+> 所以「孩子在系统设置里关掉定位权限」这条绕过手段会失效。
+> 不是设备所有者时，走设置页的「一键授予定位 / 相机 / 麦克风 / 通话短信权限」调起系统弹框；
+> 被拒绝两次后系统不再弹框，会引导到「应用信息 → 权限」手动打开。
+> 「使用情况访问」(`PACKAGE_USAGE_STATS`) 是 appop 型特殊权限，`setPermissionGrantState` 也授不了，
+> 只能在设置页里手动开 —— 那是另一条入口（`buttonUsageAccess`）。
 
 > **后端地址**：默认 `http://10.0.2.2:4000/api`（模拟器访问宿主机的固定别名）。
 > 真机请到「设置」里改成开发机的局域网地址，例如 `http://192.168.1.10:4000/api`。
@@ -862,9 +914,10 @@ android/
    本工程仍然实现了它们的执行逻辑（`fetch_location` 也用于自动位置上报），
    但家长无法主动触发「立即获取位置」。
 
-3. **`callSms`（通话短信）在同屏、远程协助一样只有开关，没有协议。**
-   设备端拿不到「取通话记录 / 短信」的指令，因此本工程没有实现这部分 ——
-   真要做，需要先在后端定义指令类型与返回结构。
+3. **`READ_SMS` / `READ_CALL_LOG` 是 Google Play 受限权限。**
+   设备端已经实现读取与上报（`CallLogReader` / `SmsReader`），但这两个权限在
+   Google Play 上必须提交使用场景并通过审核才能上架；Android 10+ 对通话记录更严。
+   未授予时设备端**如实跳过并在日志里写明**，不会假装上报成功。
 
 ### 7.2 做不到的事（说清楚，比假装做到重要）
 
@@ -878,8 +931,14 @@ android/
 | 锁定期间下拉通知栏 | ❌ 非设备所有者时做不到 | 通知栏层级天然高于应用悬浮窗；`TYPE_ACCESSIBILITY_OVERLAY` 实测被系统拒绝，`GLOBAL_ACTION_BACK` 也收不动。只有设备所有者的 `setStatusBarDisabled` 能堵住 |
 | 锁定期间进设置撤销权限 | ✅ 无障碍看门狗可以 | 持续按返回逐层推出设置界面，并重新挂上锁定界面（已实测） |
 | 息屏后保持长轮询 | ⚠️ 需要电池优化白名单 | 引导页有「忽略电池优化」按钮；三层看门狗进一步兜底 |
-| 网址拦截 | ⚠️ 已同步未拦截 | 需要 `VpnService`（全局）或设备所有者策略。当前只做到「同步到本地 + 可查询」 |
-| 应用限额 / 按应用限时 | ⚠️ 已同步未限时 | `LockController.setApplicationHidden` 已实现，但未接入 `PACKAGE_USAGE_STATS`（需用户在系统设置里单独授权「使用情况访问」） |
+| 网址拦截 | ⚠️ 已实现，但有四条绕过 | `DnsFilterVpnService`（VpnService）在 **DNS 解析层**对命中域名回 NXDOMAIN。**绕得过**：① 直接用 IP（`1.2.3.4`）② DoH/DoT（加密 DNS，不经 53 端口）③ 已缓存的域名 ④ 孩子在系统设置里关掉 VPN。**已上机验证到基础设施层**：tun 真的建起来了（`dumpsys connectivity` 里 `InterfaceName: tun0` + `DnsAddresses: [ /10.111.222.1 ]`）、服务在跑、上游 DNS 日志正常（`网址拦截已启动：上游 DNS fec0::3,10.0.2.3,223.5.5.5,119.29.29.29,8.8.8.8`）。**但「某域名真被拦」拿不到设备级证据** —— 隧道一存在，`adb shell` 对**所有**域名（含未屏蔽的 bing.com）一律 `unknown host`，区分不出「被拦」和「隧道不通」，且期间 logcat 里没有「已拦截 <域名>」。DNS 报文解析逻辑由 `android/scripts/crosstest/PureLogicCheck.java` 的 19 项覆盖 |
+| 应用限额 / 按应用限时 | ⚠️ 需要「使用情况访问」授权 | `AppUsageTracker` 用 `UsageStatsManager` 采集当日前台秒数，超限后按返回键拦截并上报 `app_blocked`。未授权时**如实记日志并跳过采集**（拿不到数据就不拦，绝不假装在管）。**已上机验证整条链路**：家长端从设备清单选应用（必须带 `packageName`）→ pref `app_limit_rules` 真的落进带正确包名的规则 → 时钟累计 530s ≥ 60s → logcat `看门狗：拦截 com.google.android.deskclock —— Clock 今日 1 分钟已用完`，8 次采样前台从未停在时钟 → 家长端「已用」由恒为 0 变成真实值。家长端 UI 也已真实点过（`e2e:parent` 第 5b 节）。**历史坑**：修好之前家长端正常路径 100% 失效（规则被三层静默丢弃），见 [`docs/FEATURE-STATUS.md`](../docs/FEATURE-STATUS.md) §4.5 缺陷 1/2 |
+| 应用审核（阻止安装） | ✅ 设备所有者下可以 | `OwnerHardening.syncInstallRestriction()` 开合 `DISALLOW_INSTALL_APPS`；非设备所有者时只记一条日志说明做不到。家长批准后靠 `/agent/config` 的 `installApprovalUntil` 自动开窗。**已上机验证**：设备所有者施加 `no_install_apps` 后孩子侧**真的装不了**（`dumpsys user` 可查），审批链路真的通（`appAudit.pendingApps` 非空 + pref `install_audit_last_at` 落盘 + 日志「安装审核申请已提交」）。**但走的是安装器的「卸载确认页」而不是真安装页** —— 真安装窗口无法从 adb 构造（安装器只声明 `content` scheme 的 filter，`file://` 解析不到，`content://` 被 URI 权限挡住）。卸载确认页走同一条 `INSTALLER_PACKAGES` 判定路径，所以判定逻辑被覆盖了，但「真实安装流程被拦」这一步**没有设备级证据** |
+| 安全区（电子围栏） | ⚠️ 只报事件，不阻止移动 | 本地 haversine 判定 + `geofence_enter`/`geofence_exit` 事件。它回答的是「孩子现在不在安全区」，**不是**「拦住孩子不让他走」——设备端没有任何手段阻止物理移动 |
+| 通话记录 / 短信 | ⚠️ 已实现，受权限与审核限制 | `READ_CALL_LOG` / `READ_SMS` 是受限权限；读不到 RCS/端到端加密的聊天内容。0 条时跳过上报（服务端对空数组返回 422） |
+| 隐藏桌面图标 | ⚠️ 可以隐藏，但本机就没有入口了 | `activity-alias` 禁用（`DONT_KILL_APP`，避免顺带重启无障碍守卫）。隐藏后只能靠家长端远程恢复或 `adb shell pm enable com.balloondog.agent/.MainActivityLauncher` |
+| 环境监听（持续录音） | ⚠️ 可见、不自恢复 | 每 5 分钟一段循环上传，前台通知固定写「家长开启了环境监听」，**不做隐蔽录音**。进程被杀后不会自动恢复（避免变成没人知道的常驻窃听） |
+| 远程协助 | ⚠️ 是「远程操作」，不是投屏 | 只做返回/主页/最近任务/通知栏/打开应用；不含实时投屏，也不注入触摸。无障碍未连接时如实失败并提示家长去系统设置重开 |
 | 防止孩子改系统时间绕过作息 | ✅ 设备所有者下可以 | `DISALLOW_CONFIG_DATE_TIME`。否则改时间确实能绕过时间表 |
 | 屏幕截图 / 录像 | ✅ 可用，但每次新会话要授权 | 系统强制每次新的 MediaProjection 会话都要用户点一次授权框，无法绕过（Android 14 起更严格） |
 | 解除系统锁屏密码 | ✅ 最高强度档下可以 | 通过预置的重置令牌清除被改写的密码。注意：不清除就无法解除，这正是该档位强度的来源 |

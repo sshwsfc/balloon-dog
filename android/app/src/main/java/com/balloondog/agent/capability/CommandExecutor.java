@@ -14,6 +14,8 @@ import com.balloondog.agent.model.DeviceConfig;
 import com.balloondog.agent.model.MediaRef;
 import com.balloondog.agent.net.AgentApi;
 import com.balloondog.agent.net.ApiException;
+import com.balloondog.agent.service.AgentService;
+import com.balloondog.agent.service.LockWatchdogService;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -40,6 +42,11 @@ import org.json.JSONObject;
  * stop_audio             停止录音 → 上传 M4A                       { mediaId, recordingId }
  * fetch_location         LocationManager 取点 → POST /agent/locations { reported, latitude… }
  * sync_config            重新拉取并应用管控策略                      { synced: true }
+ * sync_apps              重新扫描并上报已安装应用清单                { synced: true }
+ * start_ambient          每 5 分钟一段循环录音 → 逐段上传（有安全阀）  { chunkSeconds }
+ * stop_ambient           停止环境监听（当前段录完即上传）             { stopped: true }
+ * remote_action          无障碍全局动作 / 拉起指定应用                { action, performed }
+ * sync_calls_sms         立刻读取通话记录与短信并上报                { summary }
  * </pre>
  */
 public class CommandExecutor {
@@ -131,6 +138,14 @@ public class CommandExecutor {
                     return doSyncConfig();
                 case Constants.CMD_SYNC_APPS:
                     return doSyncApps();
+                case Constants.CMD_START_AMBIENT:
+                    return doStartAmbient(command);
+                case Constants.CMD_STOP_AMBIENT:
+                    return doStopAmbient();
+                case Constants.CMD_REMOTE_ACTION:
+                    return doRemoteAction(command);
+                case Constants.CMD_SYNC_CALLS_SMS:
+                    return doSyncCallsSms();
                 default:
                     return Outcome.fail("不支持的指令类型：" + command.type);
             }
@@ -381,6 +396,9 @@ public class CommandExecutor {
     private Outcome doFetchLocation() throws CapabilityException, ApiException {
         LocationReader.Fix fix = LocationReader.read(appContext, 15_000L);
         api.reportLocation(store.getBaseUrl(), fix.latitude, fix.longitude, fix.accuracy, fix.address);
+        // 自动上报那条路径会在 AgentService 里做安全区判定，这条也得做 ——
+        // 否则「家长主动取一次位置」反而不会产生进出安全区的事件，看起来像围栏失灵
+        AgentService.evaluateGeofenceStatic(fix.latitude, fix.longitude);
 
         JSONObject result = new JSONObject();
         try {
@@ -425,6 +443,157 @@ public class CommandExecutor {
             result.put("bound", config.bound);
             result.put("locked", config.locked);
             result.put("features", AgentApi.toJsonArray(config.features));
+        } catch (JSONException ignored) {
+            // 原生类型
+        }
+        return Outcome.ok(result);
+    }
+
+    // ============================================================
+    // 环境监听（契约 §6）/ 远程协助（契约 §7）/ 电话短信（契约 §8）
+    // ============================================================
+
+    /**
+     * 开始环境监听：每 N 秒一段循环录音，录完一段立刻上传一段。
+     *
+     * <p>要求的是 {@code audioRecord} 特性，<b>不是</b> {@code remoteRecord} ——
+     * 后者对应的是「家长手动触发一次录音」（{@code start_audio}），
+     * 两者在家长端是两个独立的开关，混用会让家长以为自己只开了其中一个。
+     *
+     * <p>这件事是<b>可见</b>的：前台通知明确写着「家长开启了环境监听」。
+     * 也不在进程被杀后自动恢复 —— 进程都没了还接着录，那不叫守护。
+     */
+    private Outcome doStartAmbient(AgentCommand command) {
+        if (!store.isFeatureEnabled("audioRecord")) {
+            return Outcome.fail("家长端未开启「环境监听」，该指令不执行");
+        }
+        long requested = command.payloadLong("chunkSeconds", Constants.AMBIENT_CHUNK_MS / 1000L);
+        // 夹到 60~900 秒：太短会造出成百上千个小文件，太长则「停止」要等很久才生效
+        int chunkSeconds = (int) Math.max(60L, Math.min(900L, requested));
+
+        try {
+            String message = AmbientRecorder.start(appContext, store, api, chunkSeconds);
+            JSONObject result = new JSONObject();
+            try {
+                result.put("chunkSeconds", chunkSeconds);
+                result.put("maxTotalMinutes", Constants.AMBIENT_MAX_TOTAL_MS / 60_000L);
+                result.put("message", message);
+            } catch (JSONException ignored) {
+                // 原生类型
+            }
+            return Outcome.ok(result);
+        } catch (CapabilityException e) {
+            return Outcome.fail(e.getMessage());
+        }
+    }
+
+    /**
+     * 停止环境监听。
+     *
+     * <p>本来就没在跑时也返回成功 —— 家长要的结果（不再录音）已经达成，
+     * 这时候报失败只会让家长端显示一个假的「执行失败」。
+     */
+    private Outcome doStopAmbient() {
+        boolean wasRunning = AmbientRecorder.isRunning();
+        if (wasRunning) {
+            AmbientRecorder.stop("家长停止环境监听");
+        }
+        JSONObject result = new JSONObject();
+        try {
+            result.put("stopped", wasRunning);
+            result.put("message", wasRunning
+                    ? "已停止环境监听（当前这一段录完即上传）"
+                    : "环境监听本来就没有在运行");
+        } catch (JSONException ignored) {
+            // 原生类型
+        }
+        return Outcome.ok(result);
+    }
+
+    /**
+     * 远程协助：执行一个无障碍全局动作，或拉起一个应用（契约 §7）。
+     *
+     * <p>如实说明它的能力边界：这是「远程操作 + 家长端看屏」，
+     * <b>不是</b>实时投屏，也不是注入触摸的远程控制。做不到的动作一律失败并说清原因，
+     * 绝不返回一个看起来成功的空转。
+     */
+    private Outcome doRemoteAction(AgentCommand command) {
+        if (!store.isFeatureEnabled("remoteHelp")) {
+            return Outcome.fail("家长端未开启「远程协助」，该指令不执行");
+        }
+        String action = command.payloadString("action");
+        if (TextUtils.isEmpty(action)) {
+            return Outcome.fail("remote_action 缺少 action 参数");
+        }
+
+        if ("open_app".equals(action)) {
+            String packageName = command.payloadString("packageName");
+            if (TextUtils.isEmpty(packageName)) {
+                return Outcome.fail("open_app 需要 packageName 参数");
+            }
+            String error = LockWatchdogService.launchApp(appContext, packageName);
+            if (error != null) return Outcome.fail(error);
+            JSONObject result = new JSONObject();
+            try {
+                result.put("action", action);
+                result.put("packageName", packageName);
+                result.put("performed", true);
+            } catch (JSONException ignored) {
+                // 原生类型
+            }
+            EventLog.success("远程协助：已拉起 " + packageName);
+            return Outcome.ok(result);
+        }
+
+        int globalAction;
+        switch (action) {
+            case "back":
+                globalAction = android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK;
+                break;
+            case "home":
+                globalAction = android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME;
+                break;
+            case "recents":
+                globalAction = android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS;
+                break;
+            case "notifications":
+                globalAction = android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS;
+                break;
+            default:
+                return Outcome.fail("不支持的远程动作：" + action
+                        + "（支持 back/home/recents/notifications/open_app）");
+        }
+
+        if (!LockWatchdogService.performRemoteGlobalAction(globalAction)) {
+            return Outcome.fail("远程操作失败：无障碍服务未连接"
+                    + "（请家长在系统设置里重新开启气球狗的「无障碍」开关）");
+        }
+        JSONObject result = new JSONObject();
+        try {
+            result.put("action", action);
+            result.put("performed", true);
+        } catch (JSONException ignored) {
+            // 原生类型
+        }
+        EventLog.success("远程协助：已执行 " + action);
+        return Outcome.ok(result);
+    }
+
+    /**
+     * 立刻读一次通话记录与短信并上报（契约 §8）。
+     *
+     * <p>两个权限一个都没给时如实报失败：返回成功、家长端显示「已刷新」，
+     * 但服务端什么新数据都没收到，这就是在伪造。
+     */
+    private Outcome doSyncCallsSms() {
+        if (!CallLogReader.hasPermission(appContext) && !SmsReader.hasPermission(appContext)) {
+            return Outcome.fail("未授予「读取通话记录」和「读取短信」权限，无法上报通话与短信");
+        }
+        String summary = CallsSmsUploader.upload(appContext, store, api);
+        JSONObject result = new JSONObject();
+        try {
+            result.put("synced", true);
+            result.put("summary", summary);
         } catch (JSONException ignored) {
             // 原生类型
         }

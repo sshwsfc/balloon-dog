@@ -327,6 +327,12 @@ public class AgentStore {
                 .remove(Constants.KEY_EYE_CARE_JSON)
                 .remove(Constants.KEY_PLUGIN_RULES_JSON)
                 .remove(Constants.KEY_EYE_REST_UNTIL)
+                .remove(Constants.KEY_SAFE_ZONES)
+                .remove(Constants.KEY_LAST_SAFE_ZONE_ID)
+                .remove(Constants.KEY_APP_LIMIT_RULES)
+                .remove(Constants.KEY_APP_USAGE_JSON)
+                .remove(Constants.KEY_INSTALL_APPROVAL_UNTIL)
+                .remove(Constants.KEY_CALLS_SMS_REPORTED_AT)
                 .apply();
         return true;
     }
@@ -721,6 +727,226 @@ public class AgentStore {
         prefs.edit().putLong(Constants.KEY_APPS_REPORTED_AT, at).apply();
     }
 
+    // ---------------- 服务端特性开关快照 ----------------
+
+    /**
+     * 保存 {@code /agent/config} 里下发的 features 列表。
+     *
+     * <p>为什么要落盘：指令可能在配置下发很久之后才到（甚至断网重连后才补到），
+     * 设备端必须能回答「家长到底有没有开这个功能」，不能只靠内存里那份配置对象。
+     * 与服务端一致用逗号分隔，便于 SharedPreferences 直接存字符串。
+     */
+    public void setFeatures(java.util.List<String> features) {
+        StringBuilder sb = new StringBuilder();
+        if (features != null) {
+            for (String feature : features) {
+                if (TextUtils.isEmpty(feature)) continue;
+                if (sb.length() > 0) sb.append(',');
+                sb.append(feature.trim());
+            }
+        }
+        prefs.edit().putString(Constants.KEY_FEATURES, sb.toString()).apply();
+    }
+
+    public java.util.List<String> getFeatures() {
+        String joined = prefs.getString(Constants.KEY_FEATURES, "");
+        if (TextUtils.isEmpty(joined)) return java.util.Collections.emptyList();
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String part : joined.split(",")) {
+            if (!TextUtils.isEmpty(part)) out.add(part.trim());
+        }
+        return out;
+    }
+
+    /** 是否已经收到过带 features 的配置。没收到过时所有特性判定都按「不拦」处理。 */
+    public boolean knowsFeatures() {
+        return !getFeatures().isEmpty();
+    }
+
+    /**
+     * 特性是否开启。
+     *
+     * <p><b>刻意在「还没收到过配置」时返回 true</b>：这是一个不制造假象的取舍 ——
+     * 设备刚装好、还没连上服务端时，本地无法知道家长开没开某项功能；
+     * 此时返回 false 会让功能静默失效（看起来像坏了），返回 true 则由服务端把关
+     * （服务端本来就不会下发没开启的指令）。一旦收到过配置，就以快照为准。
+     */
+    public boolean isFeatureEnabled(String key) {
+        java.util.List<String> features = getFeatures();
+        if (features.isEmpty()) return true;
+        return features.contains(key);
+    }
+
+    // ---------------- 安全区（契约 §2） ----------------
+
+    /** 安全区列表必须落盘：断网时进出判定照常工作（离线优先）。 */
+    public void setSafeZones(java.util.List<com.balloondog.agent.model.SafeZone> zones) {
+        prefs.edit()
+                .putString(Constants.KEY_SAFE_ZONES, com.balloondog.agent.model.SafeZone.toJson(zones))
+                .apply();
+    }
+
+    public java.util.List<com.balloondog.agent.model.SafeZone> getSafeZones() {
+        return com.balloondog.agent.model.SafeZone.parseJson(
+                prefs.getString(Constants.KEY_SAFE_ZONES, null));
+    }
+
+    /** 上一次定位时所在的区 id；null = 当时不在任何安全区内。 */
+    @Nullable
+    public String getLastSafeZoneId() {
+        return prefs.getString(Constants.KEY_LAST_SAFE_ZONE_ID, null);
+    }
+
+    public void setLastSafeZoneId(@Nullable String zoneId) {
+        if (TextUtils.isEmpty(zoneId)) {
+            prefs.edit().remove(Constants.KEY_LAST_SAFE_ZONE_ID).apply();
+        } else {
+            prefs.edit().putString(Constants.KEY_LAST_SAFE_ZONE_ID, zoneId).apply();
+        }
+    }
+
+    // ---------------- 应用审核（契约 §3） ----------------
+
+    public long getInstallApprovalUntil() {
+        return prefs.getLong(Constants.KEY_INSTALL_APPROVAL_UNTIL, 0L);
+    }
+
+    public void setInstallApprovalUntil(long untilMillis) {
+        prefs.edit().putLong(Constants.KEY_INSTALL_APPROVAL_UNTIL, Math.max(0L, untilMillis)).apply();
+    }
+
+    /**
+     * 家长批准后的放开窗口是否有效。
+     *
+     * <p><b>刻意只判断「服务端给了非空时间」，不拿本机时钟比大小</b>：
+     * 服务端返回 {@code installApprovalUntil} 之前已经用它自己的时钟把过期的项置成了 null，
+     * 本机时钟反而不可信（孩子把时间改掉就能凭空延长安装窗口，
+     * 也就是说「客户端时钟准不准」不该成为安全边界）。窗口到期后，
+     * 下一次配置刷新（最长 60 秒）服务端会下发 null，限制自动收紧。
+     */
+    public boolean isInstallWindowOpen() {
+        return getInstallApprovalUntil() > 0;
+    }
+
+    /**
+     * 上一次发起安装申请的时间戳。
+     *
+     * <p>备注：App 用服务端返回的 id 做去重键，本地这份时间戳只是「同一包名 10 分钟内
+     * 只报一次」的兜底（服务挂了或离线时也不能反复刷屏）。
+     */
+    public long getInstallAuditLastAt() {
+        return prefs.getLong(Constants.KEY_INSTALL_AUDIT_LAST_AT, 0L);
+    }
+
+    public void setInstallAuditLastAt(long at) {
+        prefs.edit().putLong(Constants.KEY_INSTALL_AUDIT_LAST_AT, at).apply();
+    }
+
+    // ---------------- 应用限时与逐应用用量（契约 §4） ----------------
+
+    public void setAppLimitRules(java.util.List<com.balloondog.agent.model.AppLimitRule> rules) {
+        prefs.edit()
+                .putString(Constants.KEY_APP_LIMIT_RULES,
+                        com.balloondog.agent.model.AppLimitRule.toJson(rules))
+                .apply();
+    }
+
+    public java.util.List<com.balloondog.agent.model.AppLimitRule> getAppLimitRules() {
+        return com.balloondog.agent.model.AppLimitRule.parseJson(
+                prefs.getString(Constants.KEY_APP_LIMIT_RULES, null));
+    }
+
+    /** 保存今日逐应用用量（秒）。跨天由 {@link #getAppUsageToday()} 自动归零。 */
+    public void setAppUsageToday(java.util.Map<String, Integer> usage) {
+        org.json.JSONObject root = new org.json.JSONObject();
+        org.json.JSONObject items = new org.json.JSONObject();
+        try {
+            root.put("day", dayKey());
+            if (usage != null) {
+                for (java.util.Map.Entry<String, Integer> entry : usage.entrySet()) {
+                    if (TextUtils.isEmpty(entry.getKey()) || entry.getValue() == null) continue;
+                    items.put(entry.getKey(), entry.getValue());
+                }
+            }
+            root.put("usage", items);
+        } catch (Exception e) {
+            EventLog.warn("逐应用用量序列化失败，本次不落盘：" + e.getMessage());
+            return;
+        }
+        prefs.edit().putString(Constants.KEY_APP_USAGE_JSON, root.toString()).apply();
+    }
+
+    /**
+     * 今日逐应用前台秒数（包名 → 秒）。
+     *
+     * <p>刻意只读本地缓存、不在这里查 {@code UsageStatsManager}：
+     * 无障碍回调每秒可能触发多次，那里绝不能做耗时查询。
+     */
+    public java.util.Map<String, Integer> getAppUsageToday() {
+        java.util.Map<String, Integer> out = new java.util.HashMap<>();
+        String json = prefs.getString(Constants.KEY_APP_USAGE_JSON, null);
+        if (json == null) return out;
+        try {
+            org.json.JSONObject root = new org.json.JSONObject(json);
+            if (!dayKey().equals(root.optString("day", ""))) return out;
+            org.json.JSONObject items = root.optJSONObject("usage");
+            if (items == null) return out;
+            java.util.Iterator<String> keys = items.keys();
+            while (keys.hasNext()) {
+                String pkg = keys.next();
+                out.put(pkg, items.optInt(pkg, 0));
+            }
+        } catch (Exception e) {
+            EventLog.warn("逐应用用量解析失败，按无用量处理：" + e.getMessage());
+        }
+        return out;
+    }
+
+    public long getAppUsageReportedAt() {
+        return prefs.getLong(Constants.KEY_APP_USAGE_REPORTED_AT, 0L);
+    }
+
+    public void setAppUsageReportedAt(long at) {
+        prefs.edit().putLong(Constants.KEY_APP_USAGE_REPORTED_AT, at).apply();
+    }
+
+    // ---------------- 电话与短信（契约 §8） ----------------
+
+    public long getCallsSmsReportedAt() {
+        return prefs.getLong(Constants.KEY_CALLS_SMS_REPORTED_AT, 0L);
+    }
+
+    public void setCallsSmsReportedAt(long at) {
+        prefs.edit().putLong(Constants.KEY_CALLS_SMS_REPORTED_AT, at).apply();
+    }
+
+    // ---------------- 网址拦截与隐藏图标（契约 §5/§9） ----------------
+
+    /** 家长是否开启网址拦截（特性开 且 黑名单非空）。VPN 服务据此自检并在关闭时退出。 */
+    public boolean isWebBlockEnabled() {
+        return prefs.getBoolean(Constants.KEY_WEB_BLOCK_ENABLED, false);
+    }
+
+    public void setWebBlockEnabled(boolean enabled) {
+        prefs.edit().putBoolean(Constants.KEY_WEB_BLOCK_ENABLED, enabled).apply();
+    }
+
+    public boolean isHideIcon() {
+        return prefs.getBoolean(Constants.KEY_HIDE_ICON, false);
+    }
+
+    public void setHideIcon(boolean hidden) {
+        prefs.edit().putBoolean(Constants.KEY_HIDE_ICON, hidden).apply();
+    }
+
+    public long getVpnConsentNotifiedAt() {
+        return prefs.getLong(Constants.KEY_VPN_CONSENT_NOTIFIED_AT, 0L);
+    }
+
+    public void setVpnConsentNotifiedAt(long at) {
+        prefs.edit().putLong(Constants.KEY_VPN_CONSENT_NOTIFIED_AT, at).apply();
+    }
+
     // ---------------- 重置 ----------------
 
     /** 清空设备身份，下次连接会以一台全新设备重新注册（家长需重新输入新绑定码）。 */
@@ -744,6 +970,14 @@ public class AgentStore {
                 .remove(Constants.KEY_PLUGIN_RULES_JSON)
                 .remove(Constants.KEY_EYE_CONTINUOUS_MS)
                 .remove(Constants.KEY_EYE_REST_UNTIL)
+                .remove(Constants.KEY_FEATURES)
+                .remove(Constants.KEY_SAFE_ZONES)
+                .remove(Constants.KEY_LAST_SAFE_ZONE_ID)
+                .remove(Constants.KEY_INSTALL_APPROVAL_UNTIL)
+                .remove(Constants.KEY_APP_LIMIT_RULES)
+                .remove(Constants.KEY_APP_USAGE_JSON)
+                .remove(Constants.KEY_CALLS_SMS_REPORTED_AT)
+                .remove(Constants.KEY_WEB_BLOCK_ENABLED)
                 .apply();
         // 注意：刻意<b>不</b>清除应急密码与重置令牌 —— 它们属于「这台设备」而不是
         // 「这个设备身份」，重新配对后家长仍然需要它们来解锁。

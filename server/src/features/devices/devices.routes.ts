@@ -31,6 +31,13 @@ deviceRoutes.post('/start-recording', ah(controller.startRecording));
 deviceRoutes.post('/stop-recording', ah(controller.stopRecording));
 deviceRoutes.post('/start-audio', ah(controller.startAudio));
 deviceRoutes.post('/stop-audio', ah(controller.stopAudio));
+// §6 环境监听（要求 audioRecord 开关；停止不检查开关，必须停得下来）
+deviceRoutes.post('/start-ambient', ah(controller.startAmbient));
+deviceRoutes.post('/stop-ambient', ah(controller.stopAmbient));
+// §7 远程协助（要求 remoteHelp 开关）
+deviceRoutes.post('/remote-action', ah(controller.remoteAction));
+// §8 让设备重新上报通话记录与短信（要求 callSms 开关）
+deviceRoutes.post('/sync-calls-sms', ah(controller.syncCallsSms));
 deviceRoutes.get('/commands', ah(controller.listCommands));
 deviceRoutes.post('/commands/:commandId/cancel', ah(controller.cancelCommand));
 
@@ -45,6 +52,21 @@ featureRoutes.delete('/app-limit/:appName', ah(controller.removeAppLimit));
 featureRoutes.post('/app-audit', ah(controller.auditApp));
 featureRoutes.post('/web-block', ah(controller.blockUrl));
 featureRoutes.delete('/web-block/:url', ah(controller.unblockUrl));
+
+/**
+ * /api/calls 与 /api/sms —— 孩子的通话记录与短信（§8）。
+ *
+ * 独立成两个顶层路由（而不是挂 /api/device 下）是因为家长端的页面按资源取数，
+ * 且两者都走「当前设备」解析 + 分页。内容只回给家长：
+ * 管理后台不挂这两个路由，只在自己的统计里给计数 —— 见 AGENTS.md 的红线。
+ */
+export const callRoutes = Router();
+callRoutes.use(authenticate);
+callRoutes.get('/', ah(controller.listCalls));
+
+export const smsRoutes = Router();
+smsRoutes.use(authenticate);
+smsRoutes.get('/', ah(controller.listSms));
 
 /**
  * /api/user —— 兼容前端既有路径的薄封装。

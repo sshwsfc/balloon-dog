@@ -1,5 +1,6 @@
 package com.balloondog.agent.capability;
 
+import com.balloondog.agent.model.AppLimitRule;
 import com.balloondog.agent.model.ModeConfig;
 import com.balloondog.agent.model.PluginRule;
 
@@ -8,6 +9,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -96,9 +98,53 @@ public final class GuardRules {
         return new GuardDecision("学习模式中，该应用不在允许清单里", null);
     }
 
+    /**
+     * 应用限时匹配（家长给单个应用定的每日分钟数）。
+     *
+     * <p>调用顺序上排在 {@link #matchStudyMode} <b>之后</b>：学习模式是「这一屏根本不许用」，
+     * 限时是「用超了」，前者语义更强，先命中的原因对孩子也更好理解。
+     *
+     * @param usageSeconds 今日逐应用前台秒数（包名 → 秒）。缺项按 0 处理 ——
+     *                     拿不到用量统计时宁可漏拦，也不要误拦「还没用过的应用」。
+     * @param isLaunchable 只有「有桌面入口的普通应用」才拦，与学习模式同一套判据
+     * @param isHome       桌面永远不拦
+     * @return 拦截决定；null 表示放行
+     */
+    public static GuardDecision matchAppLimit(List<AppLimitRule> rules,
+                                              Map<String, Integer> usageSeconds,
+                                              boolean isLaunchable, boolean isHome, String pkg) {
+        if (rules == null || rules.isEmpty()) return null;
+        if (pkg == null || pkg.isEmpty()) return null;
+
+        // 与学习模式同样的安全底线：桌面/系统界面/电话绝不能因为限额被拦成砖
+        if (!isLaunchable) return null;
+        if (isHome) return null;
+        if (ALWAYS_ALLOWED.contains(pkg)) return null;
+
+        AppLimitRule matched = null;
+        for (AppLimitRule rule : rules) {
+            if (pkg.equals(rule.packageName)) {
+                matched = rule;
+                break;
+            }
+        }
+        if (matched == null) return null;
+        if (matched.dailyLimitMinutes <= 0) return null;
+
+        int usedSeconds = 0;
+        if (usageSeconds != null) {
+            Integer value = usageSeconds.get(pkg);
+            if (value != null) usedSeconds = value;
+        }
+        int limitSeconds = matched.dailyLimitMinutes * 60;
+        if (usedSeconds < limitSeconds) return null;
+
+        return new GuardDecision(matched.displayName() + " 今日 " + matched.dailyLimitMinutes
+                + " 分钟已用完", null);
+    }
+
     /** 拦截决定。 */
-    public static final class GuardDecision {
-        /** 需要拦截时非 null，内容是人话原因（会写进设备事件，家长端能看到）。 */
+    public static final class GuardDecision {        /** 需要拦截时非 null，内容是人话原因（会写进设备事件，家长端能看到）。 */
         public final String reason;
         /** 命中的插件键；学习模式拦截时为 null。 */
         public final String pluginKey;

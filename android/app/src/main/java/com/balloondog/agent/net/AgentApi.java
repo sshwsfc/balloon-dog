@@ -457,4 +457,75 @@ public class AgentApi {
         }
         return array;
     }
+
+    // ============================================================
+    // 应用审核 / 应用用量 / 通话短信（契约 §3、§4、§8）
+    // ============================================================
+
+    /**
+     * 向家长发起一次安装申请（契约 §3）。
+     *
+     * <p>服务端对「同一设备 + 同一包名 + 仍处于 pending」做幂等 upsert：
+     * 重复提交不会产生多条待审记录，返回的仍是同一条。
+     */
+    @NonNull
+    public AuditResult submitAuditRequest(String baseUrl, String appName, String packageName)
+            throws ApiException {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("appName", appName);
+            body.put("packageName", packageName);
+        } catch (JSONException ignored) {
+            // 常量 key
+        }
+        JSONObject json = client.post(base(baseUrl), Constants.PATH_AGENT_AUDIT_REQUESTS, body);
+        return new AuditResult(
+                json.optString("id", ""),
+                json.optString("status", "pending"));
+    }
+
+    /** 上报逐应用前台用量（全量替换当日，契约 §4）。 */
+    public void reportAppUsage(String baseUrl, JSONArray usage) throws ApiException {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("usage", usage);
+        } catch (JSONException ignored) {
+            // 常量 key
+        }
+        client.post(base(baseUrl), Constants.PATH_AGENT_APP_USAGE, body);
+    }
+
+    /** 上报通话记录（批量全量替换最近 N 条，契约 §8）。 */
+    public void reportCalls(String baseUrl, JSONArray calls) throws ApiException {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("calls", calls);
+        } catch (JSONException ignored) {
+            // 常量 key
+        }
+        client.post(base(baseUrl), Constants.PATH_AGENT_CALLS, body);
+    }
+
+    /** 上报短信（批量全量替换最近 N 条，契约 §8）。 */
+    public void reportSms(String baseUrl, JSONArray sms) throws ApiException {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("sms", sms);
+        } catch (JSONException ignored) {
+            // 常量 key
+        }
+        client.post(base(baseUrl), Constants.PATH_AGENT_SMS, body);
+    }
+
+    /** 安装申请的服务端回执。 */
+    public static final class AuditResult {
+        public final String id;
+        /** {@code pending | approved | rejected} */
+        public final String status;
+
+        AuditResult(String id, String status) {
+            this.id = id;
+            this.status = status;
+        }
+    }
 }

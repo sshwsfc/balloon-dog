@@ -227,6 +227,20 @@ export const modeService = {
       ...(rows.length ? [prisma.deviceApp.createMany({ data: rows })] : []),
     ]);
 
+    // 清单刷新后顺手清掉「作用在不可启动包上」的死规则（缺陷 2 的自愈）。
+    //
+    // 旧实现批准安装审核时，拿设备上报的**安装器包名**建了一条逐应用限额；
+    // 安装器没有桌面入口，`GuardRules.matchAppLimit` 的第一道闸门
+    // `if (!isLaunchable) return null;` 让它永不触发 —— 家长端却显示「已设限」。
+    // 只有设备**明确**报了 `isLaunchable=false` 才删（清单是全量替换，缺席的包不动），
+    // 免得把家长刚设的正常限额误删。
+    const nonLaunchable = rows.filter((r) => !r.isLaunchable).map((r) => r.packageName);
+    if (nonLaunchable.length > 0) {
+      await prisma.appLimit.deleteMany({
+        where: { deviceId: device.id, packageName: { in: nonLaunchable } },
+      });
+    }
+
     return { success: true, count: rows.length };
   },
 

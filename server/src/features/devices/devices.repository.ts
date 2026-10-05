@@ -111,15 +111,44 @@ export const devicesRepo = {
       update: data,
     }),
 
+  /** 设备上报过的某个应用（家长端选应用时用来拿真实包名 / 判断能不能拦）。 */
+  findDeviceApp: (deviceId: string, packageName: string) =>
+    prisma.deviceApp.findUnique({
+      where: { deviceId_packageName: { deviceId, packageName } },
+    }),
+
   listAppLimits: (deviceId: string) =>
     prisma.appLimit.findMany({ where: { deviceId }, orderBy: { appName: 'asc' } }),
 
-  upsertAppLimit: (
+  /**
+   * 写一条逐应用限额。
+   *
+   * <p>唯一键是 `(deviceId, appName)`，但**判定用的是 packageName**，所以同一个包
+   * 换个展示名（历史数据里的「时钟」vs 设备清单里的「Clock」）会按 appName upsert 出
+   * 两条规则 —— 设备端会拿同一个包判两次。这里先按 packageName 找已有行，
+   * 找到就改它（顺带把展示名对齐），找不到再走原来的 upsert。
+   */
+  upsertAppLimit: async (
     deviceId: string,
     appName: string,
     data: { dailyLimitMinutes: number; packageName?: string; enabled?: boolean },
-  ) =>
-    prisma.appLimit.upsert({
+  ) => {
+    if (data.packageName) {
+      const existing = await prisma.appLimit.findFirst({
+        where: { deviceId, packageName: data.packageName },
+      });
+      if (existing) {
+        return prisma.appLimit.update({
+          where: { id: existing.id },
+          data: {
+            appName,
+            dailyLimitMinutes: data.dailyLimitMinutes,
+            ...(data.enabled !== undefined ? { enabled: data.enabled } : {}),
+          },
+        });
+      }
+    }
+    return prisma.appLimit.upsert({
       where: { deviceId_appName: { deviceId, appName } },
       create: {
         deviceId,
@@ -133,10 +162,42 @@ export const devicesRepo = {
         ...(data.packageName !== undefined ? { packageName: data.packageName } : {}),
         ...(data.enabled !== undefined ? { enabled: data.enabled } : {}),
       },
-    }),
+    });
+  },
 
   removeAppLimit: (deviceId: string, appName: string) =>
     prisma.appLimit.deleteMany({ where: { deviceId, appName } }),
+
+  /**
+   * 清掉「空包名」的限额行。
+   *
+   * <p>历史缺陷在服务端丢掉了 packageName，库里留下了一批 `packageName=''` 的行。
+   * 设备端按包名判定，这些行永远不生效（不是「暂时不生效」，是永远），
+   * 留着只会让家长端显示一条假的限制。写入路径顺手清掉。
+   */
+  removeAppLimitsWithoutPackage: (deviceId: string) =>
+    prisma.appLimit.deleteMany({ where: { deviceId, packageName: '' } }),
+
+  /**
+   * 清掉「作用在不可启动包上」的死规则（缺陷 2 的自愈）。
+   *
+   * <p>旧实现批准安装审核时，拿设备上报的**安装器包名**建了一条限额；
+   * 安装器没有桌面入口，`GuardRules.matchAppLimit` 的第一道闸门
+   * `if (!isLaunchable) return null;` 让它永不触发。
+   * 只有设备明确报过「这个包不可启动」时才删 —— 清单还没同步（app 为 null）时不动，
+   * 免得把家长刚设的正常限额误删。
+   */
+  removeDeadAppLimit: async (deviceId: string, packageName: string) => {
+    const pkg = packageName.trim();
+    if (!pkg) return;
+    const app = await prisma.deviceApp.findUnique({
+      where: { deviceId_packageName: { deviceId, packageName: pkg } },
+      select: { isLaunchable: true },
+    });
+    if (app && !app.isLaunchable) {
+      await prisma.appLimit.deleteMany({ where: { deviceId, packageName: pkg } });
+    }
+  },
 
   listPendingAudits: (deviceId: string) =>
     prisma.appAuditRequest.findMany({
@@ -159,6 +220,20 @@ export const devicesRepo = {
 
   createAudit: (deviceId: string, appName: string, packageName: string) =>
     prisma.appAuditRequest.create({ data: { deviceId, appName, packageName } }),
+
+  /**
+   * 设备端申请安装时的幂等键：同一台设备 + 同一个包名只应该有一条 pending。
+   * 用 packageName 而不是 appName —— 展示名是给孩子看的、可以重名，包名才唯一。
+   */
+  findPendingAuditByPackage: (deviceId: string, packageName: string) =>
+    prisma.appAuditRequest.findFirst({
+      where: { deviceId, packageName, status: 'pending' },
+      orderBy: { createdAt: 'desc' },
+    }),
+
+  /** 设备端按 id 轮询审核结果。带 deviceId 一起查，避免拿到别的设备的申请状态。 */
+  findAuditById: (deviceId: string, id: string) =>
+    prisma.appAuditRequest.findFirst({ where: { id, deviceId } }),
 
   listBlockedUrls: (deviceId: string) =>
     prisma.blockedUrl.findMany({ where: { deviceId }, orderBy: { createdAt: 'asc' } }),

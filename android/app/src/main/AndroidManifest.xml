@@ -59,6 +59,27 @@
     <!-- 引导家长把本应用加入电池优化白名单，否则长轮询会被系统冻结 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!--
+      逐应用限时（PLAN-agent-gaps §4）：读取每个应用的前台使用时长。
+
+      这个权限从 Android 5.0 起就不走运行时弹窗，只能在
+      「设置 → 特殊应用权限 → 使用情况访问」里手动打开。
+      因此 AppUsageTracker.hasPermission() 用 AppOpsManager 判断，
+      没拿到就如实记日志并跳过超额判定 —— 绝不假装已经能拦住。
+    -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!--
+      通话记录与短信上报（PLAN-agent-gaps §8）。
+
+      ⚠️ READ_CALL_LOG / READ_SMS 是 Google Play 的「受限权限」：
+      上架必须单独申报用途并接受审核（Android 10+ 对通话记录的审核更严）。
+      未授予时 CallLogReader / SmsReader 会跳过并记日志，不上报空数据。
+    -->
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+
     <!-- 设备能力都是可选的：没有摄像头的设备仍可做锁屏与定位 -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.front" android:required="false" />
@@ -76,16 +97,32 @@
         tools:targetApi="34">
 
         <!-- ================= 界面 ================= -->
+        <!--
+          桌面入口单独做成 activity-alias（PLAN-agent-gaps §9）：
+
+          「隐藏图标」的开关切换的是这个 alias 的启用状态（IconHider），
+          而 MainActivity 本体始终保留。反过来做（直接禁用 MainActivity）
+          会把锁定页跳转与家长端远程启动一起打死 —— 藏得连自己都进不去。
+
+          隐藏后设备本机没有任何入口，只能靠 adb 或家长端远程恢复，
+          这一点在设置页与家长端都有明确提示。
+        -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity-alias
+            android:name=".MainActivityLauncher"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:targetActivity=".ui.MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
 
         <activity
             android:name=".ui.SettingsActivity"
@@ -142,6 +179,25 @@
             android:name=".service.ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!--
+          网址拦截（PLAN-agent-gaps §5）。
+
+          BIND_VPN_SERVICE 是系统要求：只有系统能在用户于
+          VpnService.prepare() 的系统弹窗里点「确定」之后绑定它。
+          exported 必须为 true 才能被系统绑定，但受权限保护，普通应用绑不上。
+
+          它是一个前台服务（通知栏会写明「网址拦截已开启」），
+          因为 VPN 断开或进程被杀都会让孩子以为「网断了」。
+        -->
+        <service
+            android:name=".service.DnsFilterVpnService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
 
         <!-- ================= 广播接收器 ================= -->
         <receiver

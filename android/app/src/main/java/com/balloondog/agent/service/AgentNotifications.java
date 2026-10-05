@@ -88,4 +88,56 @@ public final class AgentNotifications {
     private static int pendingIntentFlag() {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0;
     }
+
+    // ---------------- 环境监听 / 网址拦截（契约 §6、§5） ----------------
+
+    /**
+     * 环境监听期间的常驻通知。
+     *
+     * <p><b>刻意做成显眼的常驻通知</b>：边录边传还偷偷摸摸，在任何法域都是最危险的做法。
+     * 这条通知就是「孩子/家长都能看见正在录音」的凭证，也是本项目对「不隐蔽」的承诺
+     * （详见 android/README.md 的隐私说明）。
+     */
+    public static void notifyAmbient(Context context, String content) {
+        ensureChannels(context);
+        NotificationManager manager =
+                (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        Notification notification = new NotificationCompat.Builder(context, Constants.CHANNEL_EVENTS)
+                .setContentTitle("家长开启了环境监听")
+                .setContentText(content)
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(content))
+                .setSmallIcon(R.drawable.ic_stat_agent)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setContentIntent(MainActivity.createPendingIntent(context))
+                .build();
+        try {
+            manager.notify(Constants.NOTIFICATION_ID_AMBIENT, notification);
+        } catch (SecurityException e) {
+            // Android 13+ 没给通知权限：如实记日志（录音仍会继续，但用户看不到提示）
+            com.balloondog.agent.data.EventLog.warn(
+                    "无法显示环境监听通知（缺少通知权限）：" + e.getMessage());
+        }
+    }
+
+    public static void clearAmbient(Context context) {
+        NotificationManager manager =
+                (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        manager.cancel(Constants.NOTIFICATION_ID_AMBIENT);
+    }
+
+    /**
+     * 网址拦截缺少系统 VPN 授权时的提醒。
+     *
+     * <p>用可点击通知而不是静默失败：VPN 授权必须由界面触发
+     * （{@code VpnService.prepare} 的弹窗绑在 Activity 上），
+     * 家长不开就无法拦截，这里必须让设备使用者知道去点一下。
+     */
+    public static void notifyVpnConsentNeeded(Context context) {
+        notifyEvent(context, Constants.NOTIFICATION_ID_VPN,
+                "网址拦截待授权",
+                "家长已开启网址拦截，请在气球狗设置页点「启用网址拦截」并同意系统弹窗");
+    }
 }

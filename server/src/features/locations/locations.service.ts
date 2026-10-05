@@ -56,6 +56,7 @@ function toZoneView(zone: SafeZone) {
     radiusMeters: zone.radiusMeters,
     address: zone.address,
     type: zone.type,
+    enabled: zone.enabled,
     createdAt: zone.createdAt,
   };
 }
@@ -86,7 +87,8 @@ export const locationsService = {
         orderBy: { recordedAt: 'desc' },
         take: options.limit,
       }),
-      prisma.safeZone.findMany({ where: { deviceId: device.id } }),
+      // 只有启用中的安全区参与命中判定（§2）：停用的区不该再给轨迹打标
+      prisma.safeZone.findMany({ where: { deviceId: device.id, enabled: true } }),
     ]);
 
     return records.map((r) => {
@@ -113,7 +115,7 @@ export const locationsService = {
       orderBy: { recordedAt: 'desc' },
     });
     if (!record) return null;
-    const zones = await prisma.safeZone.findMany({ where: { deviceId: device.id } });
+    const zones = await prisma.safeZone.findMany({ where: { deviceId: device.id, enabled: true } });
     const zone = matchSafeZone(zones, record.latitude, record.longitude);
     return {
       id: record.id,
@@ -146,6 +148,7 @@ export const locationsService = {
       radiusMeters: number;
       address?: string;
       type: string;
+      enabled?: boolean;
     },
   ) {
     const zone = await prisma.safeZone.create({
@@ -157,6 +160,7 @@ export const locationsService = {
         radiusMeters: input.radiusMeters,
         address: input.address ?? '',
         type: input.type,
+        enabled: input.enabled ?? true,
       },
     });
     logger.info({ msg: 'safe zone created', deviceId: device.id, zoneId: zone.id });
@@ -173,6 +177,7 @@ export const locationsService = {
       radiusMeters: number;
       address: string;
       type: string;
+      enabled: boolean;
     }>,
   ) {
     // 先确认该安全区确实属于这台设备，避免换 id 改别人家的

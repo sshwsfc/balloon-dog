@@ -10,9 +10,11 @@ import { errorHandler } from './middleware/errorHandler';
 import { notFound } from './middleware/notFound';
 import { authRoutes, userInfoRoutes } from './features/auth/auth.routes';
 import {
+  callRoutes,
   deviceRoutes,
   devicesRoutes,
   featureRoutes,
+  smsRoutes,
   userCompatRoutes,
 } from './features/devices/devices.routes';
 import { agentRoutes } from './features/devices/agent.routes';
@@ -110,6 +112,9 @@ export function createApp(): Express {
   app.use('/api/devices', devicesRoutes);
   app.use('/api/device', deviceRoutes);
   app.use('/api/features', featureRoutes);
+  // §8 通话记录与短信：只面向家长；管理后台不挂这两条，只给计数
+  app.use('/api/calls', callRoutes);
+  app.use('/api/sms', smsRoutes);
   app.use('/api/quiz', quizRoutes);
   app.use('/api/locations', locationRoutes);
   app.use('/api/safe-zones', safeZoneRoutes);

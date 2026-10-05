@@ -33,6 +33,45 @@ function commandExpiry(): Date {
 }
 
 /**
+ * 「已被领取但迟迟没有结算」的判定阈值（回退重投递）。
+ *
+ * 取值必须比「设备端合法执行一条指令的最长时间」更大，否则会把还在正常执行
+ * 的指令误判成死信、重复推给设备执行（设备端对指令没有幂等保护）。
+ *
+ * 设备端的最长合法路径不是长轮询周期，而是**采集类指令的上传**：
+ * `CommandExecutor.execute()` 是同步的，`remote_photo` / `screenshot` /
+ * `start_recording` 等要在里面把文件传给服务端，而
+ * `Constants.UPLOAD_WRITE_TIMEOUT_MS = 120_000L` —— 即单次上传最长可以合法
+ * 占住 120s，之后才 `enqueueReport` + `flushPendingReports` 回报。再叠加一次
+ * 回报失败后的重试（≈25s 一轮主循环），合法上限约 145s。
+ *
+ * 所以取 240s：明显大于 145s 的合法上限（不会误判在途指令），又小于
+ * COMMAND_TTL_SECONDS（默认 300s），保证卡死的指令仍能在过期**之前**被救回
+ * （实际恢复延迟 = 240s ~ 240s+sweep 间隔）。
+ */
+export const STALE_DISPATCH_SECONDS = 240;
+
+/**
+ * 同一条指令最多重新投递几次。
+ *
+ * 为什么需要上限：重投递本身是「把 dispatched 退回 pending」，而设备端对
+ * 指令**没有幂等/去重**保护 —— 若某条指令真的执行得很慢又始终不回报，
+ * 无上限重投递会把它反复推给设备执行。2 是「给一次补救机会 + 一次容错」。
+ *
+ * 注意实际能否用满 2 次取决于 COMMAND_TTL_SECONDS：TTL 默认 300s、阈值 240s，
+ * 两次重投之间还要等一个 sweep（60s），所以 TTL 保持 300s 时通常只来得及
+ * 重投 1 次，第 2 次往往在 expiresAt 之后（重投条件要求 expiresAt > now，
+ * 因此不会命中）。把 TTL 调大（例如 900s）才会真正用到第 2 次。
+ */
+export const MAX_REDELIVERIES = 2;
+
+/** 重投递次数记在 payload 的内部字段里（`__` 前缀的字段不对外暴露，见 toCommandView）。 */
+function redeliveryCount(payload: unknown): number {
+  const value = (payload as Record<string, unknown> | null)?.__redeliveries;
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+/**
  * 入队一条指令。调用方负责已做过设备归属校验。
  */
 export async function enqueue(
@@ -73,8 +112,11 @@ export async function enqueue(
 
 export function toCommandView(c: DeviceCommand) {
   const payload = (c.payload ?? {}) as Record<string, unknown>;
-  // __revert 是内部字段，不对外暴露
-  const { __revert, ...publicPayload } = payload;
+  // `__` 前缀是服务端内部字段（__revert 回滚快照、__redeliveries 重投递计数），
+  // 一律不对外暴露 —— 设备端与家长端看到的 payload 保持原样。
+  const publicPayload = Object.fromEntries(
+    Object.entries(payload).filter(([key]) => !key.startsWith('__')),
+  );
   return {
     id: c.id,
     deviceId: c.deviceId,
@@ -191,10 +233,79 @@ export const commandsService = {
   },
 
   /**
+   * 回退重投递：把「已被领取、但超过 STALE_DISPATCH_SECONDS 仍未结算」的指令
+   * 退回 pending，让设备端下一次长轮询能重新领到它。
+   *
+   * 为什么需要这一层（而不只是修好等待者摘除）：等待者摘除解决的是「设备还活着
+   * 且还会再来轮询」的情况 —— 新连接顶掉死连接的等待者即可拿到指令。但如果设备
+   * 被杀之后**再也没起来**（孩子关机、卸载、令牌失效一直在报错），就永远不会有
+   * 新连接来顶替，那条被死连接抢走的指令就只能等到 COMMAND_TTL_SECONDS 过期，
+   * 家长端全程显示「已下发」。这个兜底把「等 300s 变 expired」变成「等 90s 自动重投」。
+   *
+   * 语义保持：dispatched 仍然表示「已被某个连接领取、正在等 ack」，这里只是把
+   * **确实没有人 ack** 的那些退回 pending；已经结算（succeeded/failed/cancelled/
+   * expired）的指令 status 已经变了，CAS 不会命中。
+   *
+   * @returns 本次重投递的条数
+   */
+  async sweepStaleDispatch(): Promise<number> {
+    const cutoff = new Date(Date.now() - STALE_DISPATCH_SECONDS * 1000);
+    const stale = await prisma.deviceCommand.findMany({
+      where: { status: 'dispatched', dispatchedAt: { lt: cutoff }, expiresAt: { gt: new Date() } },
+      take: 200,
+    });
+    if (stale.length === 0) return 0;
+
+    let redelivered = 0;
+    for (const command of stale) {
+      const attempts = redeliveryCount(command.payload);
+      if (attempts >= MAX_REDELIVERIES) {
+        // 已经重投过上限次还是没人 ack：留在 dispatched，由 expiresAt 收尾。
+        logger.warn({
+          msg: 'stale dispatched command exhausted redeliveries',
+          deviceId: command.deviceId,
+          commandId: command.id,
+          type: command.type,
+          redeliveries: attempts,
+        });
+        continue;
+      }
+      const payload = {
+        ...((command.payload ?? {}) as Record<string, unknown>),
+        __redeliveries: attempts + 1,
+      } as Prisma.InputJsonValue;
+      const reset = await prisma.deviceCommand.updateMany({
+        // CAS：必须仍是同一时刻被领取的那条。若设备在这几毫秒里刚回报成功，
+        // status 已变成 succeeded，这里就不会命中，更不会把结果覆盖掉。
+        where: { id: command.id, status: 'dispatched', dispatchedAt: command.dispatchedAt },
+        data: { status: 'pending', dispatchedAt: null, payload },
+      });
+      if (reset.count === 1) {
+        redelivered++;
+        logger.warn({
+          msg: 'stale dispatched command redelivered',
+          deviceId: command.deviceId,
+          commandId: command.id,
+          type: command.type,
+          redeliveries: attempts + 1,
+          dispatchedAt: command.dispatchedAt?.toISOString(),
+        });
+      }
+    }
+    return redelivered;
+  },
+
+  /**
    * 清理超时未被领取的指令（由 server.ts 的定时任务调用）。
    * 返回本次处理的条数，供日志观察。
+   *
+   * 每次先把「领取了却没人 ack」的指令退回 pending（回退重投递），再清理
+   * 真正过期的 —— 顺序不能反：先把能救的救回来，剩下的才判定为死信。
    */
   async sweepExpired(): Promise<number> {
+    const redelivered = await commandsService.sweepStaleDispatch();
+    if (redelivered > 0) logger.warn({ msg: 'stale dispatched commands redelivered', count: redelivered });
+
     const stale = await prisma.deviceCommand.findMany({
       where: { status: { in: ['pending', 'dispatched'] }, expiresAt: { lt: new Date() } },
       take: 200,

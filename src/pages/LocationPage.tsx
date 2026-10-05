@@ -23,6 +23,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
+import { ToggleSwitch } from '@/components/ToggleSwitch'
 import type { LocationPoint, SafeZone, ZoneType } from '@/types'
 
 const ZONE_ICON: Record<ZoneType, typeof Home> = {
@@ -81,6 +82,8 @@ export function LocationPage() {
   const [zoneAddress, setZoneAddress] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [removeTarget, setRemoveTarget] = useState<SafeZone | null>(null)
+  /** 正在切换启停的围栏 id：只禁用那一个开关，避免连点期间全列表都不可用 */
+  const [zoneToggling, setZoneToggling] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -169,6 +172,25 @@ export function LocationPage() {
       await load()
     } catch (err) {
       toast.error(toUserMessage(err, '删除失败'))
+    }
+  }
+
+  /**
+   * 启用 / 停用围栏。
+   *
+   * 停用是**真的停用**，不是只改个显示：`agent.controller.ts` 只把 `enabled: true` 的围栏下发给设备，
+   * 设备端因此不会再对这条围栏做进出判定（已产生的历史事件保留）。
+   */
+  const handleToggleZone = async (zone: SafeZone) => {
+    setZoneToggling(zone.id)
+    try {
+      await api.updateSafeZone(zone.id, { enabled: !zone.enabled })
+      toast.success(zone.enabled ? `已停用「${zone.name}」` : `已启用「${zone.name}」`)
+      await load()
+    } catch (err) {
+      toast.error(toUserMessage(err, '操作失败'))
+    } finally {
+      setZoneToggling(null)
     }
   }
 
@@ -302,21 +324,31 @@ export function LocationPage() {
                       <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center flex-shrink-0">
                         <Icon className="w-5 h-5 text-gray-500" />
                       </div>
-                      <div className="flex-1 min-w-0 ml-3">
+                      <div className={`flex-1 min-w-0 ml-3 ${zone.enabled ? '' : 'opacity-50'}`}>
                         <div className="flex items-center space-x-2">
                           <span className="font-medium text-gray-900 text-sm">{zone.name}</span>
                           <Badge className={`${ZONE_COLOR[zone.type]} text-[10px]`}>
                             {ZONE_LABEL[zone.type]}
                           </Badge>
+                          {!zone.enabled && (
+                            <Badge className="bg-gray-100 text-gray-500 text-[10px]">已停用</Badge>
+                          )}
                         </div>
                         <p className="text-xs text-gray-400 mt-0.5 truncate">
                           {zone.address || '未填写地址'} · 半径 {zone.radiusMeters} 米
                         </p>
                       </div>
+                      <ToggleSwitch
+                        checked={zone.enabled}
+                        busy={zoneToggling === zone.id}
+                        disabled={zoneToggling !== null && zoneToggling !== zone.id}
+                        label={`${zone.enabled ? '停用' : '启用'} ${zone.name}`}
+                        onChange={() => handleToggleZone(zone)}
+                      />
                       <button
                         type="button"
                         onClick={() => setRemoveTarget(zone)}
-                        className="text-gray-300 hover:text-red-500 p-1.5"
+                        className="text-gray-300 hover:text-red-500 p-1.5 ml-1"
                         aria-label={`删除 ${zone.name}`}
                       >
                         <Trash2 className="w-4 h-4" />

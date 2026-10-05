@@ -46,7 +46,7 @@ curl localhost:4000/ready    # {"status":"ok","checks":{"database":"ok"}}
 ```
 server/
 ├─ prisma/
-│  ├─ schema.prisma        # 数据模型（14 张表）
+│  ├─ schema.prisma        # 数据模型（36 张表）
 │  ├─ migrations/          # 迁移历史
 │  └─ seed.ts              # 种子数据（幂等）
 ├─ scripts/
@@ -216,6 +216,8 @@ POST /api/agent/register  ──────────────►  建一�
   这类内容是儿童隐私，运营没有查看的必要；确实需要时应走独立的、有单独授权与
   留痕的流程，而不是顺手挂在后台列表上。
 - **验证码审计不返回 `codeHash`**，后台无法查看验证码明文 —— 审计表不能成为破解入口。
+- **后台不提供通话记录与短信内容**（`/api/admin/*` 下没有对应的内容接口，只有计数）。
+  短信用看板计数即可满足运营需要，内容属于儿童隐私。
 - **已有孩子作答记录的题目不允许删除**，返回 409 并提示改为「修改题干」，
   避免外键级联把答题历史一并清掉。
 
@@ -281,6 +283,9 @@ npm run dev              # 家长端与后台同一个 dev server
 | POST | `/api/device/screenshot` | 屏幕截图 |
 | POST | `/api/device/start-recording` `/stop-recording` | 录像 |
 | POST | `/api/device/start-audio` `/stop-audio` | 录音 |
+| POST | `/api/device/start-ambient` `/stop-ambient` | 环境监听（分片连续录音），需要 `audioRecord`；**`stop-ambient` 不校验开关**，保证随时停得下来 |
+| POST | `/api/device/remote-action` | 远程协助。body: `{ action: 'back'\|'home'\|'recents'\|'notifications'\|'open_app', packageName? }`，需要 `remoteHelp`；`action='open_app'` 必须带 `packageName` |
+| POST | `/api/device/sync-calls-sms` | 让设备立即上报通话/短信，需要 `callSms`（平时设备每 6 小时自报） |
 | GET | `/api/device/commands` | 指令历史（可 `?status=` `?limit=`） |
 | POST | `/api/device/commands/:commandId/cancel` | 撤销未执行的指令 |
 
@@ -299,6 +304,23 @@ npm run dev              # 家长端与后台同一个 dev server
 | POST | `/app-audit` | 审批应用（批准后自动写入 60 分钟限制） |
 | POST | `/web-block` | 添加拦截域名（自动归一化为纯域名） |
 | DELETE | `/web-block/:url` | 取消拦截 |
+
+> ⚠️ `GET /api/features` 的 `appLimit.apps` 的值已由 `number`（每日分钟上限）改为
+> `{ dailyLimit, usedTodaySeconds }` 对象（键仍是应用名）：`usedTodaySeconds` 是设备上报的
+> 当日已用秒数，供家长端展示；今天没上报过的应用显示为 `0`（只影响展示，惰性归零、不回写）。
+> 这是**跨端契约变更**，前端 `src/types/index.ts` 与 `HomePage` 需同步。
+
+### 通话与短信 `/api/calls`、`/api/sms`
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/calls` | 通话记录，分页（`?page=&pageSize=`，可按 `type=incoming\|outgoing\|missed`、`q=` 电话/姓名筛选） |
+| GET | `/api/sms` | 短信记录，分页（可按 `type=inbox\|sent`、`address=` 筛选） |
+
+> 这些内容是儿童隐私：**管理后台不提供任何通话/短信内容接口**，只有计数（见「刻意不做的事」）。
+> 设备端批量上报走 `POST /api/agent/calls` / `POST /api/agent/sms`：
+> **整表替换最近 500 条**，空数组会被 `422` 拒绝，避免一次误调用清空家长可见数据。
+> 未来时间会被钳到「现在」，防止设备时钟跑飞把记录顶到列表最前。
 
 ### 答题 `/api/quiz`
 
@@ -430,7 +452,7 @@ npm run agent:example        # 注册一台模拟设备并打印绑定码
 | --- | --- | --- |
 | POST | `/api/agent/register` | 自助注册/续订令牌。body: `deviceCode, deviceSecret, model, os, osVersion, agentVersion` |
 | POST | `/api/agent/heartbeat` | 上报 `battery`、`network`、`agentVersion`；返回是否已绑定、当前锁定态 |
-| GET | `/api/agent/config` | 拉取管控策略：锁屏、功能开关、每日时长与剩余、应用限额、网址黑名单、答题配置 |
+| GET | `/api/agent/config` | 拉取管控策略：锁屏、功能开关、每日时长与剩余、应用限额、网址黑名单、答题配置，以及安全区（只含启用的）、`hideIcon`、`installApprovalUntil` |
 | GET | `/api/agent/commands/next?wait=25` | 长轮询领取指令（`wait` 秒内无指令则返回 `command: null`） |
 | POST | `/api/agent/commands/:commandId/result` | 回报 `status`(`succeeded`/`failed`)、`result`、`error` |
 | POST | `/api/agent/locations` | 上报位置（同设备 30 秒内重复上报自动折叠为一条） |
@@ -440,6 +462,11 @@ npm run agent:example        # 注册一台模拟设备并打印绑定码
 | POST | `/api/agent/screen-batches` | 上传一包截屏（`multipart/form-data` 的 `file` 字段是 zip：`frames/*.jpg` + `manifest.json`）。服务端解包、按配额清理旧帧、落库并**同步**跑 AI 分析，返回 `{ batch, insight, alerts, budget }` |
 | GET | `/api/agent/screen-quiz/next` | 取一道基于当前屏幕内容的题（没配置 AI 时返回 `question: null`，设备端回退题库） |
 | POST | `/api/agent/screen-quiz/answer` | 交卷；答对即解锁并重置锁定倒计时 |
+| POST | `/api/agent/audit-requests` | 设备请求安装审核。body: `{ appName, packageName }`；同设备同包名已有 `pending` 时**幂等**返回同一条（`200`），新建返回 `201`；响应 `{ id, status }` |
+| GET | `/api/agent/audit-requests/:id` | 轮询某条申请的状态，返回 `{ status }`（`pending`/`approved`/`rejected`） |
+| POST | `/api/agent/app-usage` | 上报当日各应用已用时长。body: `{ usage: [{ packageName, appName, seconds }] }`，**整表替换当日数据**（未上报的已设限应用归零；只写已存在的限额行） |
+| POST | `/api/agent/calls` | 批量上报通话记录，body `{ calls: [...] }`，整表替换最近 500 条 |
+| POST | `/api/agent/sms` | 批量上报短信，body `{ messages: [...] }`（也接受 `sms` 作为包装字段），整表替换最近 500 条 |
 
 ### 指令类型
 
@@ -454,6 +481,10 @@ npm run agent:example        # 注册一台模拟设备并打印绑定码
 | `start_audio` / `stop_audio` | `{ recordingId }` | `remoteRecord` |
 | `fetch_location` | — | — |
 | `sync_config` | — | — |
+| `sync_apps` | — | — |
+| `start_ambient` / `stop_ambient` | — | `audioRecord`（`stop_ambient` 不做开关校验，随时可停） |
+| `remote_action` | `{ action: 'back'\|'home'\|'recents'\|'notifications'\|'open_app', packageName? }` | `remoteHelp`（`open_app` 必须带 `packageName`） |
+| `sync_calls_sms` | — | `callSms` |
 
 > `/api/agent/config` 额外返回 `screenMonitor` 块：是否开启截屏、间隔、每包帧数、
 > 分析模式，以及 `usageBudget`（游戏局数 / 动画集数上限）。设备端据此**本地**执行，
@@ -526,6 +557,21 @@ MOCK_AI_SCENARIO=game npm run server:e2e:ai   # 对着假服务跑 AI 全链路�
 npm run clean:test-data -- --apply   # 删掉测试产生的账号与设备
 npm run seed                         # 重新灌入干净的演示数据
 ```
+
+---
+
+## 数据模型增量（迁移 `agent_gaps`）
+
+| 位置 | 变更 | 用途 |
+| --- | --- | --- |
+| `ChildDevice.hideIcon` | `Boolean @default(false)` | §9 隐藏桌面图标；`/api/agent/config` 下发，家长用 `PUT /api/devices/:deviceId` 读写（`GET /api/device` 也返回） |
+| `ChildDevice.installApprovalUntil` | `DateTime?` | §3 应用审核：家长批准时置为 `now + 30 分钟`，`/api/agent/config` 下发（已过期即回 `null`，以服务端时钟为准） |
+| `AppLimit.usedTodaySeconds` / `usageDay` | `Int @default(0)` / `String @default("")` | §4 当日已用秒数；只存与展示，**不参与服务端判定**（判定在设备本地） |
+| `SafeZone.enabled` | `Boolean @default(true)` | §2 安全区启用开关；`/api/agent/config` 只下发启用的（原契约假定已有此列，实际缺失，本次补齐） |
+| `CallLogEntry` | 新表 | §8 通话记录（`type`: `incoming`/`outgoing`/`missed`） |
+| `SmsMessage` | 新表 | §8 短信记录（`type`: `inbox`/`sent`） |
+
+> 两张新表都带 `(deviceId, occurredAt)` 索引与级联删除；删除设备即连带清掉其通话与短信。
 
 ---
 

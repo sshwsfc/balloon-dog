@@ -1,5 +1,7 @@
 package com.balloondog.agent.model;
 
+import android.util.Log;
+
 import androidx.annotation.Nullable;
 
 import org.json.JSONArray;
@@ -31,6 +33,12 @@ public class DeviceConfig {
     public final List<String> blockedUrls;
     /** 应用限额：appName → 每日分钟数 */
     public final List<AppLimit> appLimits;
+    /** 安全区（契约 §2）。服务端只下发 enabled 的项 */
+    public final List<SafeZone> safeZones;
+    /** 家长批准安装后的放开窗口截止（墙上毫秒；0 = 没有窗口） */
+    public final long installApprovalUntil;
+    /** 是否隐藏桌面图标（契约 §9） */
+    public final boolean hideIcon;
 
     // ---- 锁屏强度与时间表（见 server LockPolicy / ScheduleRule）----
     /** kiosk 锁定页（默认）| password 随机改系统锁屏密码（最高强度） */
@@ -124,6 +132,12 @@ public class DeviceConfig {
         }
         blockedUrls = Collections.unmodifiableList(urlList);
 
+        // 安全区 / 安装放开窗口 / 隐藏图标：都是「家长设了才下发」的可选块，
+        // 老服务端没有这些字段时全部按「没设置」处理，功能自然降级。
+        safeZones = Collections.unmodifiableList(SafeZone.parseAll(json.optJSONArray("safeZones")));
+        installApprovalUntil = JsonUtils.parseIsoMillis(json.optString("installApprovalUntil", null));
+        hideIcon = json.optBoolean("hideIcon", false);
+
         JSONObject lockPolicy = json.optJSONObject("lockPolicy");
         if (lockPolicy != null) {
             lockStrength = lockPolicy.optString("strength", "kiosk");
@@ -208,6 +222,36 @@ public class DeviceConfig {
     }
 
     /**
+     * 把 {@code appLimits} 转成按包名判定的结构化规则（契约 §4）。
+     *
+     * <p>服务端的 {@code appLimits} 里 appName 只用来展示，判定必须用 packageName；
+     * 没有 packageName 或限额为 0 的项在这里被丢掉，不会进到本地判定。
+     *
+     * <p><b>丢的时候必须出声</b>：这里曾经静默丢弃，结果「家长设了限制、孩子端永不拦」
+     * 排查了很久才定位到「服务端发下来的 packageName 是空串」（历史缺陷）。
+     * 兜底本身保留（防脏数据），但每次配置同步都把丢了什么、为什么丢写进 logcat
+     * （{@code adb logcat -s BalloonDog}）。本方法每次配置同步只调一次，不会刷屏。
+     */
+    public List<AppLimitRule> appLimitRules() {
+        List<AppLimitRule> out = new ArrayList<>();
+        for (AppLimit limit : appLimits) {
+            if (limit.packageName == null || limit.packageName.isEmpty()) {
+                Log.w(AppLimitRule.TAG, "丢弃应用限额 [" + limit.appName + "=" + limit.dailyLimitMinutes
+                        + " 分钟]：服务端下发的 packageName 为空。设备端按包名匹配前台窗口，"
+                        + "没有包名的规则永远不会生效（应修服务端写入路径，不要放宽这里的兜底）");
+                continue;
+            }
+            if (limit.dailyLimitMinutes <= 0) {
+                Log.w(AppLimitRule.TAG, "丢弃应用限额 [" + limit.packageName + "]：dailyLimitMinutes="
+                        + limit.dailyLimitMinutes + "，不是有效的分钟数");
+                continue;
+            }
+            out.add(AppLimitRule.of(limit.packageName, limit.appName, limit.dailyLimitMinutes));
+        }
+        return out;
+    }
+
+    /**
      * 只把时间表规则序列化出来，用于落盘。
      *
      * <p>锁屏要在断网时照常生效，所以规则必须在 {@code /agent/config} 到达时存到本地，
@@ -242,6 +286,8 @@ public class DeviceConfig {
             sb.append(" · ").append(unlimited ? "时长不限" : "剩余 " + remainingMinutes + " 分钟");
         }
         if (!blockedUrls.isEmpty()) sb.append(" · 拦截 ").append(blockedUrls.size()).append(" 个网址");
+        if (!appLimits.isEmpty()) sb.append(" · 限时 ").append(appLimits.size()).append(" 个应用");
+        if (!safeZones.isEmpty()) sb.append(" · 安全区 ").append(safeZones.size()).append(" 个");
         sb.append(" · 答题").append(quizEnabled ? "已开" : "关闭");
         if (scheduleEnabled) sb.append(" · 作息 ").append(schedule.size()).append(" 条");
         if ("study".equals(mode.manualMode)) sb.append(" · 学习模式");

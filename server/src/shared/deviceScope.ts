@@ -113,6 +113,8 @@ export function toDeviceView(device: ChildDevice) {
     osName: device.os,
     osVersion: device.osVersion,
     avatar: device.avatar,
+    /** 隐藏桌面图标（§9）：家长端读的就是这个字段，写走 PUT /api/devices/:deviceId */
+    hideIcon: device.hideIcon,
     battery: device.battery,
     status: effectiveStatus(device),
     lastActive: humanizeLastActive(device.lastActiveAt),

@@ -15,6 +15,8 @@ import { EyeCarePage } from './pages/EyeCarePage'
 import { AppPluginsPage } from './pages/AppPluginsPage'
 import { AppPluginDetailPage } from './pages/AppPluginDetailPage'
 import { AppAuditPage } from './pages/AppAuditPage'
+import { CallSmsPage } from './pages/CallSmsPage'
+import { RemoteHelpPage } from './pages/RemoteHelpPage'
 import { BottomNav, SIDEBAR_WIDTH_CLASS } from './components/BottomNav'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Toaster } from 'sonner'
@@ -177,6 +179,24 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <AppAuditPage />
+            </ProtectedRoute>
+          }
+        />
+        {/* 通话与短信：受限权限，列表为空时如实说明原因 */}
+        <Route
+          path="/call-sms"
+          element={
+            <ProtectedRoute>
+              <CallSmsPage />
+            </ProtectedRoute>
+          }
+        />
+        {/* 远程协助：远程操作 + 按需取屏，不是实时投屏 */}
+        <Route
+          path="/remote-help"
+          element={
+            <ProtectedRoute>
+              <RemoteHelpPage />
             </ProtectedRoute>
           }
         />

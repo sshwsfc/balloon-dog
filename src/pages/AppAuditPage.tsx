@@ -132,7 +132,8 @@ export function AppAuditPage() {
           </div>
           <p className="font-medium text-gray-900 mt-3">安装前先问过家长</p>
           <p className="text-xs text-gray-500 mt-1.5 leading-relaxed">
-            孩子设备上新装应用时，把安装动作交给你决定，而不是装完才知道。
+            孩子设备上的安装入口会被关上；有人想装应用时，请求会出现在下面等你决定，
+            批准后设备端临时放开 <b>30 分钟</b>。
           </p>
         </div>
       </div>
@@ -155,7 +156,7 @@ export function AppAuditPage() {
                 </div>
                 <div className="text-xs text-gray-400 mt-0.5">
                   {features.appAudit.enabled
-                    ? '设备会拦下安装动作并上报审批请求'
+                    ? '没有你的批准，设备上装不了应用'
                     : '关闭后孩子安装应用不再需要你批准'}
                 </div>
               </div>
@@ -248,11 +249,15 @@ export function AppAuditPage() {
                 <p className="font-medium text-gray-700">这个开关实际做了什么</p>
                 <p>
                   · 孩子设备被设为<b>设备所有者</b>时，用 <code>DISALLOW_INSTALL_APPS</code>
-                  关上系统安装入口，安装动作会失败。
+                  关上系统安装入口 —— 只有在你的批准窗口内、或这个开关关闭时，安装才被允许。
                 </p>
                 <p>
-                  · 无障碍服务检测到安装界面 / 安装请求时，把「谁想装什么」<b>上报</b>到这里；
-                  你批准后，设备端<b>临时放开</b>一段时间，孩子才能完成这次安装。
+                  · 无障碍服务检测到安装界面时，把「谁想装什么」<b>上报</b>到这里
+                  （同一个应用包 10 分钟内最多报一次，避免重复打扰）。
+                </p>
+                <p>
+                  · 你批准后，设备端<b>临时放开安装 30 分钟</b>；超时自动收回，需要重新批准。
+                  同时会给这个应用加上<b>每天 60 分钟</b>的默认时长限制，可在「应用限制」里调整。
                 </p>
                 <p>· 因此它依赖设备所有者权限与无障碍权限都在线；两者被关掉就失效。</p>
                 <p>

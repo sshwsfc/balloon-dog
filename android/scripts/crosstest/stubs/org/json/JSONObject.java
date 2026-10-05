@@ -19,6 +19,7 @@ public class JSONObject {
   public String optString(String k) { throw boom(); }
   public String optString(String k, String d) { throw boom(); }
   public int optInt(String k, int d) { throw boom(); }
+  public double optDouble(String k, double d) { throw boom(); }
   public boolean optBoolean(String k, boolean d) { throw boom(); }
   public JSONArray optJSONArray(String k) { throw boom(); }
   public JSONObject optJSONObject(String k) { throw boom(); }

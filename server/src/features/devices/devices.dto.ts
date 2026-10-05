@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { COMMAND_STATUSES } from './devices.constants';
+import { COMMAND_STATUSES, REMOTE_ACTIONS } from './devices.constants';
 
 const deviceIdParam = z.string().trim().min(1, '缺少设备 ID');
 
@@ -16,6 +16,8 @@ export const bindDeviceSchema = z.object({
 export const updateDeviceSchema = z.object({
   name: z.string().trim().min(1, '设备名称不能为空').max(30).optional(),
   avatar: z.string().trim().max(500).optional(),
+  /** 隐藏孩子设备桌面图标（§9）。读写都挂在这里，家长端不需要新接口。 */
+  hideIcon: z.boolean().optional(),
 });
 
 export const selectDeviceSchema = z.object({
@@ -117,3 +119,120 @@ export const agentQuizAnswerSchema = z.object({
 export const agentPollQuerySchema = z.object({
   wait: z.coerce.number().int().min(0).max(50).default(0),
 });
+
+// ============================================================
+// 应用审核（§3）
+// ============================================================
+
+/**
+ * 设备端上报「想装这个应用」。
+ * packageName 是幂等键（同一台设备 + 同一个包名只有一条 pending），因此必填。
+ */
+export const agentAuditRequestSchema = z.object({
+  appName: z.string().trim().min(1).max(60),
+  packageName: z.string().trim().min(1).max(120),
+});
+
+export const auditRequestIdSchema = z.object({ id: z.string().trim().min(1) });
+
+// ============================================================
+// 逐应用用量（§4）
+// ============================================================
+
+/**
+ * 设备端上报今日逐应用秒数 —— **全量替换**当日数据。
+ *
+ * 非空是刻意的：空数组语义上等于「今天所有应用都没用过」，
+ * 那会把已有数据清空。宁可 422 也不要静默擦除家长看到的数据。
+ */
+export const agentAppUsageSchema = z.object({
+  usage: z
+    .array(
+      z.object({
+        packageName: z.string().trim().max(120).default(''),
+        appName: z.string().trim().max(60).default(''),
+        seconds: z.coerce.number().int().min(0).max(24 * 3600),
+      }),
+    )
+    .min(1, 'usage 不能为空')
+    .max(500),
+});
+
+// ============================================================
+// 电话与短信（§8）
+// ============================================================
+
+const occurredAtField = z.coerce.date().optional();
+
+/** 设备端批量上报通话记录（全量替换最近 N 条）。 */
+export const agentCallLogSchema = z.object({
+  calls: z
+    .array(
+      z.object({
+        phoneNumber: z.string().trim().min(1).max(40),
+        name: z.string().trim().max(60).default(''),
+        type: z.enum(['incoming', 'outgoing', 'missed']),
+        durationSeconds: z.coerce.number().int().min(0).max(24 * 3600).default(0),
+        occurredAt: occurredAtField,
+      }),
+    )
+    .min(1, 'calls 不能为空')
+    .max(500),
+});
+
+const smsItemSchema = z.object({
+  address: z.string().trim().min(1).max(40),
+  body: z.string().max(2000),
+  type: z.enum(['inbox', 'sent']),
+  occurredAt: occurredAtField,
+});
+
+/**
+ * 设备端批量上报短信（全量替换最近 N 条）。
+ * 同时接受 `messages`（推荐）与 `sms` 两种包装字段名，避免三端各写各的。
+ */
+export const agentSmsSchema = z
+  .object({
+    messages: z.array(smsItemSchema).min(1).max(500).optional(),
+    sms: z.array(smsItemSchema).min(1).max(500).optional(),
+  })
+  .refine((v) => Boolean(v.messages?.length || v.sms?.length), {
+    message: 'messages 不能为空',
+    path: ['messages'],
+  })
+  .transform((v) => ({ messages: v.messages ?? v.sms ?? [] }));
+
+// ============================================================
+// 家长端查询 / 指令（§7 §8 §9）
+// ============================================================
+
+const pageQuery = {
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+};
+
+export const callLogQuerySchema = z.object({
+  ...pageQuery,
+  type: z.enum(['incoming', 'outgoing', 'missed']).optional(),
+  /** 号码或姓名模糊搜索 */
+  q: z.string().trim().max(60).optional(),
+});
+
+export const smsQuerySchema = z.object({
+  ...pageQuery,
+  type: z.enum(['inbox', 'sent']).optional(),
+  /** 对方号码模糊搜索 */
+  address: z.string().trim().max(40).optional(),
+});
+
+/** 远程协助动作（§7）。open_app 必须给出包名，否则设备端无从下手。 */
+export const remoteActionSchema = z
+  .object({
+    action: z.enum(REMOTE_ACTIONS, { required_error: '缺少 action 参数' }),
+    packageName: z.string().trim().min(1).max(120).optional(),
+  })
+  .refine((v) => v.action !== 'open_app' || Boolean(v.packageName), {
+    message: 'open_app 动作必须提供 packageName',
+    path: ['packageName'],
+  });

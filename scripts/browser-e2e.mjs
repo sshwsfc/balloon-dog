@@ -348,6 +348,214 @@ async function testParent(cdp) {
   text = await cdp.eval('document.body.innerText')
   check('个人中心展示登录用户与手机号', text.includes('张小明') && text.includes(PARENT_PHONE))
 
+  // 「应用限制」弹窗曾经整条链路失效：家长端不发 packageName → 服务端不校验 → 存成空串 →
+  // 设备端两层过滤各丢一次 → 家长端「已用」永远 0 分钟。修好后这块 React 逻辑
+  // （候选合并 / 按包名选中 / 未选时禁用确认）一直没有浏览器覆盖，这里补上。
+  section('家长端 5b. 应用限制弹窗（真实选择 + 落库核对）')
+  const parentApi = (path, options = {}) =>
+    cdp.eval(`(async () => {
+      const headers = Object.assign(
+        { Authorization: 'Bearer ' + localStorage.getItem('balloon_dog_token') },
+        ${JSON.stringify(options.body ? { 'Content-Type': 'application/json' } : {})},
+        ${JSON.stringify(options.headers || {})},
+      );
+      const init = Object.assign({}, ${JSON.stringify({ ...options, headers: undefined })}, { headers });
+      const r = await fetch(${JSON.stringify(path)}, init);
+      let json = null;
+      try { json = await r.json() } catch {}
+      return { status: r.status, json };
+    })()`)
+
+  // 种子库里多数设备没有应用清单，挑一台真有清单的设备来测；一台都没有就退化成断言空态。
+  const { json: deviceList } = await parentApi('/api/devices')
+  let fixture = null
+  for (const d of deviceList?.devices ?? []) {
+    const { json: appList } = await parentApi(`/api/device-apps?deviceId=${d.id}&includeSystem=true`)
+    const launchable = (appList?.apps ?? []).filter((a) => a.isLaunchable)
+    if (launchable.length > 0) {
+      fixture = { device: d, apps: launchable }
+      break
+    }
+  }
+  const seedDevice = (deviceList?.devices ?? []).find((d) => d.name === '小明的小米手机') ?? null
+
+  if (!fixture) {
+    check('没有带应用清单的设备时退化为断言空态（不算通过也不算失败）', true,
+      '库里没有设备上报过可启动应用，本用例跳过')
+  } else {
+    const switched = await parentApi(`/api/devices/${fixture.device.id}/select`, { method: 'POST' })
+    check('切换到有应用清单的设备用于验证', switched.status === 200, `HTTP ${switched.status}`)
+
+    await cdp.goto('/')
+    await sleep(3000)
+    const tileHit = await cdp.eval(`(() => {
+      const all = [...document.querySelectorAll('button, a, div, span, li')];
+      const exact = all.filter((e) => e.textContent.trim() === '应用限制');
+      if (!exact.length) return false;
+      let node = exact[exact.length - 1];
+      for (let i = 0; i < 6 && node; i++) {
+        if (node.tagName === 'BUTTON' || node.tagName === 'A' || node.getAttribute('role') === 'button') break;
+        node = node.parentElement;
+      }
+      (node || exact[exact.length - 1]).click();
+      return true;
+    })()`)
+    check('点开「应用限制」磁贴', tileHit === true)
+    await sleep(2500)
+
+    const dialogText = await cdp.eval('document.body.innerText')
+    check('弹窗打开并说明用法', dialogText.includes('从孩子设备上的应用里选择'))
+
+    // 候选行是「应用名 + 包名」的按钮，包名必须像真的包名，而不是展示名占位
+    const candidates = await cdp.eval(`(() => {
+      const out = [];
+      for (const b of document.querySelectorAll('button')) {
+        const p = b.querySelector('p');
+        const pkg = p ? p.textContent.trim() : '';
+        if (!pkg || !pkg.includes('.')) continue;
+        const nameEl = b.querySelector('span');
+        out.push({ pkg, name: nameEl ? nameEl.textContent.trim() : '' });
+      }
+      return out;
+    })()`)
+    check('候选列表渲染出带真实包名的应用', candidates.length > 0, `${candidates.length} 行`)
+    check('每条候选的包名都合法（不存在空包名占位）',
+      candidates.every((c) => /^[a-zA-Z][\w.]*\.[\w.]+$/.test(c.pkg)),
+      JSON.stringify(candidates.slice(0, 3)))
+
+    const confirmDisabled = await cdp.eval(`(() => {
+      const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === '确认');
+      return b ? b.disabled : null;
+    })()`)
+    check('未选应用时「确认」不可点（负例守卫）', confirmDisabled === true, `disabled=${confirmDisabled}`)
+
+    const target = candidates.find((c) => c.pkg.includes('deskclock')) ?? candidates[0]
+    const picked = await cdp.eval(`(() => {
+      for (const b of document.querySelectorAll('button')) {
+        const p = b.querySelector('p');
+        if (p && p.textContent.trim() === ${JSON.stringify(target.pkg)}) { b.click(); return true; }
+      }
+      return false;
+    })()`)
+    check(`选中应用「${target.name}」`, picked === true)
+    await sleep(700)
+    check('选中后才出现时长输入框',
+      (await cdp.eval(`!!document.querySelector('input[type="number"]')`)) === true)
+
+    // 非法值必须被挡住，且弹窗不能关掉（关掉会让家长以为设上了）
+    await cdp.fill('input[type="number"]', '0')
+    await sleep(300)
+    await cdp.clickText('确认')
+    await sleep(2500)
+    check('时长填 0 被拒且弹窗保持打开',
+      (await cdp.eval(`document.body.innerText.includes('从孩子设备上的应用里选择')`)) === true)
+
+    await cdp.fill('input[type="number"]', '7')
+    await sleep(300)
+    await cdp.clickText('确认')
+    await sleep(3500)
+    check('保存后弹窗关闭',
+      (await cdp.eval(`document.body.innerText.includes('从孩子设备上的应用里选择')`)) === false)
+
+    const { json: features } = await parentApi(`/api/features?deviceId=${fixture.device.id}`)
+    const entry = features?.appLimit?.apps?.[target.name]
+    check('落库的 packageName 与 UI 选中的包一致（本轮缺陷的核心）',
+      entry?.packageName === target.pkg, `期望 ${target.pkg}，实际 ${entry?.packageName}`)
+    check('落库的每日上限等于 UI 填的 7 分钟', entry?.dailyLimit === 7, `实际 ${entry?.dailyLimit}`)
+
+    // 收尾：删掉本次建的限额，把当前设备切回去，别污染其它用例
+    await parentApi(`/api/features/app-limit/${encodeURIComponent(target.name)}?deviceId=${fixture.device.id}`,
+      { method: 'DELETE' })
+    if (seedDevice && seedDevice.id !== fixture.device.id) {
+      await parentApi(`/api/devices/${seedDevice.id}/select`, { method: 'POST' })
+    }
+  }
+
+  // 安全区一直有个「能停用围栏」的假印象：服务端有 enabled 字段、也按它过滤下发，
+  // 但家长端类型里没这个字段、界面上没有开关 —— 家长根本做不到「先停掉学校这条，
+  // 放假期间别报警」。这里从 UI 真实点一遍开关，并回接口核对。
+  section('家长端 5c. 安全区启停开关（真实点击 + 落库核对）')
+  {
+    const { json: devs } = await parentApi('/api/devices')
+    const dev = (devs?.devices ?? [])[0]
+    if (!dev) {
+      check('安全区启停：拿得到设备', false, '没有可用设备')
+    } else {
+      const zoneName = 'E2E围栏启停'
+
+      // 用接口建一条临时围栏（点 UI 建也行，但这里要验的是「启停」，建的部分越省越好）
+      const { json: created } = await parentApi('/api/safe-zones', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: zoneName, latitude: 39.9087, longitude: 116.3974,
+          radiusMeters: 300, address: 'E2E', type: 'other',
+        }),
+      })
+      const newZone = created?.safeZone
+      check('安全区启停：临时围栏建出来了', Boolean(newZone?.id), JSON.stringify(created).slice(0, 160))
+
+      if (newZone?.id) {
+        await cdp.goto('/location')
+        await sleep(2600)
+
+        const before = await cdp.eval(`document.body.innerText.includes(${JSON.stringify(zoneName)})`)
+        check('安全区启停：新围栏出现在位置页', before === true)
+
+        // 开关有 aria-label「停用 <名字>」/「启用 <名字>」，据此精确点到它自己
+        const clicked = await cdp.eval(`(() => {
+          const b = [...document.querySelectorAll('button[role="switch"]')]
+            .find((x) => (x.getAttribute('aria-label') || '') === ${JSON.stringify('停用 ' + zoneName)});
+          if (!b) return false;
+          b.click();
+          return true;
+        })()`)
+        check('安全区启停：找到了该围栏的开关并点击', clicked === true)
+        await sleep(2600)
+
+        const { json: afterOff } = await parentApi('/api/safe-zones')
+        const off = (afterOff?.safeZones ?? []).find((z) => z.id === newZone.id)
+        check('点一下就真的停用了（落库 enabled=false）', off?.enabled === false,
+          `实际 enabled=${off?.enabled}`)
+
+        const showsOff = await cdp.eval(`document.body.innerText.includes('已停用')`)
+        check('界面如实标出「已停用」', showsOff === true)
+
+        // 再点回去，确认可逆
+        const clickedBack = await cdp.eval(`(() => {
+          const b = [...document.querySelectorAll('button[role="switch"]')]
+            .find((x) => (x.getAttribute('aria-label') || '') === ${JSON.stringify('启用 ' + zoneName)});
+          if (!b) return false;
+          b.click();
+          return true;
+        })()`)
+        check('安全区启停：再点回去（开关可逆）', clickedBack === true)
+        await sleep(2600)
+
+        const { json: afterOn } = await parentApi('/api/safe-zones')
+        const on = (afterOn?.safeZones ?? []).find((z) => z.id === newZone.id)
+        check('重新启用后 enabled=true', on?.enabled === true, `实际 enabled=${on?.enabled}`)
+
+        // 停用 ≠ 删除：家长端必须仍然列着它，否则家长再也没法把它启回来。
+        // （「不再下发给设备」由服务端 `agent.controller.ts` 的 where enabled:true 负责，
+        //   设备端那侧的证据在 android:e2e:gaps 的安全区用例里。）
+        await parentApi(`/api/safe-zones/${newZone.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ enabled: false }),
+        })
+        const { json: stillListed } = await parentApi('/api/safe-zones')
+        const offZone = (stillListed?.safeZones ?? []).find((z) => z.id === newZone.id)
+        check('停用的围栏仍然列在家长端（否则家长无法再启回来）',
+          Boolean(offZone) && offZone?.enabled === false)  
+
+        // 收尾
+        await parentApi(`/api/safe-zones/${newZone.id}`, { method: 'DELETE' })
+        const { json: finalZones } = await parentApi('/api/safe-zones')
+        check('安全区启停：收尾已删除，不留测试数据',
+          !(finalZones?.safeZones ?? []).some((z) => z.id === newZone.id))
+      }
+    }
+  }
+
   section('家长端 6. 运行时健康度')
   check('没有未捕获的页面异常', cdp.pageErrors.length === 0, cdp.pageErrors.slice(0, 2).join(' | '))
   const ce = cdp.consoleErrors.filter((e) => !/favicon|DevTools|Download the React DevTools/i.test(e))
@@ -550,6 +758,8 @@ const RESPONSIVE_ROUTES = [
   { path: '/eye-care', wide: false, must: '护眼' },
   { path: '/app-plugins', wide: true, must: '插件' },
   { path: '/app-audit', wide: false, must: '审批' },
+  { path: '/call-sms', wide: false, must: '通话与短信' },
+  { path: '/remote-help', wide: false, must: '远程协助' },
   // /media 与 /quiz-unlock 是沉浸式页面：**故意**不显示任何导航，
   // 所以不对它们断言导航形态（否则测的是「怎么没导航」这种伪问题）。
   { path: '/quiz-unlock', wide: false, must: '答题', immersive: true },

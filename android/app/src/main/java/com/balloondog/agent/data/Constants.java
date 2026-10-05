@@ -32,6 +32,21 @@ public final class Constants {
         return "/agent/commands/" + commandId + "/result";
     }
 
+    /** 应用审核：上报待审应用（幂等 upsert），返回 {id,status} */
+    public static final String PATH_AGENT_AUDIT_REQUESTS = "/agent/audit-requests";
+
+    /** 应用审核：查一条申请的状态（pending|approved|rejected） */
+    public static String pathAuditRequest(String id) {
+        return "/agent/audit-requests/" + id;
+    }
+
+    /** 今日逐应用用量上报（全量替换当日） */
+    public static final String PATH_AGENT_APP_USAGE = "/agent/app-usage";
+
+    /** 通话记录 / 短信批量上报（全量替换最近 N 条） */
+    public static final String PATH_AGENT_CALLS = "/agent/calls";
+    public static final String PATH_AGENT_SMS = "/agent/sms";
+
     // ---------------- 默认服务端地址 ----------------
 
     /**
@@ -59,6 +74,13 @@ public final class Constants {
     public static final String CMD_SYNC_CONFIG = "sync_config";
     /** 让设备重新上报已安装应用清单（家长点「刷新应用列表」）。 */
     public static final String CMD_SYNC_APPS = "sync_apps";
+    /** 环境监听：开始 / 停止分片连续录音（要求特性 audioRecord）。 */
+    public static final String CMD_START_AMBIENT = "start_ambient";
+    public static final String CMD_STOP_AMBIENT = "stop_ambient";
+    /** 远程协助：返回 / 主页 / 最近任务 / 通知栏 / 打开指定应用（要求特性 remoteHelp）。 */
+    public static final String CMD_REMOTE_ACTION = "remote_action";
+    /** 让设备立刻上报通话记录与短信（家长点「刷新」）。 */
+    public static final String CMD_SYNC_CALLS_SMS = "sync_calls_sms";
 
     // ---------------- 节奏参数 ----------------
 
@@ -70,6 +92,27 @@ public final class Constants {
 
     /** 位置自动上报间隔。 */
     public static final long LOCATION_REPORT_INTERVAL_MS = 5 * 60_000L;
+
+    /** 本地逐应用用量统计的刷新间隔（查 UsageStatsManager 有成本，且它本身按天聚合）。 */
+    public static final long APP_USAGE_REFRESH_INTERVAL_MS = 60_000L;
+
+    /** 逐应用用量上报间隔（契约 §4：每 30 分钟一次）。 */
+    public static final long APP_USAGE_REPORT_INTERVAL_MS = 30 * 60_000L;
+
+    /** 通话记录 / 短信上报间隔（契约 §8：每 6 小时一次）。 */
+    public static final long CALLS_SMS_REPORT_INTERVAL_MS = 6 * 60 * 60_000L;
+
+    /** 环境监听的单片时长（契约 §6：5 分钟一片，录完立刻上传再开下一片）。 */
+    public static final long AMBIENT_CHUNK_MS = 5 * 60_000L;
+
+    /**
+     * 环境监听的最长总时长（安全阀）。
+     *
+     * <p>契约说「直到 stop_ambient」，但家长端与设备的连接会断（孩子关机、拔网线、
+     * 家长忘了点停止），而持续录音是最高敏感度的能力。所以加一条硬上限：
+     * 到点自动停止并<b>明确记一条日志</b>，而不是无声无息地一直录下去。
+     */
+    public static final long AMBIENT_MAX_TOTAL_MS = 60 * 60_000L;
 
     /** 长轮询挂起秒数，必须小于 OkHttp 的长轮询读超时（45s）。 */
     public static final int LONG_POLL_WAIT_SECONDS = 25;
@@ -95,6 +138,13 @@ public final class Constants {
     public static final int NOTIFICATION_ID_SCREEN = 1002;
     /** 时间表边界提醒（响铃/震动），与「家长操作」共用渠道 */
     public static final int NOTIFICATION_ID_SCHEDULE = 1003;
+    /** 环境监听：持续可见的前台通知（**不做隐蔽录音**） */
+    public static final int NOTIFICATION_ID_AMBIENT = 1004;
+    /** 网址拦截缺少系统 VPN 授权时的提醒 */
+    public static final int NOTIFICATION_ID_VPN = 1005;
+
+    /** 安装审核申请（「已请求家长批准」）。与前台服务通知分开，不能互相覆盖。 */
+    public static final int NOTIFICATION_ID_AUDIT = 1006;
 
     // ---------------- Intent / 广播 ----------------
 
@@ -109,6 +159,9 @@ public final class Constants {
     public static final String ACTION_SCHEDULE_BOUNDARY = "com.balloondog.agent.action.SCHEDULE_BOUNDARY";
     /** 倒计时悬浮窗上的操作 */
     public static final String ACTION_COUNTDOWN_QUIZ = "com.balloondog.agent.action.COUNTDOWN_QUIZ";
+    /** 网址拦截 VPN：建立 / 断开（由配置刷新或设置页按钮触发） */
+    public static final String ACTION_VPN_START = "com.balloondog.agent.action.VPN_START";
+    public static final String ACTION_VPN_STOP = "com.balloondog.agent.action.VPN_STOP";
 
 
     // ---------------- SharedPreferences ----------------
@@ -136,6 +189,12 @@ public final class Constants {
     public static final String EVENT_EYE_REST = "eye_rest";
     public static final String EVENT_PLUGIN_BLOCKED = "plugin_blocked";
     public static final String EVENT_APP_BLOCKED = "app_blocked";
+    /** 安全区进出（契约 §2，复用 POST /agent/events，无需新接口） */
+    public static final String EVENT_GEOFENCE_ENTER = "geofence_enter";
+    public static final String EVENT_GEOFENCE_EXIT = "geofence_exit";
+
+    /** 网址拦截命中（DNS 过滤）。让家长能看到「拦了哪个站」，而不是只看到一个开关。 */
+    public static final String EVENT_WEB_BLOCKED = "web_blocked";
     /**
      * 设备加密存储（device-protected）里的偏好文件名。
      *
@@ -220,4 +279,47 @@ public final class Constants {
     public static final String KEY_VIDEO_EPISODES_USED = "video_episodes_used";
     /** 是否要求「重启后自动清除随机密码」（安全阀，默认开） */
     public static final String KEY_REBOOT_CLEARS_PASSWORD = "reboot_clears_password";
+
+    // ---- 服务端下发的特性开关快照（契约 §3/§5/§6/§7 都靠它做设备端二次把关） ----
+    /**
+     * {@code /agent/config} 里 features 数组的原样落盘。
+     *
+     * <p>为什么要存：/{@code agent/config} 只在下发时给一次 features，而指令可能在
+     * 很久之后（甚至断网重连后）才到达。没有本地快照就没法回答
+     * 「家长到底有没有开这个功能」。空列表表示「还没收到过配置」——
+     * 这种时候不做否定判断，交给服务端把关。
+     */
+    public static final String KEY_FEATURES = "features";
+
+    // ---- 安全区（契约 §2） ----
+    /** 安全区列表（JSON 数组），断网时围栏判定照常工作 */
+    public static final String KEY_SAFE_ZONES = "safe_zones";
+    /** 上一次定位时所在的区 id；空 = 当时不在任何区内 */
+    public static final String KEY_LAST_SAFE_ZONE_ID = "last_safe_zone_id";
+
+    // ---- 应用审核（契约 §3） ----
+    /** 家长批准后的安装窗口截止（墙上毫秒；0 = 没有窗口） */
+    public static final String KEY_INSTALL_APPROVAL_UNTIL = "install_approval_until";
+    /** 上一次向家长发起安装申请的时间戳（同一包名 10 分钟内只报一次） */
+    public static final String KEY_INSTALL_AUDIT_LAST_AT = "install_audit_last_at";
+
+    // ---- 应用限时（契约 §4） ----
+    /** 结构化的应用限时规则（JSON 数组，带 packageName），与展示用的 KEY_APP_LIMITS 并存 */
+    public static final String KEY_APP_LIMIT_RULES = "app_limit_rules";
+    /** 今日逐应用前台秒数缓存（JSON：{day, usage:{pkg:seconds}}） */
+    public static final String KEY_APP_USAGE_JSON = "app_usage_json";
+    /** 上一次上报逐应用用量的时间戳 */
+    public static final String KEY_APP_USAGE_REPORTED_AT = "app_usage_reported_at";
+
+    // ---- 电话短信（契约 §8） ----
+    /** 上一次上报通话记录 + 短信的时间戳 */
+    public static final String KEY_CALLS_SMS_REPORTED_AT = "calls_sms_reported_at";
+
+    // ---- 网址拦截 / 隐藏图标 ----
+    /** 家长是否开启了网址拦截（webBlock 特性 + 黑名单非空），VPN 服务据此自检 */
+    public static final String KEY_WEB_BLOCK_ENABLED = "web_block_enabled";
+    /** 是否隐藏桌面图标（契约 §9） */
+    public static final String KEY_HIDE_ICON = "hide_icon";
+    /** 上一次提醒「网址拦截需要系统授权」的时间戳（避免反复打扰） */
+    public static final String KEY_VPN_CONSENT_NOTIFIED_AT = "vpn_consent_notified_at";
 }

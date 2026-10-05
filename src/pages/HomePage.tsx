@@ -27,6 +27,7 @@ import {
   Eye,
   EyeOff,
   Globe,
+  Headphones,
   Image as ImageIcon,
   Info,
   Loader2,
@@ -37,9 +38,11 @@ import {
   Mic,
   Monitor,
   Moon,
+  Phone,
   Puzzle,
   RefreshCw,
   Repeat,
+  ScreenShare,
   Settings,
   Shield,
   Smartphone,
@@ -52,8 +55,10 @@ import {
 } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
 import type {
+  AppLimitEntry,
   CommandDispatchResult,
   Device,
+  DeviceApp,
   DeviceCommand,
   DeviceEvent,
   Features,
@@ -105,12 +110,16 @@ const TILE_GROUPS: { title: string; tiles: GridTile[] }[] = [
   {
     title: '远程监控',
     tiles: [
-      { id: 'insights', icon: Monitor, name: '同屏监控', color: 'text-indigo-500', bg: 'bg-indigo-50' },
+      // 项目没有实时同屏能力（只有周期截屏 + AI 分析），所以这个格子叫「屏幕洞察」，
+      // 不再叫「同屏监控」—— 那个名字会让人以为能看到实时画面。
+      { id: 'insights', icon: Monitor, name: '屏幕洞察', color: 'text-indigo-500', bg: 'bg-indigo-50' },
       { id: 'photo', icon: Camera, name: '远程拍照', color: 'text-cyan-500', bg: 'bg-cyan-50' },
       { id: 'videoRecord', icon: Video, name: '连续录像', color: 'text-fuchsia-500', bg: 'bg-fuchsia-50' },
       { id: 'audioRecord', icon: Mic, name: '远程录音', color: 'text-rose-500', bg: 'bg-rose-50' },
       { id: 'screenshot', icon: ImageIcon, name: '截图', color: 'text-sky-500', bg: 'bg-sky-50' },
       { id: 'location', icon: MapPin, name: '定位', color: 'text-emerald-500', bg: 'bg-emerald-50' },
+      { id: 'remoteHelp', icon: ScreenShare, name: '远程协助', color: 'text-pink-500', bg: 'bg-pink-50' },
+      { id: 'callSms', icon: Phone, name: '通话短信', color: 'text-teal-500', bg: 'bg-teal-50' },
     ],
   },
   {
@@ -118,7 +127,7 @@ const TILE_GROUPS: { title: string; tiles: GridTile[] }[] = [
     tiles: [
       { id: 'devices', icon: Settings, name: '孩子设置', color: 'text-gray-600', bg: 'bg-gray-100' },
       { id: 'family', icon: Users, name: '家庭成员', color: 'text-gray-400', bg: 'bg-gray-100', unsupported: true },
-      { id: 'hideIcon', icon: EyeOff, name: '隐藏图标', color: 'text-gray-400', bg: 'bg-gray-100', unsupported: true },
+      { id: 'hideIcon', icon: EyeOff, name: '隐藏图标', color: 'text-slate-500', bg: 'bg-slate-100' },
     ],
   },
 ]
@@ -226,17 +235,28 @@ export function HomePage() {
   const [appLimitDialogOpen, setAppLimitDialogOpen] = useState(false)
   const [appAuditDialogOpen, setAppAuditDialogOpen] = useState(false)
   const [webBlockDialogOpen, setWebBlockDialogOpen] = useState(false)
+  const [hideIconDialogOpen, setHideIconDialogOpen] = useState(false)
 
   const [tempUnlockMinutes, setTempUnlockMinutes] = useState('')
   const [timePlanLimit, setTimePlanLimit] = useState('')
+  /** 选中的应用**包名**：设备端按包名匹配前台窗口，展示名只是给人看的 */
+  const [selectedPackage, setSelectedPackage] = useState('')
   const [selectedApp, setSelectedApp] = useState('')
   const [appLimit, setAppLimit] = useState('')
+  /** 孩子设备上报的应用清单（家长从这里选应用才能拿到真实包名） */
+  const [deviceApps, setDeviceApps] = useState<DeviceApp[]>([])
+  const [deviceAppsLoading, setDeviceAppsLoading] = useState(false)
+  const [deviceAppsError, setDeviceAppsError] = useState<string | null>(null)
   const [newUrl, setNewUrl] = useState('')
   const [busyFeature, setBusyFeature] = useState<string | null>(null)
   /** 通栏锁屏按钮自己的忙碌态：它是最重要的按钮，不能和别处共用 busyFeature */
   const [lockingBusy, setLockingBusy] = useState(false)
   /** 九宫格里正在执行的动作（拍照 / 录像 / 截图…），用于逐格转圈 */
   const [busyTile, setBusyTile] = useState<string | null>(null)
+  /** 环境监听指令（开始 / 停止）的忙碌态 */
+  const [ambientBusy, setAmbientBusy] = useState<'start' | 'stop' | null>(null)
+  /** 隐藏图标写的是设备字段而不是功能开关，所以单独一个忙碌态 */
+  const [hideIconBusy, setHideIconBusy] = useState(false)
 
   /** 倒计时需要一个会走的时钟（原实现读一次就不动了，数字永远不变） */
   const [now, setNow] = useState(() => Date.now())
@@ -276,6 +296,43 @@ export function HomePage() {
   useEffect(() => {
     void loadData()
   }, [loadData])
+
+  /**
+   * 拉孩子设备上报的应用清单。
+   *
+   * 逐应用限时必须带真实包名 —— 这是唯一能保证「设了就会生效」的来源。
+   * 必须传 `includeSystem: true`：孩子真正会沉迷的应用（时钟、YouTube、浏览器…）
+   * 基本都是系统应用，默认（不传）清单里只剩气球狗自己。
+   */
+  const loadDeviceApps = useCallback(async () => {
+    setDeviceAppsLoading(true)
+    try {
+      const data = await api.getDeviceApps({ includeSystem: true })
+      setDeviceApps(data.apps ?? [])
+      setDeviceAppsError(null)
+    } catch (error) {
+      setDeviceAppsError(toUserMessage(error, '读取设备应用清单失败'))
+    } finally {
+      setDeviceAppsLoading(false)
+    }
+  }, [])
+
+  const handleOpenAppLimitDialog = () => {
+    setAppLimitDialogOpen(true)
+    setDeviceAppsError(null)
+    void loadDeviceApps()
+  }
+
+  /** 让设备重新上报清单（走指令队列）。设备离线时不会有即时结果，别承诺「马上出现」。 */
+  const handleRefreshDeviceApps = async () => {
+    try {
+      await api.refreshDeviceApps()
+      toast.success('已请求设备同步应用清单，设备在线时几秒后刷新')
+    } catch (error) {
+      toast.error(toUserMessage(error))
+    }
+    await loadDeviceApps()
+  }
 
   /**
    * 下发类操作的统一包装。
@@ -354,14 +411,15 @@ export function HomePage() {
 
   const handleSetAppLimit = async () => {
     const limit = Number.parseInt(appLimit, 10)
-    if (!selectedApp || !Number.isFinite(limit) || limit <= 0) {
+    if (!selectedPackage || !Number.isFinite(limit) || limit <= 0) {
       toast.error('请选择应用并输入有效时长')
       return
     }
     try {
-      await api.setAppLimit(selectedApp, limit)
-      toast.success(`${selectedApp} 的限制已设为 ${limit} 分钟`)
+      await api.setAppLimit(selectedApp || selectedPackage, selectedPackage, limit)
+      toast.success(`${selectedApp || selectedPackage} 的限制已设为 ${limit} 分钟`)
       setAppLimitDialogOpen(false)
+      setSelectedPackage('')
       setSelectedApp('')
       setAppLimit('')
       await loadData({ silent: true })
@@ -453,6 +511,47 @@ export function HomePage() {
   }
 
   /**
+   * 环境监听（contract §6）。
+   *
+   * 和「远程录音」不是同一件事：`start_ambient` 是让设备**持续分段**录（每段 5 分钟），
+   * 归在功能开关 `audioRecord` 下。设备端录音期间会挂常驻通知，不做隐蔽录音 ——
+   * 这一点必须在界面上说出来，不能只放在文档里。
+   */
+  const handleAmbient = async (mode: 'start' | 'stop') => {
+    setAmbientBusy(mode)
+    try {
+      await dispatch(
+        () => (mode === 'start' ? api.startAmbient() : api.stopAmbient()),
+        mode === 'start' ? '已下发开始环境监听' : '已下发停止环境监听',
+      )
+    } finally {
+      setAmbientBusy(null)
+    }
+  }
+
+  /**
+   * 隐藏 / 恢复孩子设备上的客户端图标（contract §9）。
+   *
+   * 注意它写的是设备字段（`ChildDevice.hideIcon`），不是功能开关：
+   * `/api/features` 只认白名单里的功能标识，`hideIcon` 会被判为未知标识拒绝。
+   */
+  const handleToggleHideIcon = async () => {
+    if (!device) return
+    const next = !device.hideIcon
+    setHideIconBusy(true)
+    try {
+      const res = await api.updateDevice(device.id, { hideIcon: next })
+      toast.success(next ? '已下发隐藏图标' : '已下发恢复图标')
+      if (res.device) setDevice(res.device)
+      await loadData({ silent: true })
+    } catch (error: unknown) {
+      toast.error(toUserMessage(error, next ? '隐藏图标失败' : '恢复图标失败'))
+    } finally {
+      setHideIconBusy(false)
+    }
+  }
+
+  /**
    * 九宫格动作分发。
    *
    * 没有对应接口的能力（家庭成员 / 隐藏图标）在这里如实说明「尚未实现」，
@@ -470,7 +569,7 @@ export function HomePage() {
         setTimePlanDialogOpen(true)
         return
       case 'appLimit':
-        setAppLimitDialogOpen(true)
+        handleOpenAppLimitDialog()
         return
       case 'appAudit':
         setAppAuditDialogOpen(true)
@@ -503,14 +602,23 @@ export function HomePage() {
         // 项目没有实时同屏能力，只有周期截屏 + AI 分析，所以进洞察页而不是假装「同屏」
         navigate('/insights')
         return
+      case 'remoteHelp':
+        navigate('/remote-help')
+        return
+      case 'callSms':
+        navigate('/call-sms')
+        return
       case 'location':
         navigate('/location')
         return
       case 'devices':
         navigate('/devices')
         return
-      case 'family':
       case 'hideIcon':
+        setHideIconDialogOpen(true)
+        return
+      case 'family':
+        // 家庭成员是「多个家长互相可见」的产品概念，后端没有这套模型
         toast.info('该能力需要孩子设备端 Agent 支持，当前版本尚未实现')
         return
       case 'photo':
@@ -578,6 +686,32 @@ export function HomePage() {
     if (!features || features.timePlan.dailyLimit <= 0) return 0
     return Math.min(100, Math.round((features.timePlan.usedToday / features.timePlan.dailyLimit) * 100))
   }, [features])
+
+  /**
+   * 弹窗里可选的「应用」= 设备上报的**可启动**应用 ∪ 已有额度。
+   *
+   * - 只用可启动的应用：没有桌面入口的包（如安装器）设备端拦不到，
+   *   给它设限就是留一条永不触发的假规则。
+   * - 带上已有额度：清单还没同步时，家长仍能看到/调整已经设过的限制。
+   * - 按包名去重：同一个包在清单和历史记录里可能挂着不同展示名（「时钟」/「Clock」）。
+   */
+  const appLimitCandidates = useMemo(() => {
+    type Candidate = { packageName: string; appName: string; entry?: AppLimitEntry }
+    const map = new Map<string, Candidate>()
+    for (const app of deviceApps) {
+      if (!app.isLaunchable) continue
+      const pkg = app.packageName.trim()
+      if (!pkg) continue
+      map.set(pkg, { packageName: pkg, appName: app.appName || pkg })
+    }
+    for (const [name, entry] of Object.entries(features?.appLimit.apps ?? {})) {
+      const pkg = entry.packageName?.trim()
+      if (!pkg) continue
+      const prev = map.get(pkg)
+      map.set(pkg, { packageName: pkg, appName: prev?.appName || name, entry })
+    }
+    return [...map.values()].sort((a, b) => a.appName.localeCompare(b.appName, 'zh-Hans-CN'))
+  }, [deviceApps, features])
 
   if (loading) {
     return (
@@ -924,8 +1058,95 @@ export function HomePage() {
           </CardContent>
         </Card>
         <p className="text-[10px] text-gray-400 mt-2 px-1 leading-relaxed">
-          「远程协助」「电话短信」目前只有开关占位，孩子设备端 Agent 还没有对应实现，点击不会产生实际效果。
+          这些开关是功能总闸：关掉某一项后，即使下发对应指令，孩子设备端也会拒绝执行。
         </p>
+      </div>
+
+      {/* ---------------- 环境监听 ---------------- */}
+      <div className="px-3 mt-4">
+        <div className="mb-2 px-1 flex items-center justify-between">
+          <span className="text-sm font-medium text-gray-500">环境监听</span>
+          <Link to="/media" className="text-xs text-[#07c160]">
+            去「媒体」听录音
+          </Link>
+        </div>
+        <Card className="overflow-hidden">
+          <CardContent className="p-4">
+            <div className="flex items-start space-x-3">
+              <div className="w-10 h-10 rounded-lg bg-rose-50 flex items-center justify-center flex-shrink-0">
+                <Headphones className="w-5 h-5 text-rose-500" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center space-x-2">
+                  <span className="text-sm font-medium text-gray-900">环境监听</span>
+                  <Badge
+                    className={
+                      features.audioRecord?.enabled
+                        ? 'bg-green-100 text-green-700'
+                        : 'bg-gray-100 text-gray-600'
+                    }
+                  >
+                    {features.audioRecord?.enabled ? '已开启' : '未开启'}
+                  </Badge>
+                </div>
+                <p className="text-xs text-gray-500 mt-1 leading-relaxed">
+                  让孩子的设备持续分段录音（每段约 5 分钟），录音会像远程录音一样出现在「媒体」里。
+                  这是「持续录」，和上面九宫格里的「远程录音」（录一次）不是同一件事。
+                </p>
+              </div>
+              <ToggleSwitch
+                checked={features.audioRecord?.enabled ?? false}
+                busy={busyFeature === 'audioRecord'}
+                disabled={busyFeature === 'audioRecord'}
+                label="环境监听开关"
+                onChange={() => void handleToggleFeature('audioRecord')}
+              />
+            </div>
+
+            <div className="flex items-start space-x-2 bg-amber-50 border border-amber-200 rounded-lg p-2.5 mt-3">
+              <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+              <p className="text-xs text-amber-800 leading-relaxed">
+                录音期间，孩子设备上会一直显示一条常驻通知「家长开启了环境监听」——
+                <b>不做隐蔽录音</b>，孩子看得到。设备重启或进程被杀后不会自动恢复，需要你重新开启。
+              </p>
+            </div>
+
+            <div className="flex space-x-2 mt-3">
+              <Button
+                className="flex-1 bg-[#07c160] hover:bg-[#06a050]"
+                disabled={ambientBusy !== null || features.audioRecord?.enabled === false}
+                onClick={() => void handleAmbient('start')}
+              >
+                {ambientBusy === 'start' ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                    正在下发…
+                  </>
+                ) : (
+                  '开始环境监听'
+                )}
+              </Button>
+              <Button
+                variant="outline"
+                className="flex-1 bg-white"
+                disabled={ambientBusy !== null}
+                onClick={() => void handleAmbient('stop')}
+              >
+                {ambientBusy === 'stop' ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                    正在下发…
+                  </>
+                ) : (
+                  '停止'
+                )}
+              </Button>
+            </div>
+            <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
+              开关（audioRecord）是总闸：关闭状态下设备会拒绝执行环境监听指令。
+            </p>
+          </CardContent>
+        </Card>
       </div>
 
       {/* ---------------- 最近指令 ---------------- */}
@@ -1136,27 +1357,84 @@ export function HomePage() {
           <DialogHeader>
             <DialogTitle>应用限制</DialogTitle>
           </DialogHeader>
-          <p className="text-gray-600 mb-4">选择应用并设置每日时长限制：</p>
-          {Object.keys(features.appLimit.apps).length === 0 ? (
-            <p className="text-sm text-gray-500 py-4 text-center">
-              还没有可限制的应用。孩子在设备上安装应用后会自动出现在这里。
-            </p>
+          <p className="text-gray-600 mb-2">从孩子设备上的应用里选择，并设置每日时长限制：</p>
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs text-gray-400">
+              {deviceAppsLoading
+                ? '正在读取设备应用清单…'
+                : `设备已上报 ${appLimitCandidates.length} 个可限制的应用`}
+            </span>
+            <Button
+              variant="outline"
+              className="h-7 px-2 text-xs"
+              onClick={() => void handleRefreshDeviceApps()}
+              disabled={deviceAppsLoading}
+            >
+              <RefreshCw className={`w-3 h-3 mr-1 ${deviceAppsLoading ? 'animate-spin' : ''}`} />
+              刷新清单
+            </Button>
+          </div>
+          {deviceAppsError && <p className="text-sm text-red-500 mb-3">{deviceAppsError}</p>}
+          {appLimitCandidates.length === 0 ? (
+            <div className="py-4 text-center">
+              <p className="text-sm text-gray-500">
+                {deviceAppsLoading ? '正在读取…' : '还没拿到孩子设备上的应用清单。'}
+              </p>
+              {!deviceAppsLoading && (
+                <p className="text-xs text-gray-400 mt-1">
+                  设备在线时点上方「刷新清单」，几秒后会出现在这里。
+                </p>
+              )}
+            </div>
           ) : (
-            <div className="grid grid-cols-2 gap-2 mb-4">
-              {Object.entries(features.appLimit.apps).map(([app, limit]) => (
-                <Button
-                  key={app}
-                  variant="outline"
-                  onClick={() => setSelectedApp(app)}
-                  className={selectedApp === app ? 'border-[#07c160] text-[#07c160]' : ''}
-                >
-                  {app}
-                  <span className="text-xs text-gray-400 ml-1">{limit}分</span>
-                </Button>
-              ))}
+            <div className="space-y-2 mb-4 max-h-64 overflow-y-auto">
+              {appLimitCandidates.map(({ packageName, appName, entry }) => {
+                const usedMinutes = Math.floor((entry?.usedTodaySeconds ?? 0) / 60)
+                const percent =
+                  entry && entry.dailyLimit > 0
+                    ? Math.min(100, (entry.usedTodaySeconds / (entry.dailyLimit * 60)) * 100)
+                    : 0
+                const over = !!entry && entry.dailyLimit > 0 && usedMinutes >= entry.dailyLimit
+                const active = selectedPackage === packageName
+                return (
+                  <button
+                    key={packageName}
+                    type="button"
+                    onClick={() => {
+                      setSelectedPackage(packageName)
+                      setSelectedApp(appName)
+                    }}
+                    className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                      active ? 'border-[#07c160] bg-green-50' : 'border-gray-200 bg-white'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between space-x-2">
+                      <span className="text-sm font-medium text-gray-900 truncate">{appName}</span>
+                      <span className={`text-xs flex-shrink-0 ${over ? 'text-red-500' : 'text-gray-500'}`}>
+                        {entry
+                          ? `今日已用 ${usedMinutes} 分钟 / 上限 ${entry.dailyLimit} 分钟`
+                          : '未设限制'}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-0.5 truncate">{packageName}</p>
+                    {entry && (
+                      <div className="mt-2 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${over ? 'bg-red-400' : 'bg-[#07c160]'}`}
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
+                    )}
+                  </button>
+                )
+              })}
             </div>
           )}
-          {selectedApp && (
+          <p className="text-[10px] text-gray-400 mb-3 leading-relaxed">
+            用量由孩子设备上报（依赖 PACKAGE_USAGE_STATS 权限），约每 30 分钟一次。
+            「今日已用 0 分钟」也可能是设备还没上报或权限没授予，不代表孩子没使用。
+          </p>
+          {selectedPackage && (
             <div className="space-y-3">
               <p className="text-sm text-gray-600">为 {selectedApp} 设置时长限制（分钟）：</p>
               <div className="grid grid-cols-4 gap-2">
@@ -1188,7 +1466,7 @@ export function HomePage() {
             <Button
               className="bg-[#07c160] hover:bg-[#06a050]"
               onClick={() => void handleSetAppLimit()}
-              disabled={!selectedApp}
+              disabled={!selectedPackage}
             >
               确认
             </Button>
@@ -1205,8 +1483,8 @@ export function HomePage() {
           <div className="flex items-start space-x-2 bg-amber-50 border border-amber-200 rounded-lg p-2.5 mb-3">
             <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
             <p className="text-xs text-amber-700 leading-relaxed">
-              Android 没有「安装前弹给家长审批」的系统接口。这里只处理孩子设备上报的安装请求；
-              完整的说明与开关在「应用审批」页面。
+              Android 没有「安装前弹给家长审批」的系统接口。这里只处理孩子设备上报的安装请求，
+              批准后设备端会临时放开安装 <b>30 分钟</b>；完整的说明与开关在「应用审批」页面。
             </p>
           </div>
           {features.appAudit.pendingApps.length > 0 ? (
@@ -1248,6 +1526,26 @@ export function HomePage() {
           <DialogHeader>
             <DialogTitle>网址拦截</DialogTitle>
           </DialogHeader>
+          <div className="flex items-start space-x-2 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+            <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+            <div className="text-xs text-amber-800 leading-relaxed space-y-1.5">
+              <p className="font-medium text-sm">拦截只在「域名解析」这一层生效</p>
+              <p>
+                设备开启本地 VPN，把上网时的域名解析接管过来：命中名单的域名直接返回「域名不存在」。
+                它<b>只认域名</b>，所以下面这些情况拦不到：
+              </p>
+              <ul className="list-disc pl-4 space-y-0.5">
+                <li>直接用 IP 地址访问 —— 根本没走域名解析</li>
+                <li>浏览器开了 DoH / DoT 加密解析 —— 解析请求不经过设备</li>
+                <li>域名已被缓存 —— 缓存过期前仍可能打开</li>
+                <li>已经打开的页面、应用自己的直连通道 —— 不受影响</li>
+              </ul>
+              <p>
+                它是<b>提高门槛</b>，不是网络防火墙，也不能拦下所有访问。
+                拦截是否真的生效，还取决于设备端的 VPN 服务在正常运行 —— 请在孩子设备上实际确认。
+              </p>
+            </div>
+          </div>
           <div className="space-y-4">
             <div>
               <p className="text-gray-600 mb-2">添加要拦截的网址：</p>
@@ -1285,6 +1583,47 @@ export function HomePage() {
           </div>
           <DialogFooter>
             <Button onClick={() => setWebBlockDialogOpen(false)}>关闭</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---------------- 隐藏图标 ---------------- */}
+      <Dialog open={hideIconDialogOpen} onOpenChange={setHideIconDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>隐藏图标</DialogTitle>
+          </DialogHeader>
+          <div className="flex items-start space-x-2 bg-red-50 border border-red-200 rounded-lg p-3">
+            <AlertTriangle className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
+            <div className="text-xs text-red-800 leading-relaxed space-y-1.5">
+              <p className="font-medium text-sm">隐藏后，孩子设备上也会找不到这个应用</p>
+              <p>
+                图标、桌面入口、应用列表里的条目都会消失。<b>孩子自己打不开，你也只能靠这个页面远程恢复</b>；
+                如果设备离线或 Agent 出问题，就只剩下用 ADB（或设备所有者指令）把组件重新启用的办法。
+              </p>
+              <p>
+                它只藏入口，不妨碍孩子通过系统设置停用或卸载 —— 那部分由设备所有者权限下的防卸载限制负责。
+                隐藏或恢复都需要孩子设备在线，离线时指令会排队。
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-gray-900">隐藏客户端图标</div>
+              <div className="text-xs text-gray-500 mt-0.5">
+                {device.hideIcon ? '当前已隐藏（孩子设备上没有入口）' : '当前显示在桌面上'}
+              </div>
+            </div>
+            <ToggleSwitch
+              checked={device.hideIcon}
+              busy={hideIconBusy}
+              disabled={hideIconBusy}
+              label="隐藏图标开关"
+              onChange={() => void handleToggleHideIcon()}
+            />
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setHideIconDialogOpen(false)}>关闭</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

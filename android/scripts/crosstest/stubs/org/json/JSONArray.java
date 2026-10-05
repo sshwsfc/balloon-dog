@@ -8,6 +8,7 @@ public class JSONArray {
 
   public JSONArray() { }
   public JSONArray(java.util.Collection<?> source) { throw boom(); }
+  public JSONArray(String source) { throw boom(); }
 
   public int length() { throw boom(); }
   public int optInt(int i) { throw boom(); }

@@ -49,6 +49,12 @@ export interface Device {
   lastActiveAt: string | null
   network: string
   locked: boolean
+  /**
+   * 是否隐藏孩子设备上的客户端图标（contract §9）。
+   * 读：`GET /api/device`；写：`PUT /api/devices/:deviceId { hideIcon }`。
+   * 注意：隐藏后**孩子设备上也找不到入口**，只能由家长端远程恢复或 ADB。
+   */
+  hideIcon: boolean
   /** 临时解锁到期时间（ISO），null 表示未临时解锁 */
   tempUnlock: string | null
   deviceCode: string
@@ -102,11 +108,27 @@ export interface ToggleState {
   enabled: boolean
 }
 
+/**
+ * 单条应用限额（键是应用的展示名）。
+ *
+ * `dailyLimit` 是每日上限（分钟），`usedTodaySeconds` 是设备上报的「今天已经用了多少秒」
+ * （contract §4）。设备端统计依赖 `PACKAGE_USAGE_STATS`，权限没给时设备不报用量，
+ * 服务端会把当日值当 0 —— 所以界面上「今日已用 0 分钟」也可能是权限没给，
+ * 文案不能把 0 说成「孩子今天没用过」。
+ *
+ * `packageName` 是设备端真正用来匹配前台窗口的标识（设置限制时必须带上）。
+ */
+export interface AppLimitEntry {
+  dailyLimit: number
+  packageName: string
+  usedTodaySeconds: number
+}
+
 export interface Features {
   lockScreen: { enabled: boolean; locked: boolean }
   tempUnlock: { enabled: boolean; unlockTime: string | null }
   timePlan: { enabled: boolean; dailyLimit: number; usedToday: number }
-  appLimit: { enabled: boolean; apps: Record<string, number> }
+  appLimit: { enabled: boolean; apps: Record<string, AppLimitEntry> }
   appAudit: { enabled: boolean; pendingApps: string[] }
   webBlock: { enabled: boolean; blockedUrls: string[] }
   quizUnlock: ToggleState
@@ -225,6 +247,12 @@ export interface SafeZone {
   radiusMeters: number
   address: string
   type: ZoneType
+  /**
+   * 是否启用。**服务端一直有这个字段**（`locations.service.ts` 只把 `enabled: true` 的围栏下发给设备），
+   * 但家长端类型里漏了、UI 也没有开关，于是「停用某个围栏」这件事在界面上根本做不到 ——
+   * 默认 true 所以行为看起来正常，只是给了人一个假印象。
+   */
+  enabled: boolean
   createdAt: string
 }
 
@@ -776,6 +804,63 @@ export interface DeviceEventListResponse {
   totalPages: number
   items: DeviceEvent[]
 }
+
+// ============================================================
+// 通话记录与短信（contract §8）
+// ============================================================
+
+/** 通话类型：呼入 / 呼出 / 未接 */
+export type CallLogType = 'incoming' | 'outgoing' | 'missed'
+
+export interface CallLogEntry {
+  id: string
+  phoneNumber: string
+  /** 设备通讯录里能匹配到的联系人名；匹配不到时后端回 null，不是空串 */
+  name: string | null
+  type: CallLogType
+  durationSeconds: number
+  occurredAt: string
+}
+
+/** GET /api/calls */
+export interface CallLogListResponse {
+  page: number
+  pageSize: number
+  total: number
+  totalPages: number
+  items: CallLogEntry[]
+}
+
+/** 短信类型：收件 / 发件 */
+export type SmsMessageType = 'inbox' | 'sent'
+
+export interface SmsMessage {
+  id: string
+  /** 对方号码（后端字段名沿用 Android 侧的 address） */
+  address: string
+  body: string
+  type: SmsMessageType
+  occurredAt: string
+}
+
+/** GET /api/sms */
+export interface SmsListResponse {
+  page: number
+  pageSize: number
+  total: number
+  totalPages: number
+  items: SmsMessage[]
+}
+
+// ============================================================
+// 远程协助（contract §7）
+// ============================================================
+
+/**
+ * 设备端支持的远程操作动作。
+ * 只有这几个，截屏走既有的 `screenshot` 指令，不在这个枚举里。
+ */
+export type RemoteAction = 'back' | 'home' | 'recents' | 'notifications' | 'open_app'
 
 // ============================================================
 // 通用

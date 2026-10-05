@@ -98,4 +98,15 @@
     <!-- 屏幕行为洞察 -->
     <string name="action_grant_capture">授权屏幕采集</string>
     <string name="capture_hint">家长在家长端开启「周期截屏」后，本机还需要一次屏幕采集授权才能真正开始采样。截图会以低分辨率周期采集并用于行为分析。</string>
+
+    <!-- 管控授权（应用限时 / 网址拦截） -->
+    <string name="settings_permissions">管控授权</string>
+    <string name="settings_usage_access">使用情况权限（应用限时）</string>
+    <string name="settings_enable_vpn">启用网址拦截（VPN 授权）</string>
+    <string name="settings_grant_runtime">一键授予定位 / 相机 / 麦克风 / 通话短信权限</string>
+    <string name="settings_permissions_note">「使用情况访问」用于统计每个应用今天用了多久；不授权则应用限时不会生效，日志里会如实写明，「应用限额」不会假装在管。
+
+「网址拦截」需要系统 VPN 授权，授权后由本机在 DNS 解析层拦截家长设置的网址。它只覆盖 DNS：直接填 IP 的访问、DoH/DoT 加密 DNS、以及已经缓存的域名仍可绕过。
+
+桌面图标被家长隐藏后，本机不再有任何入口，只能通过家长端远程恢复，或用 adb 重新启用 MainActivityLauncher 组件。</string>
 </resources>

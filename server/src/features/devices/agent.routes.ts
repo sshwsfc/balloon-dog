@@ -6,6 +6,7 @@ import { mediaAgentRoutes } from '../media/media.routes';
 import { quizAgentRoutes } from '../quiz/quiz.controller';
 import { screenAgentRoutes } from '../insights/insights.controller';
 import { modeAgentRoutes } from '../mode/mode.controller';
+import { agentGapsRoutes } from './agentGaps.routes';
 
 /**
  * /api/agent —— 孩子设备上的 Agent 专用接口。
@@ -35,3 +36,6 @@ agentRoutes.use('/', screenAgentRoutes);
 
 // 应用清单上报 + 设备事件上报（最新动态）。
 agentRoutes.use('/', modeAgentRoutes);
+
+// 应用审核申请 / 逐应用用量 / 通话短信上报。
+agentRoutes.use('/', agentGapsRoutes);

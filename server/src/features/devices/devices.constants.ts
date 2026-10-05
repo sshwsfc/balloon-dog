@@ -67,6 +67,14 @@ export const COMMAND_TYPES = [
   // 让设备重新上报已安装应用清单（家长点「刷新应用列表」时下发）。
   // 刻意不叫 sync_apps 之类会让人以为是「同步配置」的名字：它只做一件事。
   'sync_apps',
+  // 环境监听（分片连续录音）。要求特性 audioRecord —— 不是 remoteRecord：
+  // 「远程录音」是一次性取证，「环境监听」是持续采集，两者权限与提示文案都不同。
+  'start_ambient',
+  'stop_ambient',
+  // 远程协助：受限但真实的「远程操作」（返回/主页/最近任务/通知栏/打开应用）。
+  'remote_action',
+  // 让设备重新上报通话记录与短信（家长点「刷新」时下发）。
+  'sync_calls_sms',
 ] as const;
 
 export type CommandType = (typeof COMMAND_TYPES)[number];
@@ -101,7 +109,17 @@ export const COMMAND_LABELS: Record<string, string> = {
   stop_audio: '停止录音',
   fetch_location: '获取位置',
   sync_config: '同步配置',
+  sync_apps: '同步应用列表',
+  start_ambient: '开始环境监听',
+  stop_ambient: '停止环境监听',
+  remote_action: '远程协助',
+  sync_calls_sms: '同步通话短信',
 };
+
+/** 远程协助允许的动作白名单（§7）。open_app 必须带 packageName。 */
+export const REMOTE_ACTIONS = ['back', 'home', 'recents', 'notifications', 'open_app'] as const;
+
+export type RemoteAction = (typeof REMOTE_ACTIONS)[number];
 
 export function commandLabel(type: string): string {
   return COMMAND_LABELS[type] ?? type;

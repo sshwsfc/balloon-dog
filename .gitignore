@@ -27,3 +27,10 @@ dist-ssr
 server/uploads/
 server/.env
 server/dist/
+
+# 交叉测试的中间产物（.class / 参考结果 json）—— 它们每次运行都会重新生成，
+# 跟踪进来只会让 `git status` 永远显示一堆二进制改动。
+android/scripts/crosstest/.work/
+android/.android-home/
+android/.gradle-home/
+android/app/build/

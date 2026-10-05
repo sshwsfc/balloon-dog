@@ -8,6 +8,9 @@ import {
   deviceIdSchema,
   commandListQuerySchema,
   commandIdSchema,
+  callLogQuerySchema,
+  smsQuerySchema,
+  remoteActionSchema,
 } from './devices.dto';
 import { devicesService } from './devices.service';
 import { currentUserId, resolveDevice, toDeviceView } from '../../shared/deviceScope';
@@ -154,6 +157,39 @@ export async function stopAudio(req: Request, res: Response) {
 }
 
 // ============================================================
+// 环境监听 / 远程协助 / 通话短信刷新（§6 §7 §8）—— 同样全部走指令队列
+// ============================================================
+
+/** POST /api/device/start-ambient —— 开始环境监听（要求 audioRecord 开关）。 */
+export async function startAmbient(req: Request, res: Response) {
+  const device = await resolveDevice(req);
+  const result = await devicesService.requestAmbient(currentUserId(req), device, true);
+  res.status(202).json(result);
+}
+
+/** POST /api/device/stop-ambient —— 停止环境监听（不检查开关，必须停得下来）。 */
+export async function stopAmbient(req: Request, res: Response) {
+  const device = await resolveDevice(req);
+  const result = await devicesService.requestAmbient(currentUserId(req), device, false);
+  res.status(202).json(result);
+}
+
+/** POST /api/device/remote-action —— 返回/主页/最近任务/通知栏/打开应用（要求 remoteHelp）。 */
+export async function remoteAction(req: Request, res: Response) {
+  const { action, packageName } = remoteActionSchema.parse(req.body ?? {});
+  const device = await resolveDevice(req);
+  const result = await devicesService.remoteAction(currentUserId(req), device, action, packageName);
+  res.status(202).json(result);
+}
+
+/** POST /api/device/sync-calls-sms —— 让设备重新上报通话记录与短信（要求 callSms）。 */
+export async function syncCallsSms(req: Request, res: Response) {
+  const device = await resolveDevice(req);
+  const result = await devicesService.requestCallsSmsSync(currentUserId(req), device);
+  res.status(202).json(result);
+}
+
+// ============================================================
 // 指令队列（家长视角）
 // ============================================================
 
@@ -216,11 +252,22 @@ export async function setTimePlan(req: Request, res: Response) {
 /** PUT /api/features/app-limit */
 export async function setAppLimit(req: Request, res: Response) {
   const appName = String(req.body?.appName ?? '').trim();
+  const packageName = String(req.body?.packageName ?? '').trim();
   const limit = Number(req.body?.limit);
   if (!appName) throw new BadRequestError('请选择要限制的应用');
+  // 包名必填：设备端按包名匹配前台窗口，没有包名的规则在设备上等于不存在
+  if (!packageName) throw new BadRequestError('缺少应用包名：请从孩子设备上报的应用清单里选择应用');
   if (!Number.isFinite(limit) || limit <= 0) throw new BadRequestError('请输入有效的时长（分钟）');
   const device = await resolveDevice(req);
-  res.json(await devicesService.setAppLimit(currentUserId(req), device.id, appName, Math.floor(limit)));
+  res.json(
+    await devicesService.setAppLimit(
+      currentUserId(req),
+      device.id,
+      appName,
+      packageName,
+      Math.floor(limit),
+    ),
+  );
 }
 
 /** DELETE /api/features/app-limit/:appName */
@@ -255,6 +302,24 @@ export async function unblockUrl(req: Request, res: Response) {
   const url = decodeURIComponent(String(req.params.url));
   const device = await resolveDevice(req);
   res.json(await devicesService.unblockUrl(currentUserId(req), device.id, url));
+}
+
+// ============================================================
+// 电话与短信（§8）—— 家长只读；管理后台永远只给计数，不给内容
+// ============================================================
+
+/** GET /api/calls —— 通话记录（分页，可筛类型/搜索号码姓名）。 */
+export async function listCalls(req: Request, res: Response) {
+  const query = callLogQuerySchema.parse(req.query);
+  const device = await resolveDevice(req);
+  res.json(await devicesService.listCalls(device, query));
+}
+
+/** GET /api/sms —— 短信（分页，可筛收/发件与号码）。 */
+export async function listSms(req: Request, res: Response) {
+  const query = smsQuerySchema.parse(req.query);
+  const device = await resolveDevice(req);
+  res.json(await devicesService.listSms(device, query));
 }
 
 // ============================================================

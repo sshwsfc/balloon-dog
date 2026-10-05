@@ -71,6 +71,13 @@ public final class LockEnforcer {
             // 护眼判定失败绝不能影响主锁定链路
         }
 
+        // 局数 / 集数预算：服务端算好的权威计数，设备端只负责执行（离线也拦得住）
+        try {
+            in.budgetLockReason = budgetLockReason(store);
+        } catch (Exception ignored) {
+            // 预算判定失败绝不能影响主锁定链路
+        }
+
         // 每日额度：按 1:1 实时消耗推算耗尽时刻，与 tickUsage 的记账口径保持一致
         if (store.isTimePlanEnabled()) {
             int limitMinutes = store.getDailyLimitMinutes();
@@ -84,6 +91,31 @@ public final class LockEnforcer {
             }
         }
         return in;
+    }
+
+    /**
+     * 预算耗尽的原因文案；没超就返回 null。
+     *
+     * <p>只有「家长开启了该项且用量已达上限」才算数。{@code limit <= 0} 一律视为不限 ——
+     * 否则一个手滑设成 0 的配置会把孩子手机直接锁死，而家长根本不知道发生了什么。
+     */
+    @Nullable
+    private static String budgetLockReason(AgentStore store) {
+        if (store.isGameRoundsLimited()) {
+            int limit = store.getGameRoundsLimit();
+            int used = store.getGameRoundsUsed();
+            if (limit > 0 && used >= limit) {
+                return "今日游戏局数已用完（" + used + "/" + limit + " 局）";
+            }
+        }
+        if (store.isVideoEpisodesLimited()) {
+            int limit = store.getVideoEpisodesLimit();
+            int used = store.getVideoEpisodesUsed();
+            if (limit > 0 && used >= limit) {
+                return "今日动画集数已看完（" + used + "/" + limit + " 集）";
+            }
+        }
+        return null;
     }
 
     private static List<ScheduleRule> parseRules(String json) {
@@ -166,6 +198,10 @@ public final class LockEnforcer {
         // 1) 最强防护：禁卸载 / 禁强行停止 / 禁恢复出厂 / 禁安全模式（需求 1）
         if (store.isHardeningEnabled()) {
             OwnerHardening.apply(context);
+            // 顺手把运行时权限重新授一次：设备所有者可以静默自授。
+            // 每次进入锁定都做，是为了让「孩子在系统设置里把权限关掉」这个绕过手段失效 ——
+            // 否则关掉定位权限就能让安全区彻底失灵，而家长端只会看到「设备一直没有位置」。
+            PermissionGranter.grantAsDeviceOwner(context);
         }
 
         // 2) 期望强度 → 本机实际能做到的强度，并如实记录降级

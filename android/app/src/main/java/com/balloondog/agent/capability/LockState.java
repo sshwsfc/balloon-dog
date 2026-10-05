@@ -40,7 +40,9 @@ public final class LockState {
         /** 每日可用时长用完 */
         DAILY_LIMIT,
         /** 护眼：连续用眼强制休息 / 夜间护眼时段 */
-        EYE_CARE
+        EYE_CARE,
+        /** 局数 / 集数预算用尽 */
+        BUDGET
     }
 
     public final boolean locked;
@@ -99,6 +101,16 @@ public final class LockState {
          * <p>两种情形共用这一个入口：**强制休息**（连续用眼到点）与**夜间护眼**。
          * 它们的优先级高于家长临时解锁 —— 见 {@link #isLockedAt}。
          */
+        /**
+         * 局数 / 集数预算耗尽的原因（null 表示不因预算而锁）。
+         *
+         * <p>计数是服务端 AI 分析出来的权威值（设备端自己数不准 —— 判断「这一局打完了没」
+         * 需要看画面），随 config 下发并落盘。放在设备端判定的意义是<b>离线兜底</b>：
+         * 孩子拔了网线之后，已经用超的额度仍然拦得住，而不是等重新联网才生效。
+         */
+        @Nullable
+        public String budgetLockReason = null;
+
         @Nullable
         public String eyeLockReason = null;
 
@@ -122,6 +134,7 @@ public final class LockState {
         if (isEyeLockedAt(in, at)) return Reason.EYE_CARE;
         if (in.grantUntil > at) return Reason.NONE;
         if (in.remoteLocked) return Reason.REMOTE;
+        if (in.budgetLockReason != null) return Reason.BUDGET;
         if (in.scheduleEnabled && !in.rules.isEmpty()
                 && ScheduleEngine.evaluate(in.rules, at).locked) {
             return Reason.SCHEDULE;
@@ -144,6 +157,9 @@ public final class LockState {
             }
             case DAILY_LIMIT:
                 return "今日可用时长已用完";
+            case BUDGET:
+                // 与护眼同理：文案由 LockEnforcer 算好，这里再判一次会重复且迟早不一致
+                return in.budgetLockReason;
             case EYE_CARE:
                 // 直接复用上层算好的说明：强制休息与夜间护眼是两句不同的话，
                 // 在这里再判一次会与 EyeCareController 的逻辑重复并且迟早不一致
@@ -196,13 +212,19 @@ public final class LockState {
         // 2) 家长远程锁定
         if (in.remoteLocked) return true;
 
-        // 3) 时间表（按设备本地时钟）
+        // 3) 局数 / 集数预算用尽。
+        //
+        // 排在「放行期」之后是刻意的：家长手动给的临时解锁是一次明确的人工决定，
+        // 应当压过自动预算；但预算要排在自动规则（作息、每日额度）之前。
+        if (in.budgetLockReason != null) return true;
+
+        // 4) 时间表（按设备本地时钟）
         if (in.scheduleEnabled && !in.rules.isEmpty()
                 && ScheduleEngine.evaluate(in.rules, at).locked) {
             return true;
         }
 
-        // 4) 每日额度：已耗尽，或在这个时刻之前会耗尽
+        // 5) 每日额度：已耗尽，或在这个时刻之前会耗尽
         if (in.dailyLimitExhausted) return true;
         return in.dailyLimitAt > 0 && at >= in.dailyLimitAt;
     }
@@ -253,6 +275,8 @@ public final class LockState {
                 return "已锁定（今日时长已用完）";
             case EYE_CARE:
                 return "已锁定（护眼：" + detail + "）";
+            case BUDGET:
+                return "已锁定（" + detail + "）";
             default:
                 return "已锁定";
         }

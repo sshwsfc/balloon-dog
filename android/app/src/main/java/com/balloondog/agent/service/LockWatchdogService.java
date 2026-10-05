@@ -3,23 +3,29 @@ package com.balloondog.agent.service;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.balloondog.agent.capability.LockEnforcer;
 import com.balloondog.agent.capability.StudyModeEngine;
 import com.balloondog.agent.capability.LockState;
 import com.balloondog.agent.data.AgentStore;
+import com.balloondog.agent.data.Constants;
 import com.balloondog.agent.data.EventLog;
 import com.balloondog.agent.ui.LockOverlayWindow;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -83,7 +89,37 @@ public class LockWatchdogService extends AccessibilityService {
     /** 两次强制之间的最小间隔，避免在事件风暴里疯狂 addView / startActivity。 */
     private static final long ENFORCE_INTERVAL_MS = 400L;
 
+    /**
+     * 应用安装器（契约 §3）。
+     *
+     * <p>不同 ROM 的包名不同，这两个覆盖了 AOSP 与 GMS 两条线。
+     * 注意它们同时也在 {@link #SETTINGS_LIKE} 里（锁定时要把安装界面推走），
+     * 两处用途不同：这里是「孩子要装东西了，通知家长」，
+     * 那里是「锁定期间不允许改系统设置」。
+     */
+    private static final Set<String> INSTALLER_PACKAGES = new HashSet<>(Arrays.asList(
+            "com.android.packageinstaller",
+            "com.google.android.packageinstaller"
+    ));
+
+    /** 同一个应用 10 分钟内只向家长申请一次，避免点来点去刷屏（契约 §3）。 */
+    private static final long INSTALL_AUDIT_DEDUP_MS = 10 * 60_000L;
+
+    /** 已上报过的「安装申请」标识 → 上报时刻（仅进程内，见 {@link #maybeReportInstallAttempt}）。 */
+    private final Map<String, Long> installAuditReportedAt = new HashMap<>();
+
+    /** 上报在后台线程做，结果要回到主线程才能弹 Toast / 发通知。 */
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
     private static volatile boolean connected;
+    /**
+     * 当前活着的实例，供远程协助（契约 §7）跨进程调用。
+     *
+     * <p>{@code performGlobalAction} / {@code startActivity} 都是实例方法，
+     * 而指令是从 {@code AgentService} 那条线程发过来的 —— 没有这个引用就只能干瞪眼。
+     * 服务断开时置空，避免用法已经失效的实例。
+     */
+    private static volatile LockWatchdogService instance;
 
     private AgentStore store;
     private long lastEnforceAt;
@@ -120,6 +156,7 @@ public class LockWatchdogService extends AccessibilityService {
         super.onServiceConnected();
         store = new AgentStore(this);
         connected = true;
+        instance = this;
         // 把「用无障碍服务上下文起 Activity」的能力注入 ui 层。
         // 悬浮窗权限被撤销时，应用上下文起 Activity 会被系统静默拦掉，
         // 只有走无障碍服务这条合法豁免才能把锁定页重新拉起来。
@@ -138,8 +175,64 @@ public class LockWatchdogService extends AccessibilityService {
     @Override
     public boolean onUnbind(android.content.Intent intent) {
         connected = false;
+        instance = null;
         EventLog.warn("无障碍看门狗已断开（被系统关闭或在设置里关掉了）");
         return super.onUnbind(intent);
+    }
+
+    // ---------------- 远程协助（契约 §7） ----------------
+
+    /**
+     * 执行一个全局动作（返回 / 主页 / 最近任务 / 通知栏）。
+     *
+     * <p>无障碍未连接时返回 false，由调用方如实回报失败 ——
+     * <b>不做「假装点了」的兜底</b>：家长点「返回」却没反应，
+     * 比告诉他「无障碍服务没连上」糟糕得多。
+     */
+    public static boolean performRemoteGlobalAction(int action) {
+        LockWatchdogService service = instance;
+        if (service == null || !connected) return false;
+        try {
+            return service.performGlobalAction(action);
+        } catch (Exception e) {
+            EventLog.warn("远程执行全局动作失败（action=" + action + "）：" + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 远程打开一个应用。
+     *
+     * <p>优先用无障碍服务的上下文 {@code startActivity}：Android 10+ 对后台应用
+     * 启动 Activity 有严格限制，而无障碍服务是系统明确豁免的那一类。
+     * 无障碍没连上时退回应用上下文（有悬浮窗权限时也能成功），并如实返回错误原因。
+     *
+     * @return null 表示已成功发出启动请求；否则是给人看的中文失败原因
+     */
+    @Nullable
+    public static String launchApp(@NonNull Context context, @NonNull String packageName) {
+        android.content.pm.PackageManager pm = context.getPackageManager();
+        android.content.Intent launchIntent = pm.getLaunchIntentForPackage(packageName);
+        if (launchIntent == null) {
+            return "找不到应用 " + packageName + "（可能已被卸载，或它没有桌面入口）";
+        }
+        launchIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+
+        LockWatchdogService service = instance;
+        if (service != null && connected) {
+            try {
+                service.startActivity(launchIntent);
+                return null;
+            } catch (Exception e) {
+                EventLog.warn("经无障碍服务启动应用失败：" + e.getMessage());
+            }
+        }
+        try {
+            context.startActivity(launchIntent);
+            return null;
+        } catch (Exception e) {
+            return "启动应用失败（无障碍未连接，且系统拦住了后台启动）" + e.getMessage();
+        }
     }
 
     @Override
@@ -156,6 +249,12 @@ public class LockWatchdogService extends AccessibilityService {
         // 先记录前台应用 —— 这一步与本服务「是否处于锁定」无关，
         // 因为周期截屏要给每一帧标注当时的前台包名，而截屏在锁定与非锁定期间都会发生。
         com.balloondog.agent.capability.ForegroundAppTracker.record(pkg);
+
+        // ---- 应用审核：孩子点「安装」（契约 §3） ----
+        //
+        // 放在最前面：这件事与锁不锁屏、是不是学习时段都无关，
+        // 只要家长开了「应用审核」，每一次走到安装器界面都要让家长知道。
+        maybeReportInstallAttempt(context, event, pkg);
 
         // 放行：本应用自己的界面（锁定页 / 答题页 / 应急解锁页）
         if (pkg.equals(context.getPackageName())) {
@@ -211,7 +310,91 @@ public class LockWatchdogService extends AccessibilityService {
     }
 
     /**
-     * 学习模式 / 应用插件管控的拦截。
+     * 检测到安装器界面时，向家长发起一次安装审核申请，并明确告诉孩子「已请求家长批准」。
+     *
+     * <p><b>这里只做两件事</b>：上报一次申请 + 给孩子一句说明。真正「禁止安装」的
+     * 是 {@link com.balloondog.agent.capability.OwnerHardening} 里的
+     * {@code DISALLOW_INSTALL_APPS} 用户限制（需要设备所有者）。
+     * 刻意不做「找到安装按钮再点返回」这类假动作：拦不住不说，还会把安装器搞成奇怪的状态，
+     * 而安装器本身是系统界面，乱按会误导孩子。
+     *
+     * <p>去重按「尽力取到的应用名」做，取不到就退回安装器包名。
+     * 安装器窗口里没有待安装应用的包名（只有展示名），硬按包名去重只会永远退化成
+     * 「同一台机器 10 分钟最多报一条」，反而漏掉换一个应用再装的情况。
+     */
+    private void maybeReportInstallAttempt(Context context, AccessibilityEvent event, String pkg) {
+        if (!INSTALLER_PACKAGES.contains(pkg) || store == null) return;
+        // 家长没开「应用审核」时，装应用与他无关，不要制造骚扰
+        if (!store.isFeatureEnabled("appAudit")) return;
+
+        String appName = guessAppNameFromWindowText(collectWindowText(event));
+        boolean named = appName != null && !appName.isEmpty();
+        String identity = named ? appName : pkg;
+
+        long now = SystemClock.elapsedRealtime();
+        Long last = installAuditReportedAt.get(identity);
+        if (last != null && now - last < INSTALL_AUDIT_DEDUP_MS) return;
+        installAuditReportedAt.put(identity, now);
+        store.setInstallAuditLastAt(System.currentTimeMillis());
+
+        String display = named ? appName : pkg;
+        // onAccessibilityEvent 跑在主线程上，而上报是一次同步网络请求：
+        // 直接调用会抛 NetworkOnMainThreadException，被 catch 后永远走到「联系不上家长端」那一支，
+        // 于是家长端永远收不到申请。放到后台线程，再把结果发回主线程显示。
+        final Context appContext = context.getApplicationContext();
+        new Thread(() -> {
+            final boolean sent = AgentService.reportInstallAttempt(display, pkg);
+            mainHandler.post(() -> showInstallAuditResult(appContext, display, sent));
+        }, "install-audit-report").start();
+    }
+
+    /** 把「申请是否送达」如实告诉孩子；失败就是失败，不写成「已请求」。 */
+    private void showInstallAuditResult(Context context, String display, boolean sent) {
+        String message = sent
+                ? "已请求家长批准：正在安装「" + display + "」"
+                : "检测到安装「" + display + "」，但暂时联系不上家长端，请稍后再试";
+        EventLog.info("安装审核：" + message);
+        try {
+            android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            // Toast 在少数 ROM 上会因通知/悬浮权限被拦，失败不影响上报本身
+            EventLog.warn("安装审核提示未能显示：" + e.getMessage());
+        }
+        AgentNotifications.notifyEvent(context, Constants.NOTIFICATION_ID_AUDIT,
+                sent ? "已请求家长批准" : "安装审核上报失败", message);
+    }
+
+    /**
+     * 从安装器窗口文本里尽力猜出正在安装的应用名。
+     *
+     * <p>纯启发式，猜不到就返回 null 由调用方兜底。安装器的文案各 ROM 差异很大，
+     * 这里只覆盖最常见的几种（带书名号的、以及「要安装/安装应用 …… 吗」句式）。
+     */
+    @Nullable
+    private static String guessAppNameFromWindowText(@Nullable String text) {
+        if (text == null || text.isEmpty()) return null;
+        String[] patterns = {
+                "安装应用[「“\"]([^」”\"]{1,40})[」”\"]",
+                "要安装[「“\"]?([^，。？!？]{1,30}?)[」”\"]?吗",
+                "安装[「“\"]([^」”\"]{1,40})[」”\"]",
+                "「([^」]{1,40})」"
+        };
+        for (String pattern : patterns) {
+            try {
+                java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(pattern).matcher(text);
+                if (matcher.find()) {
+                    String found = matcher.group(1);
+                    if (found != null && found.trim().length() > 0) return found.trim();
+                }
+            } catch (Exception ignored) {
+                // 正则只是尽力而为，出错就当没匹配上
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 学习模式 / 应用限时 / 应用插件管控的拦截。
      *
      * @return true 表示已经拦下并处理（调用方应当直接返回，不要再走锁定复核）
      */

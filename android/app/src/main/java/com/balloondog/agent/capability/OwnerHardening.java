@@ -155,6 +155,15 @@ public final class OwnerHardening {
             }
             lines.add(label(restriction) + "：" + (active ? "已生效" : "未生效"));
         }
+
+        // 应用审核的安装限制是动态项（家长批准期间会临时放开），单独一行如实展示
+        try {
+            boolean installBlocked = dpm.getUserRestrictions(LockController.adminComponent(context))
+                    .getBoolean(UserManager.DISALLOW_INSTALL_APPS, false);
+            lines.add("应用审核（禁止安装）：" + (installBlocked ? "已生效" : "未生效"));
+        } catch (Exception e) {
+            lines.add("应用审核（禁止安装）：读取失败");
+        }
         return lines;
     }
 
@@ -178,5 +187,74 @@ public final class OwnerHardening {
     /** 是否支持运行时的用户限制 API（API 21+ 一直有，这里留个位置便于将来扩展）。 */
     public static boolean isSupported() {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP;
+    }
+
+    // ---------------- 应用审核：安装限制随批准窗口开合（契约 §3） ----------------
+
+    /** 上一次同步给日志用的状态，避免配置每 60 秒刷新一次就刷一条重复日志。 */
+    private static volatile Boolean lastInstallRestricted = null;
+
+    /**
+     * 按「应用审核」特性同步「禁止安装应用」限制。
+     *
+     * <p>为什么要单开一个方法而不是塞进 {@link #RESTRICTIONS}：这一项是<b>动态</b>的 ——
+     * 家长批准安装后服务端会把 {@code installApprovalUntil} 往后推 30 分钟，
+     * 这期间必须放开；窗口一过又要自动收紧。塞进静态清单就没法开合。
+     *
+     * <p>{@code DISALLOW_INSTALL_APPS} 同样只有设备所有者能设置：非设备所有者时
+     * 这里只如实记一条日志（一次状态变化记一次），不假装已生效。
+     *
+     * @param auditEnabled 家长是否开启应用审核（appAudit 特性）
+     * @param windowOpen   是否处于家长刚批准后的放行窗口
+     * @return true 表示当前确实处于「禁止安装」状态
+     */
+    public static boolean syncInstallRestriction(Context context, boolean auditEnabled, boolean windowOpen) {
+        boolean shouldBlock = auditEnabled && !windowOpen;
+        if (!LockController.isDeviceOwner(context)) {
+            if (lastInstallRestricted == null || lastInstallRestricted != shouldBlock) {
+                lastInstallRestricted = shouldBlock;
+                EventLog.warn(auditEnabled
+                        ? "应用审核已开启，但本机不是设备所有者，无法阻止安装（孩子仍可自行安装应用）"
+                        : "应用审核未开启：不限制安装");
+            }
+            return false;
+        }
+        DevicePolicyManager dpm =
+                (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
+        if (dpm == null) return false;
+
+        boolean currently;
+        try {
+            currently = dpm.getUserRestrictions(LockController.adminComponent(context))
+                    .getBoolean(UserManager.DISALLOW_INSTALL_APPS, false);
+        } catch (Exception e) {
+            currently = false;
+        }
+
+        try {
+            if (shouldBlock) {
+                dpm.addUserRestriction(LockController.adminComponent(context),
+                        UserManager.DISALLOW_INSTALL_APPS);
+            } else {
+                dpm.clearUserRestriction(LockController.adminComponent(context),
+                        UserManager.DISALLOW_INSTALL_APPS);
+            }
+        } catch (Exception e) {
+            EventLog.warn("同步「禁止安装应用」失败：" + e.getMessage());
+            return currently;
+        }
+
+        if (currently != shouldBlock || lastInstallRestricted == null
+                || lastInstallRestricted != shouldBlock) {
+            lastInstallRestricted = shouldBlock;
+            if (shouldBlock) {
+                EventLog.info("应用审核：已禁止安装新应用（家长批准后会临时放开 30 分钟）");
+            } else if (windowOpen) {
+                EventLog.success("家长已批准安装：临时放开安装限制");
+            } else {
+                EventLog.info("应用审核：已解除安装限制");
+            }
+        }
+        return shouldBlock;
     }
 }

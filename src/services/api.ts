@@ -16,6 +16,7 @@ import type {
   AppPluginUpdateItem,
   AppPluginUpdateResult,
   AuthResponse,
+  CallLogListResponse,
   CommandDispatchResult,
   Device,
   DeviceAppListResponse,
@@ -44,6 +45,7 @@ import type {
   QuizQuestion,
   QuizRecord,
   QuizStatistics,
+  RemoteAction,
   SafeZone,
   ScheduleListResponse,
   ScheduleRule,
@@ -51,6 +53,7 @@ import type {
   ScreenMonitorConfig,
   ScreenMonitorConfigPatch,
   ScreenMonitorUpdateResult,
+  SmsListResponse,
   StudySlotListResponse,
   StudySlotReplaceResult,
   UsageAlertListResponse,
@@ -365,7 +368,14 @@ export const deviceApi = {
   bind: (data: { deviceCode: string; name?: string }) =>
     http.post<{ success: boolean; alreadyBound: boolean; device: Device }>('/devices/bind', data),
 
-  update: (deviceId: string, data: { name?: string; avatar?: string }) =>
+  /**
+   * 改名 / 换头像（`PUT /api/devices/:deviceId`）。
+   *
+   * 同一个接口也负责隐藏桌面图标（contract §9，字段 `hideIcon`）——
+   * 它**不是**功能开关：`/api/features` 会以「未知的功能标识」拒绝 `hideIcon`，
+   * 只有写 `ChildDevice.hideIcon` 才会随 `/api/agent/config` 下发到设备。
+   */
+  update: (deviceId: string, data: { name?: string; avatar?: string; hideIcon?: boolean }) =>
     http.put<{ success: boolean; device: Device }>(`/devices/${deviceId}`, data),
 
   remove: (deviceId: string) => http.del<{ success: boolean }>(`/devices/${deviceId}`),
@@ -406,6 +416,34 @@ export const commandApi = {
   stopAudio: (recordingId: string, deviceId?: string) =>
     http.post<CommandDispatchResult>('/device/stop-audio', { recordingId }, deviceId ? { deviceId } : undefined),
 
+  /**
+   * 环境监听（contract §6）。
+   * 与「远程录音」是两件事：`start_audio` 是一次录音，`start_ambient` 是让设备**持续分段**录，
+   * 归到功能开关 `audioRecord` 下（不是 `remoteRecord`）。设备端录音期间会挂常驻通知，
+   * 不做隐蔽录音 —— 家长端的文案必须把这点说清楚。
+   */
+  startAmbient: (deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/start-ambient', {}, deviceId ? { deviceId } : undefined),
+
+  stopAmbient: (deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/stop-ambient', {}, deviceId ? { deviceId } : undefined),
+
+  /**
+   * 远程协助动作（contract §7）。
+   * 设备端用无障碍服务执行返回 / 回桌面 / 最近任务 / 拉通知栏，`open_app` 需要包名。
+   * 无障碍服务没连上时设备会失败并回报，不会假装成功。
+   */
+  remoteAction: (action: RemoteAction, packageName?: string, deviceId?: string) =>
+    http.post<CommandDispatchResult>(
+      '/device/remote-action',
+      packageName ? { action, packageName } : { action },
+      deviceId ? { deviceId } : undefined,
+    ),
+
+  /** 让设备重新读取通话记录与短信并上报（contract §8 的 `sync_calls_sms` 指令） */
+  syncCallsSms: (deviceId?: string) =>
+    http.post<CommandDispatchResult>('/device/sync-calls-sms', {}, deviceId ? { deviceId } : undefined),
+
   history: (options?: { deviceId?: string; status?: string; limit?: number }) =>
     http.get<{ commands: DeviceCommand[] }>('/device/commands', {
       deviceId: options?.deviceId,
@@ -434,8 +472,24 @@ export const featureApi = {
   setTimePlan: (dailyLimit: number, deviceId?: string) =>
     http.put<{ success: boolean }>('/features/time-plan', { dailyLimit }, deviceId ? { deviceId } : undefined),
 
-  setAppLimit: (appName: string, limit: number, deviceId?: string) =>
-    http.put<{ success: boolean }>('/features/app-limit', { appName, limit }, deviceId ? { deviceId } : undefined),
+  /**
+   * 设置逐应用每日限额。
+   *
+   * `packageName` 必填：设备端 `GuardRules.matchAppLimit` 是拿前台窗口的包名去匹配规则的，
+   * 只传展示名的规则在设备上永远不会触发（历史缺陷：只传 appName → 库里空包名 → 设备丢弃）。
+   * 包名要从孩子端上报的应用清单里拿（见 deviceAppApi.list）。
+   */
+  setAppLimit: (
+    appName: string,
+    packageName: string,
+    limit: number,
+    deviceId?: string,
+  ) =>
+    http.put<{ success: boolean }>(
+      '/features/app-limit',
+      { appName, packageName, limit },
+      deviceId ? { deviceId } : undefined,
+    ),
 
   removeAppLimit: (appName: string, deviceId?: string) =>
     http.del<{ success: boolean }>(
@@ -867,6 +921,31 @@ export const deviceEventApi = {
 }
 
 // ============================================================
+// 通话记录与短信（contract §8）
+// ============================================================
+
+export const callSmsApi = {
+  /**
+   * 通话记录。设备端需要 `READ_CALL_LOG`（Google Play 受限权限），
+   * 没授权时设备不会上报，列表就会是空的 —— 页面必须把这点讲清楚，不能说成「没有通话」。
+   */
+  calls: (options?: { deviceId?: string; page?: number; pageSize?: number }) =>
+    http.get<CallLogListResponse>('/calls', {
+      deviceId: options?.deviceId,
+      page: options?.page ?? 1,
+      pageSize: options?.pageSize ?? 20,
+    }),
+
+  /** 短信。同样依赖受限权限 `READ_SMS`。 */
+  sms: (options?: { deviceId?: string; page?: number; pageSize?: number }) =>
+    http.get<SmsListResponse>('/sms', {
+      deviceId: options?.deviceId,
+      page: options?.page ?? 1,
+      pageSize: options?.pageSize ?? 20,
+    }),
+}
+
+// ============================================================
 // 兼容聚合导出（既有页面用 `api.xxx` 的写法可继续使用）
 // ============================================================
 
@@ -909,6 +988,10 @@ export const api = {
   stopRecording: commandApi.stopRecording,
   startAudioRecording: commandApi.startAudio,
   stopAudioRecording: commandApi.stopAudio,
+  startAmbient: commandApi.startAmbient,
+  stopAmbient: commandApi.stopAmbient,
+  remoteAction: commandApi.remoteAction,
+  syncCallsSms: commandApi.syncCallsSms,
   getCommands: commandApi.history,
   cancelCommand: commandApi.cancel,
 
@@ -997,4 +1080,8 @@ export const api = {
 
   // 设备事件流
   getDeviceEvents: deviceEventApi.list,
+
+  // 通话记录与短信
+  getCallLogs: callSmsApi.calls,
+  getSmsMessages: callSmsApi.sms,
 }

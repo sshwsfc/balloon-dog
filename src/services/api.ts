@@ -66,6 +66,7 @@ import type {
   UsageSummary,
   User,
 } from '@/types'
+import { tt } from '@/i18n'
 
 const API_BASE = '/api'
 const TOKEN_KEY = 'balloon_dog_token'
@@ -114,12 +115,12 @@ export class ApiError extends Error {
  * 页面里统一用这个，不要再写 `error.message || '...'` ——
  * 网络错误、超时、后端业务错误的文案差异都在这里收口。
  */
-export function toUserMessage(error: unknown, fallback = '操作失败，请稍后重试'): string {
+export function toUserMessage(error: unknown, fallback = tt('操作失败，请稍后重试')): string {
   if (error instanceof ApiError) return error.userMessage || fallback
   if (error instanceof Error) {
-    if (error.name === 'TimeoutError') return '请求超时，请检查网络后重试'
-    if (error.name === 'AbortError') return '请求已取消'
-    if (error.message === 'Failed to fetch') return '无法连接服务器，请确认后端已启动'
+    if (error.name === 'TimeoutError') return tt('请求超时，请检查网络后重试')
+    if (error.name === 'AbortError') return tt('请求已取消')
+    if (error.message === 'Failed to fetch') return tt('无法连接服务器，请确认后端已启动')
     return error.message || fallback
   }
   return fallback
@@ -213,13 +214,13 @@ async function request<T>(path: string, options: RequestOptions): Promise<T> {
       throw new ApiError({
         status: 0,
         code: 'TIMEOUT',
-        userMessage: '请求超时，请检查网络后重试',
+        userMessage: tt('请求超时，请检查网络后重试'),
       })
     }
     throw new ApiError({
       status: 0,
       code: 'NETWORK_ERROR',
-      userMessage: '无法连接服务器，请确认后端已启动',
+      userMessage: tt('无法连接服务器，请确认后端已启动'),
     })
   }
 
@@ -259,23 +260,23 @@ async function request<T>(path: string, options: RequestOptions): Promise<T> {
 function defaultMessageForStatus(status: number): string {
   switch (status) {
     case 400:
-      return '请求参数有误'
+      return tt('请求参数有误')
     case 403:
-      return '没有权限执行此操作'
+      return tt('没有权限执行此操作')
     case 404:
-      return '请求的数据不存在'
+      return tt('请求的数据不存在')
     case 409:
-      return '数据冲突，请刷新后重试'
+      return tt('数据冲突，请刷新后重试')
     case 413:
-      return '内容过大，请压缩后重试'
+      return tt('内容过大，请压缩后重试')
     case 422:
-      return '提交内容未通过校验'
+      return tt('提交内容未通过校验')
     case 429:
-      return '操作过于频繁，请稍后再试'
+      return tt('操作过于频繁，请稍后再试')
     case 503:
-      return '服务暂时不可用，请稍后重试'
+      return tt('服务暂时不可用，请稍后重试')
     default:
-      return '服务器开小差了，请稍后重试'
+      return tt('服务器开小差了，请稍后重试')
   }
 }
 
@@ -336,6 +337,13 @@ export interface WechatQr {
   real: boolean
 }
 
+export interface WechatJsapiSignature {
+  appId: string
+  timestamp: number
+  nonceStr: string
+  signature: string
+}
+
 export const wechatApi = {
   createQr: () => http.get<WechatQr>('/auth/wechat/qr'),
   poll: (state: string) =>
@@ -345,6 +353,14 @@ export const wechatApi = {
     http.get<{ url: string }>('/auth/wechat/authorize-url', redirect ? { redirect } : undefined),
   /** 未配置真实微信时的联调模拟扫码 */
   devScan: (state: string) => http.post<{ success: boolean }>('/auth/wechat/dev-scan', { state }),
+  /**
+   * 网页 JS-SDK 的 config 签名（「扫一扫」要用）。
+   *
+   * 必须把**当前页面地址**原样传上去（去 hash）：微信要求签名时用的 url 与调用时
+   * 页面的 url 完全一致，差一个 query 都会报 invalid signature。
+   */
+  jsapiSignature: (url: string) =>
+    http.get<WechatJsapiSignature>('/auth/wechat/jsapi-signature', { url }),
 }
 
 export const userApi = {

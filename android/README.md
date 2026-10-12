@@ -57,7 +57,7 @@
 | `temp_unlock` | 本地放开 N 分钟，到期自动回锁 | `{until, minutes}` |
 | `cancel_temp_unlock` | 立刻恢复锁定 + 恢复系统锁屏 | `{locked:true}` |
 | `remote_photo` | **Camera2** 前置（可回退后置）拍 JPEG → 上传 | `{mediaId, sizeBytes}` |
-| `screenshot` | **MediaProjection** + ImageReader(RGBA_8888) → JPEG → 上传 | `{mediaId, sizeBytes}` |
+| `screenshot` | **无障碍免授权截图优先**（`AccessibilityScreenCapture`，API 30+）→ JPEG → 上传；拿不到才回退 **MediaProjection** + ImageReader(RGBA_8888) | `{mediaId, sizeBytes}` |
 | `start_recording` / `stop_recording` | **MediaProjection + MediaRecorder** 录 H.264/MP4 → 上传 | `{recordingId}` / `{mediaId, recordingId, durationSeconds}` |
 | `start_audio` / `stop_audio` | **MediaRecorder**(MIC) 录 AAC/M4A → 上传 | `{recordingId}` / `{mediaId, recordingId, durationSeconds}` |
 | `fetch_location` | **LocationManager** 取点（含逆地理编码）→ 上报 | `{reported, latitude, longitude, accuracy, address}` |
@@ -227,8 +227,9 @@ BadTokenException: Unable to add window -- token null is not valid; is your acti
 
 #### 开启方式与一个现实门槛
 
-开启入口在主界面「防护与保活 → 开启无障碍看门狗」。系统不允许应用自行开启，
-必须家长手动去系统设置里打开。
+开启入口在主界面「需要开启 → 无障碍服务」（首屏第一行，带实时状态徽标）；
+「高级 / 诊断 → 防护与保活 → 开启无障碍看门狗」是同一个入口的旧位置，仍然保留。
+系统不允许应用自行开启，必须家长手动去系统设置里打开。
 
 **Android 13 及以上有额外门槛**：侧载安装的应用默认处于「受限设置」状态，
 无障碍开关是灰的。需要先：
@@ -374,38 +375,125 @@ BadTokenException: Unable to add window -- token null is not valid; is your acti
 
 一眼就能看出是白名单写错了、还是这个包被当成了系统组件。
 
-### 2.5 保活：先说清楚它做不到什么
+### 2.5 保活：先分清「强停」与「被杀」，再说清楚做不到什么
 
-需求是「完全禁止被杀死、被退出、不能被孩子删除停止」。这里必须把边界讲明白：
+需求是「完全禁止被杀死、被退出、不能被孩子删除停止」。这句话其实是两件不同的事，
+能不能做到取决于设备处于哪个状态：
 
-**用户在系统设置里点「强行停止」后，应用进入 stopped 状态，任何 AlarmManager、
-JobScheduler、广播都无法再把它唤醒。** 另一个进程也不行 —— 强停会杀掉该应用
-的**所有**进程，所以「双进程互相拉起」在这个场景下是无效的表演，本工程刻意没有做。
+- **被杀死（killed）**：低内存回收、厂商 ROM 的后台清理、Doze 冻结、`kill -9`。
+  进程没了，但应用仍处于「已启动」状态 —— **可以有救**，靠前台服务 + 双看门狗拉起。
+- **被强行停止（stopped）**：孩子（或任何人）在「设置 → 应用 → 强行停止」里点了那个按钮。
+  应用进入 **stopped 状态，任何 AlarmManager、JobScheduler、广播都无法再把它唤醒**。
+  另一个进程也不行 —— 强停会杀掉该应用的**所有**进程，所以「双进程互相拉起」在这个场景下
+  是无效的表演，本工程刻意没有做。
 
-唯一可靠的解法是**设备所有者 + 用户限制**（见 `OwnerHardening`），让那个按钮直接变灰：
+**唯一的可靠解法是设备所有者把那个按钮本身变灰**：`DISALLOW_APPS_CONTROL` 加上
+Android 11（API 30）起的 `setUserControlDisabledPackages`（本工程叫「受保护包」）。
 
-| 限制项 | 作用 |
-| --- | --- |
-| `setUninstallBlocked` | 禁止卸载本应用 |
-| `DISALLOW_APPS_CONTROL` | 禁止「强行停止 / 清除数据 / 停用应用」 |
-| `DISALLOW_FACTORY_RESET` | 禁止恢复出厂设置 |
-| `DISALLOW_SAFE_BOOT` | 禁止进入安全模式（安全模式下管控全失效） |
-| `DISALLOW_ADD_USER` | 禁止新建用户/访客绕过 |
-| `DISALLOW_CONFIG_DATE_TIME` | 禁止改系统时间（否则改时间就能绕过作息表） |
+#### 2.5.1 四层唤醒链路（`WatchdogScheduler` / `AgentService`）
 
-已被实测验证：**设备所有者状态下 `adb shell am force-stop` 杀不掉本应用，PID 不变。**
+| 机制 | 周期 | 覆盖场景 | 实现位置 |
+| --- | --- | --- | --- |
+| 前台服务 + `START_STICKY` + `stopWithTask="false"` | 实时 | 低内存回收、用户从最近任务划掉；系统重建服务 | `service/AgentService.java`、`AndroidManifest.xml` |
+| `AlarmManager` 主闹钟（`setAndAllowWhileIdle`） | 60 秒 | 厂商 ROM 后台清理、Doze | `service/WatchdogScheduler.java` |
+| `AlarmManager` 备用闹钟（`setExactAndAllowWhileIdle`） | 15 分钟 | 主闹钟被 Doze 推迟时的硬唤醒窗口 | 同上 |
+| `JobScheduler`（`setPersisted`） | 15 分钟 | 上述两条都被限制时的兜底，重启后仍在 | 同上 |
+| `onTaskRemoved()` 主动重启 | 事件 | 从最近任务划掉 | `service/AgentService.java` |
+| `BootReceiver` + `LOCKED_BOOT_COMPLETED` | 事件 | 重启 / 直接开机 | `service/BootReceiver.java` |
 
-对「非强停」的进程死亡，则用三层看门狗兜住（`WatchdogScheduler`）：
+两条闹钟**互相重排**（任意一条醒来都会重新排定对方），不依赖任何单一通道。
+备用闹钟用 `setExactAndAllowWhileIdle` 是有代价的：Android 12+ 需要 `SCHEDULE_EXACT_ALARM`
+授权，拿不到就退化为不精确闹钟并**如实记一条 warn**（`未获得精确闹钟权限，备用看门狗退化为不精确闹钟`），
+不做静默降级。**功耗说明**：每次唤醒只做三件极轻的事（读 `AgentService.isRunning()`、
+必要时 `startForegroundService`、重排下一次），实测在模拟器上不产生可观测的额外耗电；
+要更省电把主间隔从 60 秒调到 5 分钟是安全的。
 
-| 机制 | 周期 | 覆盖场景 |
+`describe()` 也不再假报状态。旧实现只看 `PendingIntent.getBroadcast(...) != null`，而那个调用
+**永远返回非 null**，所以它恒报「看门狗已排定」—— 那是个假阳性。现在分开写：
+闹钟一条只能说「已注册」（Android 没有查询 AlarmManager 排队状态的公开 API，
+`getNextAlarmClock` 只覆盖 `setAlarmClock`），`JobScheduler` 一条走 `getPendingJob`，
+是系统给出的**确切**结果。
+
+#### 2.5.2 每次启动/每次巡检都重新施加（`LongevityGuard`）
+
+孩子动手的时机是家长看不见的时候，所以加固不能「设置一次就完事」。`LongevityGuard`
+在三种时机重新施加，全部**幂等**：
+
+| 时机 | 谁触发 | 做什么 |
 | --- | --- | --- |
-| 前台服务 + `START_STICKY` | 实时 | 低内存回收；系统重建服务 |
-| `AlarmManager` 自续期闹钟 | 60 秒 | 厂商 ROM 的后台清理、Doze |
-| `JobScheduler`（`setPersisted`） | 15 分钟 | 上述两条都被限制时的兜底 |
-| `onTaskRemoved` | 事件 | 用户从最近任务划掉 |
-| `BootReceiver` | 事件 | 重启后恢复守护 |
+| 进程启动（含被系统拉起后） | `AgentService.onCreate()` 的后台线程 | `selfHeal(…, "服务启动")`：重施加加固、补授权、重开无障碍、重绑永久 VPN、重排双看门狗、巡检上报 |
+| 每 5 分钟（进程活着时） | `AgentService.runTicker()` → `LongevityGuard.tick()` | 只做巡检与上报（放心跳里而不是只靠闹钟，因为 Doze 下闹钟可能被推迟到 15 分钟以上） |
+| 家长点「自检」 | `MainActivity.selfCheckAndHeal()` | 同上，并把摘要显示给家长 |
 
-三条链路互相独立：厂商 ROM 通常只限制其中一条，全断的概率低得多。
+巡检发现的每一条缺口都会记中文日志；**能自动补的自动补**，补不了的走
+`POST /api/agent/events` 发一条 `tamper` 事件给家长端（只在缺口集合**变化**时发，
+避免每 5 分钟刷屏），并在界面「自检」里铺开显示。
+
+#### 2.5.3 本机实测（emulator-5554，Android 13 / arm64）
+
+| 断言 | 实测原文 | 判定 |
+| --- | --- | --- |
+| 卸载被拒 | 普通状态：`pm uninstall com.balloondog.agent` → `Failure [DELETE_FAILED_USER_RESTRICTED]`（exit 1），`pm uninstall --user 0` / `pm uninstall -k --user 0` / `cmd package uninstall` 四条变体全部同一错误码；**锁屏（lock task）状态**：同一条命令变成 `Failure [DELETE_FAILED_APP_PINNED]`（exit 1）。两条**独立**拦截路径（`DISALLOW_UNINSTALL_APPS` vs. 被锁 task 固定），两种状态下都删不掉 | ✅ 已实测（两种状态各自跑过） |
+| 受保护包真的生效 | `pm disable-user --user 0 com.balloondog.agent` → `SecurityException: Cannot disable a protected package: com.balloondog.agent`（exit 255）；`dumpsys device_policy` 里 `protectedPackages=[com.balloondog.agent]` | ✅ 已实测 |
+| 撤销设备管理器被拒 | `dpm remove-active-admin com.balloondog.agent/.capability.AgentAdminReceiver` → `SecurityException: Attempt to remove non-test admin …`（exit 255） | ✅ 已实测 |
+| `am force-stop` 杀不掉 | 退出码 0 但 **PID 不变**（ETIME 持续增长）；对照组 `am force-stop com.android.deskclock` 立刻被杀 | ✅ 已实测 |
+| 「强行停止 / 卸载 / 清除数据」按钮变灰 | 应用信息页 `Force stop`、`Uninstall` 节点 `enabled="false"`（`Open` 仍 `enabled="true"`）；Storage 页 `Clear storage` `enabled="false"`、`Clear cache` `enabled="true"` | ✅ 已实测 |
+| 加固项逐条自检 | `气球狗加固自检（服务启动）：26/28 项生效（2 项本机不支持），模拟器` + 每项一条 `气球狗加固[<id>] applied=… supported=… label=… detail=…` | ✅ 已实测 |
+| `kill -9` 后自愈 | 16:13:21 `kill -9 <pid>` → 16:13:31 `Agent 服务已启动`：**10 秒**内新 PID（`AgentService` 自愈日志：`加固 26/28 项生效…；重排双看门狗；仍有 1 项缺口`）。⚠️ 恢复耗时**不是固定值**：连续多次杀进程时 ActivityManager 对 `START_STICKY` 服务做重启退避，实测序列 **2 秒 / 4 秒 / 10 秒 / 16 秒 / 64 秒**（64 秒那次前面刚做过 `am force-stop`，但受保护包连 `stopped=true` 都没被标上、12 条闹钟仍在）。结论：**必定自愈，但只承诺「分钟级以内」，不承诺毫秒级** | ✅ 已实测（多次） |
+| `adb reboot` 后自动恢复 | 16:27:45 `adb reboot` → `boot_completed=1` 与 agent pid **同在 +21 秒**；重启后 `1 owner: User 0: admin=com.balloondog.agent/.capability.AgentAdminReceiver,DeviceOwner,Affiliated`、`protectedPackages=[com.balloondog.agent]`、`PROJECT_MEDIA: allow`（跨重启保留，**不是**重新授权）、`enabled_accessibility_services` 与 `accessibility_enabled=1` 都还在；开机日志 `开机自启：正在恢复守护服务` → `气球狗加固[protected_package] applied=true` → `气球狗加固自检（服务启动）：26/28 项生效` | ✅ 已实测 |
+| 撤销「使用情况访问」的检测与恢复 | `appops set com.balloondog.agent GET_USAGE_STATS ignore`（16:17:12）→ 16:21:56（T+284 秒）tamper `检测到管控被改动：「使用情况访问」权限已被关闭…`；`appops set … allow`（16:22:13）→ 16:26:57（T+284 秒）`气球狗保活已恢复（周期巡检发现缺口）：「使用情况访问」…` + 服务端 `管控已恢复正常` | ✅ 已实测（集合差分有效：电池白名单那条永久缺口一直没被覆盖成「已恢复」） |
+| 电池缺口不会被反复当「新增」上报 | 最终构建上让白名单保持未授权，跑满 10 分钟（20×30 秒采样）：`气球狗保活新增缺口` 计数**全程 0**，服务端同一窗口内也没有电池相关 tamper | ✅ 已实测（此前那 13 条来自引入集合差分之前的旧构建） |
+
+> `adb shell am force-stop` 走的是 shell UID（uid 2000），不是普通应用。
+> 在这台设备上**它也被受保护包挡住了**（PID 不变）—— 这是 `setUserControlDisabledPackages`
+> 的直接效果，不是「我们猜的」。
+
+#### 2.5.4 关掉无障碍服务：检测是秒级的，自愈做不到（附「无障碍设置页拦截」实测）
+
+这是最严重的绕过面，这里把三件事分开说清楚，不要混成一句「5 分钟巡检」：
+
+1. **检测是秒级的**。`LockWatchdogService.onUnbind()` 就是那条一次性信号，服务被系统解绑的
+   **同一秒**就完成检测。5 分钟巡检只是**兜底**（防 unbind 回调没送到），不代表「最长 5 分钟才发现」。
+   实测：16:37:14 清空 `enabled_accessibility_services`，同一秒 16:37:14.128 就打出
+   `无障碍看门狗已断开（被系统关闭或在设置里关掉了）`，.130 打出 `气球狗保活检测到无障碍看门狗失效`。
+2. **自愈做不到**。同一秒的 .137 是尝试写回后的真实结果：
+   `设备所有者无法重开无障碍看门狗（系统 key 白名单不含无障碍设置）：Permission denial: Device owners cannot update enabled_accessibility_services`
+   → 再打一条 `气球狗保活无法自动恢复无障碍看门狗：孩子可以在设置里一直关着它，这期间锁定只能靠悬浮窗（SYSTEM_ALERT_WINDOW）兜底`，
+   并发两条 `tamper` 事件给家长端（`.130 无障碍守护已被关闭…` / `.138 无法自动恢复无障碍守护…`，两条相差 6 毫秒）。
+3. **能做的是把「关掉它」这个动作本身堵掉：加固开启时，无障碍设置页进不去。**
+   `LockWatchdogService.onAccessibilityEvent()` 里加了一条窄判定（`isAccessibilitySettingsPage`：
+   包名 `com.android.settings` 且窗口类名含 `Accessibility`），命中就 `performGlobalAction(GLOBAL_ACTION_BACK)`
+   并记一条 tamper 事件。**只拦这一页**，`GuardRules` 里 settings 包仍然整体放行（不碰紧急呼叫/电话/systemui）。
+
+| 场景 | 实测原文 | 判定 |
+| --- | --- | --- |
+| 加固**开**：`am start -a android.settings.ACCESSIBILITY_SETTINGS` | 2 秒后 `mCurrentFocus`/`mFocusedApp`/`topResumedActivity` 全部回到 `com.google.android.apps.nexuslauncher/.NexusLauncherActivity`；日志 `看门狗：拦截无障碍设置页（按返回推走；加固开启期间不允许在设备上关闭守护服务）`；服务端 40 秒内出现同一句 tamper 事件；`enabled_accessibility_services` / `accessibility_enabled` 未变 | ✅ 已实测 |
+| 加固**关**（家长逃生通道）：同一条命令 | `mCurrentFocus=Window{cca5f01 u0 com.android.settings/com.android.settings.Settings$AccessibilitySettingsActivity}`（**页面留住了**），无拦截日志，日志 `看门狗：管控加固已关闭，放行无障碍设置页（家长逃生通道）` | ✅ 已实测（同一台设备） |
+| 连续 3 次「按返回也推不走」 | 代码路径存在（`a11yBlockFailStreak ≥ 3` 时记一条 `未能阻止进入无障碍设置页…`），但本机**未触发**（每次按返回都成功） | ⚠️ 未在设备上触发，如实记录 |
+
+> **两个必须写明的边界**：
+> 1. **`hardening_enabled` 目前没有任何 UI 入口**。`AgentStore.setHardeningEnabled(boolean)`
+>    （`data/AgentStore.java:477`）在整仓库里**没有调用者**，主界面只有 `@+id/textHardening`
+>    这个 TextView（`res/layout/activity_main.xml:319`），prefs 里初始也没有这个键（默认 true）。
+>    本轮关/开加固是在真机上用 root 改 prefs + 重启进程做的（先杀进程再写文件，否则老进程会把
+>    内存里的整份 prefs 重写回去、把插入的键冲掉——实测过）。也就是说：**约束「只在加固开启时拦」
+>    在代码里成立，但家长现在点不到那个开关**，这条逃生通道要接 UI 才算闭环。
+> 2. **`uiautomator dump` 会挤掉我们的无障碍服务**（UiAutomation 会顶掉其他无障碍服务）。
+>    日志里会出现一对「无障碍看门狗已断开 / 已连接」以及两条对应 tamper 事件 ——
+>    那不是孩子干的。`android/scripts/e2e-gaps.mjs` 的 `dumpUi()` 基于 uiautomator，
+>    用它做断言的步骤要认得这个现象，不要当产品缺陷。
+
+#### 2.5.5 说清楚做不到的
+
+| 想做的事 | 结论 | 原因 |
+| --- | --- | --- |
+| API < 30 上让强停按钮变灰 | ❌ 做不到 | `setUserControlDisabledPackages` 是 API 30 才有的。降级后只剩 `DISALLOW_APPS_CONTROL`，它能拦住「清除数据/停用应用」，但**拦不住强行停止按钮本身**。本工程的 `OwnerHardening` 会把这一条如实标成「本机不支持」，不假装加固完整 |
+| 静默加入电池优化白名单 | ❌ 做不到 | 没有对应的 DPM API，`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 必须家长点一次。设备所有者身份在这里帮不上忙。本工程把它列为巡检缺口并在界面上给出按钮 |
+| 让设备所有者写 `app_auto_restriction_enabled` | ❌ 本机实测被拒 | 本应用（DO）调 `setGlobalSetting` 写这个 key 被系统拒绝（`OwnerHardening` 记为「Android 13 实测：device owners cannot update …」）；而同样的 key 用 `adb shell settings put` 能写进去 —— 说明不是 key 不可写，而是 DO 不在该 key 的白名单里 |
+| 系统回收进程后「零延迟」恢复 | ⚠️ 有秒级空窗 | 进程被杀到重新建立锁定之间有窗口；三条唤醒链路把窗口压到秒级，但不能为 0。数字见 §2.10 的实测行 |
+| 阻止孩子关机 / 长按电源键强制重启 | ❌ 做不到 | Android 没有给应用这个权限。重启后由 `BootReceiver` 恢复守护 |
+| Receive 模式 / Recovery 里恢复出厂 | ❌ 做不到 | `DISALLOW_FACTORY_RESET` 只挡系统设置菜单路径，挡不住硬件按键组合进 Recovery |
+
 
 ### 2.6 定时锁屏 / 定时解锁
 
@@ -533,6 +621,125 @@ BroadcastQueue: Exported Denial: sending Intent { act=android.intent.action.USER
 被第三方伪造的风险可接受：这个接收器只会触发一次锁定复核，而复核只会让设备更锁、
 绝不会解锁，所以伪造最多造成一次多余的重新锁定。
 
+### 2.10 孩子可能的绕过路径 × 是否堵住 × 依据
+
+这一节是「防绕过面」的完整清单。每一行都落到**具体 API / 具体代码**，
+并标注判定档位：
+
+- ✅ **已堵死**：有设备级实测证据，孩子走这条路走不通。
+- 🟡 **只能检测 + 上报**：DO 也做不到强制恢复，但能被发现、能上报家长端、能部分自救。
+- ❌ **完全堵不住**：平台边界，只能靠「检测 + 恢复（重启后重新施加）」兜住。
+- ❓ **待实测**：代码已实现，本机证据还差一条（下表会如实标出，不写成「已堵死」）。
+  **本轮状态**：原先标 ❓ 的单元格（always-on VPN、`adb reboot`、`kill -9`）都已补上设备级实测证据；
+  唯一的例外是「下拉快捷开关里的 VPN 磁贴能否断开」—— 这台模拟器上根本没有 VPN 磁贴（见 F 表），按 ⚠️ 未验证对待。
+
+#### A. 卸载 / 停用 / 清数据 / 撤销授权
+
+| 绕过路径 | 能不能绕过 | 怎么堵（具体做法） | 判定 |
+| --- | --- | --- | --- |
+| 设置 → 应用 → 卸载 | 不能 | `setUninstallBlocked(admin, pkg, true)` + `DISALLOW_UNINSTALL_APPS` | ✅ 实测 `pm uninstall` → `Failure [DELETE_FAILED_USER_RESTRICTED]`（普通状态）/ `Failure [DELETE_FAILED_APP_PINNED]`（锁 task 状态），exit 均为 1；`Uninstall` 按钮 `enabled="false"` |
+| 设置 → 强行停止 | 不能 | `DISALLOW_APPS_CONTROL` + API 30+ `setUserControlDisabledPackages(admin, [pkg])`（受保护包） | ✅ 实测 `Force stop` 灰色不可点；`am force-stop` PID 不变 |
+| 设置 → 清除数据 | 不能 | 同上（受保护包） | ✅ 实测 `Clear storage` 灰色不可点（`Clear cache` 仍可用，无妨） |
+| `adb shell pm uninstall / pm disable-user` | 不能 | 受保护包直接拒 | ✅ 实测 `Cannot disable a protected package`（exit 255）；**锁屏状态下** `pm uninstall` 变成 `Failure [DELETE_FAILED_APP_PINNED]`（普通状态是 `DELETE_FAILED_USER_RESTRICTED`），两种状态都 exit 1 |
+| `adb shell pm hide` | 不能（实测无效） | DO 包 + 受保护包不能被隐藏 | ✅ 实测 `pm hide com.balloondog.agent` → 回显 `Package com.balloondog.agent new hidden state: false`（exit 0 但**没隐藏成功**）；`dumpsys package` 里 `hidden=false`，PID、`dpm list-owners`、无障碍绑定全都没变 |
+| `adb shell pm clear` | **未验证**（推断不能，由受保护包覆盖） | 受保护包连 `Clear storage` 按钮都是灰的 | ❓ **本轮刻意没跑**：`pm clear` 一旦成功会清掉设备绑定与授权、无法在设备上回滚，会污染后面排队 agent 的验证；判定按「未实测」记 |
+| `dpm remove-active-admin` 撤销设备所有者 | 不能（免 root） | DO 的 admin 不能被非测试 admin 命令移除 | ✅ 实测 `SecurityException: Attempt to remove non-test admin …`（exit 255） |
+| 关闭「使用情况访问」授权 | 只能检测 | `PACKAGE_USAGE_STATS` 是 appop，`setPermissionGrantState` 授不了、DO 也强制不了。检测：`AppUsageTracker.hasPermission(Context)`（走 `AppOpsManager.checkOpNoThrow`，不用不可靠的 `checkSelfPermission`） | 🟡 检测点在**设置页**（`SettingsActivity.java:87` 直接显示状态）与**采集处**（`AppUsageReporter.java:57`、`AgentService.java:683` 未授权就跳过采集并打日志）。**刻意不进 `LongevityGuard.problems()`**：家长没用限时/使用情况功能时它本来就该是关的，每 5 分钟报一次会变成假 tamper |
+| 关闭悬浮窗授权 | 能自动补（补不上则检测） | `SYSTEM_ALERT_WINDOW` 同样是 appop；`PermissionGranter.grantSpecialAsDeviceOwner` 会**尽力写一次并回读验证**，无效就 warn。检测：`Settings.canDrawOverlays` | 🟡 实测 Android 13 上 DO 代授被系统拒绝（日志「系统不支持代授，只能由家长在系统设置里手动开启」），所以是「检测 + 上报」 |
+| 撤销运行时权限（相机/定位/麦克风…） | 不能（DO 可重新授权） | `setPermissionGrantState(...GRANTED)`，每次自愈重授一遍 | ✅ 每次启动/巡检重新施加（`PermissionGranter.grantAsDeviceOwner`） |
+| 撤销 VPN 授权 | 只能检测 | 检测 `VpnService.prepare(this) != null` / 隧道是否在跑 | 🟡 会记为缺口「网址拦截的 VPN 授权已被撤销：DNS 拦截已停」 |
+| **在设置里关掉无障碍服务** | **不能强制恢复，但设置页进不去了** | ①加固开启时 `LockWatchdogService.isAccessibilitySettingsPage()` 命中就按返回（实测：2 秒内被弹回桌面 + tamper 事件）；②真被关掉时 `onUnbind()` **同秒**检测（实测 16:37:14.128）→ 尝试 `setSecureSetting(admin, ENABLED_ACCESSIBILITY_SERVICES, …)` 写回被系统拒绝（原文 `Permission denial: Device owners cannot update enabled_accessibility_services`）→ 如实报「无法自动恢复」并发 tamper；③5 分钟巡检兜底 | 🟡 这是**最严重的绕过面**：拦截只覆盖「从设置页关」，不是平台级强制；DO 没有 API 能强制打开无障碍服务。详见 §2.5.4 |
+| 用无障碍快捷方式 / TalkBack 关掉我们的服务 | 同上 | 同上（无障碍快捷方式最终也是打开无障碍设置页，同样被拦）；另用 `setPermittedAccessibilityServices` 把**新装**的第三方无障碍服务挡在门外（已启用的服务保留，不误伤 TalkBack） | 🟡 挡住的是「新装一个第三方无障碍来对付我们」，挡不住孩子从别的入口（如 `adb`、快捷方式绕过设置页）关掉我们自己的服务 |
+
+#### B. 安全模式 / 多用户 / 恢复出厂
+
+| 绕过路径 | 能不能绕过 | 怎么堵 | 判定 |
+| --- | --- | --- | --- |
+| 安全模式（管控全失效） | 不能 | `DISALLOW_SAFE_BOOT` | ✅ 限制已在 `dumpsys user` 的 Effective restrictions 中实测到 |
+| 恢复出厂设置（设置菜单路径） | 不能 | `DISALLOW_FACTORY_RESET` | ✅ 同上（Recovery 模式下的硬件组合键仍挡不住，❌ 平台边界） |
+| 新建用户 / 访客 | 不能 | `DISALLOW_ADD_USER` | ✅ 实测在生效 |
+| 切换到另一个用户 | 不能 | `DISALLOW_USER_SWITCH`（API 28+） | ✅ 实测在生效 |
+| 删除用户 | 不能 | `DISALLOW_REMOVE_USER` | ✅ 实测在生效 |
+| 新建工作资料 / 克隆分身 | 不能 | 由系统对 DO 自动施加（`dumpsys user` 实测含 `no_add_managed_profile`、`no_add_clone_profile`，本工程未显式调用） | ✅ 实测在生效 |
+| 统一密码 / 改锁屏密码绕过 | 不能 | `DISALLOW_UNIFIED_PASSWORD`（API 28+） | ✅ 实测在生效 |
+| 设置 → 重置网络设置 | 不能 | `DISALLOW_NETWORK_RESET`（API 23+） | ✅ 实测在生效 |
+| 设置 → 「恢复默认设置」 | 部分 | 它会清掉默认应用/通知等偏好，但**不会停止应用、不会撤销 DO**；自愈会把加固与 kiosk 重新施加 | 🟡 不是致命路径 |
+
+#### C. 锁定期间的 UI 逃逸
+
+| 绕过路径 | 能不能绕过 | 怎么堵 | 判定 |
+| --- | --- | --- | --- |
+| 换启动器 / 换桌面 | 不能（锁定期间） | `setLockTaskPackages(self)` + `setLockTaskFeatures(admin, 0)`：锁定期间 Home、最近任务、通知栏、电源菜单、系统信息**全部禁用**，只剩我们的锁定页 | ✅ 实测 `mLockTaskModeState=LOCKED` 期间 `mCurrentFocus` 只有 `LockScreenActivity` |
+| 下拉通知栏 | 不能（锁定期间） | 同一套 Lock Task + `setStatusBarDisabled(admin, true)` | ✅ 实测锁定期间通知栏拉不出来（解除锁定自动恢复） |
+| 最近任务 / 分屏 / 画中画 | 不能（锁定期间） | `setLockTaskFeatures(0)` 直接关掉 | ✅ 同上 |
+| 悬浮球 / 辅助触控跳出去 | 不能（锁定期间） | 同上（全局操作被禁用） | ✅ 同上 |
+| 从最近任务划掉应用 | 不能 | `stopWithTask="false"` + `onTaskRemoved()` 主动重启 + 双看门狗 | 🟡 代码已实现（见 §2.5.1） |
+| 在锁定页按返回键逐层退出 | 不能 | 无障碍看门狗（`LockWatchdogService.enforce`）持续把锁定页拉回最前 | ✅ 既有实现，此前已实测（§2.2） |
+| 系统锁屏盖住锁定页 | 能（短暂） | 看门狗检测到 `mDreamingLockscreen` 时**故意暂停**（避免与系统锁屏互相打架）；亮屏后重新拉锁定页 | 🟡 设计如此，见 `LockWatchdogService` 注释 |
+| 快捷方式 / 小组件进入被限应用 | 不能（锁定期间） | 无障碍看门狗按包名拦截 + Lock Task | ✅ 既有实现（逐应用限时拦截已实测） |
+
+#### D. 网络与网址拦截
+
+| 绕过路径 | 能不能绕过 | 怎么堵 | 判定 |
+| --- | --- | --- | --- |
+| 关 Wi-Fi / 飞行模式 / 断网 | 离线绕过管控：**不能** | 管控是**纯本地**判定（`LockEnforcer.buildInputs` 不联网），断网只影响家长端下发新指令 | ✅ 本地强制是既有设计（§1.3 已实测） |
+| 开飞行模式 | 不能 | `DISALLOW_AIRPLANE_MODE`（API 28+）+ `setGlobalSetting(airplane_mode_on, "0")` | ✅ 实测限制在生效、全局设置为 0 |
+| 改 hosts | 不能（免 root） | `/system/etc/hosts` 需要 root 或改 system 分区 | ✅ 不改系统分区就写不进去 |
+| 改私有 DNS（DoT）绕过拦截 | 不能 | `DISALLOW_CONFIG_PRIVATE_DNS`（API 29+）+ `setGlobalSetting(private_dns_mode, "off")` + `private_dns_specifier=""` | ✅ 实测三处都已生效（`dumpsys user` + `settings get global`） |
+| 用 VPN 覆盖我们的 VPN / 从快捷开关断开 | 设置页路径被堵死；磁贴路径本机不存在 | `DISALLOW_CONFIG_VPN`（`no_config_vpn`）+ `setAlwaysOnVpnPackage(admin, pkg, false)` 把本应用钉成永久 VPN | ✅ 设置页实测：`am start -a android.settings.VPN_SETTINGS` 直接弹 `Blocked by your IT admin`（页面进不去）。✅ 绑定实测：家长开 `webBlock` + 加一条黑名单后 41 秒，`always_on_vpn_app=com.balloondog.agent`、`always_on_vpn_lockdown=0`、`dumpsys device_policy` → `mAlwaysOnVpnPackage=com.balloondog.agent` / `mAlwaysOnVpnLockdown=false`，日志 `已把本应用设为永久 VPN…`；关掉后 `已解除永久 VPN`、`mAlwaysOnVpnPackage=null`。⚠️ **磁贴路径没能实测**：这台模拟器的 `sysui_qs_tiles` 里没有 VPN 磁贴，手动加 `vpn` 并重启 SystemUI 也没出现，A13 的「互联网」磁贴弹窗里也没有 VPN 开关 —— 所以「孩子点 VPN 磁贴能否断开」**未验证**，保守结论属「只能检测 + 上报」，不能写成已堵死 |
+| 直接用 IP 访问被拦域名 | 能绕过 | DNS 层拦截只认域名 | ❌ 平台边界（域名拦截的固有局限，见 §7.2） |
+| DoH/DoT 自带解析的 App | 能绕过 | 同上 | ❌ 平台边界 |
+
+#### E. 时间 / 区域 / 调试 / 系统更新
+
+| 绕过路径 | 能不能绕过 | 怎么堵 | 判定 |
+| --- | --- | --- | --- |
+| 改系统时间（拖过锁定/限时） | 不能 | `DISALLOW_CONFIG_DATE_TIME`（API 28+） | ✅ 实测在生效 |
+| 改时区 | 不能 | AOSP 里**时区与日期时间共用同一个 restriction key**（`no_config_date_time`），API 33 的 `UserManager` **没有** `DISALLOW_CONFIG_TIMEZONE` 这个常量 —— 任务书里提到的那个名字不存在，别照抄 | ✅ 同上 |
+| 改语言/区域 | 不能 | `DISALLOW_CONFIG_LOCALE`（API 28+） | ✅ 本轮补进静态清单并实测生效：`dumpsys user` 的限制列表里已出现 `no_config_locale` |
+| 打开开发者选项 / USB 调试 | 不能（真机） | `DISALLOW_DEBUGGING_FEATURES`（API 21+）+ `DISALLOW_USB_FILE_TRANSFER` | 🟡 **模拟器上如实跳过**：它会关掉 `Settings.Global.ADB_ENABLED`，从而切断 adb，让 e2e 与故障恢复（`dpm remove-active-admin`）都不可能 —— 无法自证的东西不写进「已加固」。真机默认施加（`OwnerHardening.allowDebuggingRestriction()` 按 `ro.kernel.qemu` 判断） |
+| `adb shell pm enable/disable` 篡改 | 不能 | 受保护包 | ✅ 同 A 段实测 |
+| 系统更新后重启 | 不能（管控会重施） | `BootReceiver` + `LOCKED_BOOT_COMPLETED` + 每次启动 `selfHeal` | ✅ 已实测：`adb reboot` 后 `boot_completed=1` 与 agent pid **同在 +21 秒**；DO 仍是 `DeviceOwner,Affiliated`、`protectedPackages` 还在、`PROJECT_MEDIA: allow` 跨重启保留、限制项与无障碍开关都在，开机日志 `加固自检（服务启动）：26/28 项生效` |
+| 改系统凭据（清证书/凭据存储） | 不能 | `DISALLOW_CONFIG_CREDENTIALS` | ✅ 实测在生效 |
+| 系统错误弹窗（借崩溃对话框跳出去） | 不能 | `DISALLOW_SYSTEM_ERROR_DIALOGS`（API 28+） | ✅ 实测在生效 |
+| 孩子把手机时间改到「未配置」的日期 | 不能 | `AgentStore.getUsageSecondsToday()` 在日期不匹配时返回 0（不延续昨天的用量），且时间本身改不了 | ✅ 既有逻辑 + 限制 |
+
+#### F. 第三方 App 与其它
+
+| 绕过路径 | 能不能绕过 | 怎么堵 | 判定 |
+| --- | --- | --- | --- |
+| 装第三方「冻结/强停」类 App | 不能 | ① `DISALLOW_APPS_CONTROL` 让「强行停止」灰掉；② 普通应用没有 `force-stop` 权限；③ 安装新应用本身受应用审核管控 | 🟡 代码与限制已就位（普通应用调不到 `force-stop` 是平台事实） |
+| 装另一个管控 App 抢设备所有者 | 不能 | 一台设备**同时只能有一个设备所有者**，要换 DO 必须先移除旧的，而移除被 A 段实测拒掉 | ✅ 同 A 段实测 |
+| 装自己的「家长端」冒充 | 不能 | 指令下发走设备令牌（`deviceCode` + `deviceSecret`），服务端按令牌鉴权 | ✅ 既有实现 |
+| 关掉电池优化白名单（把我们踢出白名单） | 只能检测 | 检测 `PowerManager.isIgnoringBatteryOptimizations`；重新加入必须家长点一次系统框 | 🟡 记为巡检缺口（见 §2.5.4） |
+| `kill -9` 杀进程（root / adb root） | 能杀，但会自己回来 | 前台服务 + 双看门狗 + `onTaskRemoved` | ✅ 已实测 **10 秒**恢复（16:13:21 杀 → 16:13:31 `Agent 服务已启动`）；已固化成 `android/scripts/e2e-gaps.mjs` 的断言 |
+| 长按电源键强制重启 | 能（杀进程） | 重启后 `BootReceiver` 恢复守护 | ❌ 挡不住关机（平台边界），🟡 恢复链已实现 |
+| 直接拔电池 / 断电 | 能 | 无任何软件手段 | ❌ 平台边界 |
+
+#### 这一节的结论（三档）
+
+1. **已堵死（有设备级证据）**：卸载、强行停止、清除数据、`pm uninstall` / `pm disable-user`、
+   `dpm remove-active-admin`、安全模式、多用户/访客/分身、恢复出厂（菜单路径）、改系统时间、
+   飞行模式、私有 DNS、锁定期间的通知栏/最近任务/分屏/桌面切换。
+2. **只能检测 + 上报+部分自救**：**关掉无障碍服务**（最严重，检测是秒级、自愈做不到，
+   但加固开启时无障碍设置页会被推走，见 §2.5.4）、关闭悬浮窗授权、
+   关闭「使用情况访问」、撤销 VPN 授权、关掉电池优化白名单、「VPN 磁贴能否断开」未验证。共同点是这些都是
+   Android 刻意不给 DO 的强制权（appop / 无障碍授权），本工程的做法是
+   **检测 → 中文告警日志 → `tamper` 设备事件 → 能补的自动补（重启后、巡检时重新施加）**，
+   并在界面上如实写明「这一项没堵住」，绝不写成「已加固」。
+3. **完全堵不住**：恢复出厂（Recovery 硬件组合键）、关机/拔电、直接用 IP 或自带 DoH 的
+   应用绕过域名拦截。这些是平台/协议边界。
+
+> **关于「关掉无障碍服务」这一条的完整交代**：`setPermittedAccessibilityServices`
+> 只限制「哪些服务的**包**可以被启用」，它能让新装的第三方无障碍服务无法被打开，
+> 但**不能阻止孩子关掉本应用已经启用的服务**。DO 也没有 API 可以强制打开一个无障碍服务。
+> 所以这里给的是四层：**加固开启时把「无障碍设置页」本身推走**（`isAccessibilitySettingsPage`
+> + `GLOBAL_ACTION_BACK`，已实测）→ `onUnbind()` **同秒**检测 → 尝试 `setSecureSetting`
+> 写回并**回读验证**（实测被系统拒绝：`Permission denial: Device owners cannot update
+> enabled_accessibility_services`）→ 5 分钟巡检兜底。写不进去就把缺口交给家长端，
+> 不假装已经堵死。**注意那条逃生通道现在还没有 UI 入口**（`setHardeningEnabled` 无调用者），
+> 家长目前点不到「关掉管控加固」，详见 §2.5.4。
+
 ## 3. 构建与安装
 
 ### 3.1 环境要求
@@ -585,7 +792,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 装好后：
 
 1. 打开「气球狗守护」，界面顶部会显示 **8 位绑定码**（例如 `RS4B63PG`）；
-2. 点「申请采集权限」授予**屏幕采集**（MediaProjection，周期截屏用）；
+2. 点「申请采集权限」试拍一张，确认截图链路可用 —— 无障碍在跑时它走**免授权**路径，
+   不会弹任何框；只有无障碍不可用时才会弹系统授权框（`MediaProjection` 兜底，见 10.5）；
 3. 点「激活设备管理器」（**必须**，否则 `lockNow()` 调不动，锁屏会退化成应用内遮罩）；
 4. 点「授予悬浮窗权限」（Android 10+ 后台弹锁定页需要它）；
 5. 点「忽略电池优化」（否则息屏后长轮询会被 Doze 冻结，表现为「点了锁屏半天没反应」）；
@@ -615,6 +823,20 @@ adb shell dpm set-device-owner com.balloondog.agent/.capability.AgentAdminReceiv
 ```
 
 设置成功后，「锁屏能力」一栏会显示 *设备所有者（最强…）*。
+
+> **顺手把 `PROJECT_MEDIA` 放行（强烈建议，设备所有者之后执行）**：
+>
+> ```bash
+> adb shell appops set com.balloondog.agent PROJECT_MEDIA allow
+> ```
+>
+> 为什么需要：远程截图 / 录像 / 周期采样在没有无障碍免授权路径时只能用 `MediaProjection`，
+> 而这条路要在孩子设备上点一次系统弹框。授权框被划掉或超时后，系统会把这条 appop 记成
+> `ignore`（`adb shell appops get com.balloondog.agent PROJECT_MEDIA` 可以看到），
+> 家长侧的表现就是「截图一直失败」。预先放行可以省掉这一次人工确认。
+>
+> **必须真的验证**：设完跑一次 `adb reboot`，重启后再 `appops get` 确认仍是 `allow`
+> —— appops 的持久化策略各厂商不同，别只看当前这次生效就当完事（本工程的实测结论见 §10.5）。
 
 ---
 
@@ -664,8 +886,10 @@ adb shell dpm set-device-owner com.balloondog.agent/.capability.AgentAdminReceiv
 两个容易被忽略的坑，脚本里已经处理：
 - **锁屏会关屏，而关屏时 `uiautomator dump` 拿不到 root node**，所有基于界面文本的
   断言都会莫名失败。所以每次 dump 前都会先 `KEYCODE_WAKEUP`。
-- **设备所有者应用无法被 `pm clear`，也无法被 `am force-stop`**（这正是需求 1 的效果）。
-  脚本因此改用 `adb root` + `kill -9` + 删 `shared_prefs` 来重置状态。
+- **设备所有者应用无法被 `am force-stop`（实测退出码 0 但 PID 不变、连 `stopped=true` 都没标上、
+  闹钟也没被清），`pm hide` 也无效（回显 `new hidden state: false`）**（这正是需求 1 的效果）。
+  ⚠️ `pm clear` 本轮**未实测**：它会清掉设备绑定与授权且无法在设备上回滚，只在受保护包/设备
+  策略层面被推断为不可用。脚本因此改用 `adb root` + `kill -9` + 删 `shared_prefs` 来重置状态。
 
 ### 4.1 准备一台模拟器（可选，真机可跳过）
 
@@ -808,6 +1032,43 @@ Android 14 规定：声明了 `camera` / `microphone` 类型的服务若缺少�
 执行采集类指令前，先发一条「家长操作：远程拍照」的本机通知。
 这不是技术必需，但让孩子的设备不悄悄变成监控工具，是产品该有的底线。
 
+### 5.7 孩子端首页：先回答「我现在该做什么」
+
+旧首页是一张约 19.7 KB 的长滚动列表 —— 状态文本 + 十几个平铺按钮，信息量够，
+但没有优先级：家长打开之后**不知道该先点哪个**，也没法一眼看出「哪一项还没开」。
+现在首页改成 5 张卡，顺序即优先级：
+
+| 卡片 | 内容 |
+| --- | --- |
+| 运行状态 | 守护在不在跑、今日已用、启动/停止守护 |
+| 绑定家长 | 未绑定：**大字绑定码** + 二维码 + 复制按钮 + 「家长端 → 设备管理 → 绑定设备」；已绑定：压成一行 |
+| 需要开启 | 7 行待办 + 顶部「一键开启权限」 |
+| 应急与修复 | 应急解锁密码、立即自检并恢复守护 |
+| 高级 / 诊断（默认收起） | 权限与能力、防护与保活、加固逐项明细、服务器、日志 —— **原功能一条没删，只是不再挡在首屏** |
+
+「需要开启」的每一行 = 图标 + 名称 + 一句话原因 + **实时状态徽标** + 操作按钮，
+覆盖无障碍（置顶，它是锁定/拦截/免授权截图的前提）、运行时权限（合成一行显示 `N/M`）、
+悬浮窗、使用情况访问、电池优化白名单，以及两项**可选**能力（屏幕采集、网址拦截 ——
+家长没开时显示琥珀色「可选」，不写成「未开启」，避免制造焦虑）。
+
+三处刻意的设计：
+
+- **状态一律现读，不缓存字符串**：无障碍问 `LockWatchdogService.isEnabledInSettings()` +
+  `isConnected()`、运行时权限问 `PermissionGranter.missing()`、使用情况访问走
+  `PermissionGranter.isSpecialGranted()`，`onResume()` 之后每 2 秒重渲染一次。
+  验证方式是可复现的：`adb shell appops set com.balloondog.agent GET_USAGE_STATS ignore`
+  之后界面应从「5/5 已开启」变成「4/5 已开启」且该行变「未开启 / 去开启」，`allow` 后翻回来。
+- **无障碍既没开也没连上时显示「启动中」而不是「已开启」**：`isEnabledInSettings()` 读的是
+  系统开关，服务重连的那几秒它可能为真而服务并未在跑，此时说「已开启」是在撒谎。
+- **「一键开启权限」以无障碍为前提**：无障碍没开时按钮直接置灰并写明「请先开启无障碍」——
+  否则家长点下去只会拿到一串「需要手动开启」，却不知道为什么。已开时按
+  「设备所有者静默代授运行时权限 → 拿不到就回退系统弹框 → 特殊权限 → 电池白名单」执行，
+  每一步都如实汇总还差几项；悬浮窗/使用情况访问在多数 ROM 上系统会拒绝代授，
+  这时**明说需要手动开启**，不谎报成功。
+
+> 未绑定引导是**第二张卡**而不是第一张：`android/scripts/e2e-agent.mjs` 断言首页可见文本
+> 「运行状态」，把状态头挤出首屏会让 uiautomator 取不到屏幕外节点、弄坏既有回归契约。
+
 ---
 
 ## 6. 目录结构
@@ -850,7 +1111,8 @@ android/
    │  │  ├─ ScheduleEngine.java         # 作息求值（与后端同语义，已交叉验证 2016 点）
    │  │  ├─ LockController.java         # 锁屏原语：lockNow / 状态栏 / keyguard
    │  │  ├─ PhotoCapturer.java          # Camera2 拍照
-   │  │  ├─ ScreenCapturer.java         # MediaProjection 截图 / 录像
+   │  │  ├─ ScreenCapturer.java         # 截图（无障碍优先）/ 录像（MediaProjection）
+   │  │  ├─ AccessibilityScreenCapture.java # 无障碍免授权截图（API 30+；错误码语义见 10.5）
    │  │  ├─ ProjectionConsentActivity.java
    │  │  ├─ AudioRecorder.java          # MediaRecorder 录音
    │  │  ├─ LocationReader.java         # 定位 + 逆地理编码
@@ -866,7 +1128,7 @@ android/
    │  │  ├─ ForegroundCompat.java       # startForeground 跨版本兼容
    │  │  └─ BootReceiver.java           # 开机自启
    │  └─ ui/
-   │     ├─ MainActivity.java           # 绑定码 / 状态 / 权限 / 防护保活 / 运行日志
+   │     ├─ MainActivity.java           # 首页：状态头 / 绑定引导 / 权限待办 / 一键开启 / 高级诊断（§5.7）
    │     ├─ SettingsActivity.java       # 后端地址、设备名、重置身份
    │     ├─ LockScreenActivity.java     # 锁定页（kiosk + 答题 + 应急解锁 + 自行复核）
    │     ├─ CountdownOverlay.java       # 锁屏前透明倒计时悬浮窗
@@ -876,6 +1138,10 @@ android/
    │     └─ QuizActivity.java           # 答题解锁
    └─ res/                              # 中文文案、主题、矢量图标、布局
 ```
+
+> `res/drawable/ic_launcher.xml` 是整个产品的**品牌标识权威来源**（绿底 + 白盾牌 + 绿爪印），
+> 家长端与管理后台的 logo 都是照它做的。改图标要同步 `src/components/BrandLogo.tsx`
+> 与 `public/logo.svg`，详见根目录 README 的「品牌标识」一节。
 
 ---
 
@@ -940,8 +1206,14 @@ android/
 | 环境监听（持续录音） | ⚠️ 可见、不自恢复 | 每 5 分钟一段循环上传，前台通知固定写「家长开启了环境监听」，**不做隐蔽录音**。进程被杀后不会自动恢复（避免变成没人知道的常驻窃听） |
 | 远程协助 | ⚠️ 是「远程操作」，不是投屏 | 只做返回/主页/最近任务/通知栏/打开应用；不含实时投屏，也不注入触摸。无障碍未连接时如实失败并提示家长去系统设置重开 |
 | 防止孩子改系统时间绕过作息 | ✅ 设备所有者下可以 | `DISALLOW_CONFIG_DATE_TIME`。否则改时间确实能绕过时间表 |
-| 屏幕截图 / 录像 | ✅ 可用，但每次新会话要授权 | 系统强制每次新的 MediaProjection 会话都要用户点一次授权框，无法绕过（Android 14 起更严格） |
+| 屏幕截图 | ✅ 可用，**主路径完全不需要授权** | 「远程截图」优先走无障碍 `AccessibilityService.takeScreenshot`（免授权，实测 1080×2340 出图约 270ms）；只有无障碍不可用（API < 30 / 无障碍服务没开 / 被系统记进 `Crashed services`）才回退到**要点系统弹框**的 MediaProjection。即「无障碍在跑」时家长按截图**不需要孩子在那台设备上点任何东西** —— 这正是本次修复的根因（见 §10.5） |
+| 屏幕录像 | ⚠️ 每次新会话要授权 | 录像只能用 MediaProjection（无障碍没提供录像接口），系统强制每次新会话点一次授权框，无法绕过（Android 14 起更严格）。所以 `startVideo`/`stopVideo` 保持原样，没有走免授权路径 |
 | 解除系统锁屏密码 | ✅ 最高强度档下可以 | 通过预置的重置令牌清除被改写的密码。注意：不清除就无法解除，这正是该档位强度的来源 |
+| 在「应用信息」页挡住「强行停止」/「清除数据」 | ✅ Android 11（API 30）起可以 | `DevicePolicyManager.setUserControlDisabledPackages(admin, [pkg])`（受保护包）。**已实测**：`Uninstall`/`Force stop`/`Clear storage` 三个按钮 `enabled="false"`（`Open`/`Clear cache` 仍可用，符合预期）；`adb shell pm disable-user` 报 `Cannot disable a protected package: com.balloondog.agent`；连 `adb shell am force-stop` 都杀不掉（PID 不变，同一命令杀系统时钟立刻生效）。**API 30 以下没有这个 API**，只剩 `DISALLOW_APPS_CONTROL` 兜底（按钮变灰但 `am force-stop` 仍可能生效） |
+| 回收「使用情况访问」后仍保证限时生效 | ❌ 做不到，但能检测 + 上报 | `PACKAGE_USAGE_STATS` 是 appop：`setPermissionGrantState` 授不了（实测被系统拒绝），设备所有者也没有能改它的 DPM API。`LongevityGuard.problems()` 已把它接进巡检（只在家长真的在用「时间表 / 逐应用限时」时才报），撤销后 5 分钟内发出 `tamper` 事件，家长端能看到；恢复后同样会发一条「管控已恢复正常」 |
+| 用设备所有者强制开启被孩子关掉的无障碍服务 | ❌ 做不到（但能拦住「去设置里关」这个动作） | 实测 `dpm.setSecureSetting(admin, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, …)` 被系统拒绝：`Permission denial: Device owners cannot update enabled_accessibility_services`（Android 13）。**已实测**：关掉后 63 秒采样里无障碍服务一直是空的、进程没死但 `mLockTaskModeState=NONE`。**本轮新增并实测**：加固开启时 `LockWatchdogService.isAccessibilitySettingsPage()` 命中就 `GLOBAL_ACTION_BACK`，`am start -a android.settings.ACCESSIBILITY_SETTINGS` 2 秒内被弹回桌面并留下 `tamper` 事件；加固关掉后同一命令页面能留住（家长逃生通道）。检测本身是**秒级**的（`onUnbind` 一次性信号，实测同一秒 16:37:14.128），5 分钟巡检只是兜底；设备端能做的是「拦设置页 + 检测 + 发 `tamper` + 用悬浮窗继续兜底」，详见 §2.5.4 与 §2.10 |
+| 阻止孩子在系统设置里动网址拦截的 VPN | ✅ 设置页已堵死 | `DISALLOW_CONFIG_VPN`（`no_config_vpn`）+ `setAlwaysOnVpnPackage(admin, pkg, false)`（**lockdown 固定 false**，取舍见 §7.3）。**已实测**：家长开 `webBlock` 后 41 秒 `always_on_vpn_app=com.balloondog.agent`、`always_on_vpn_lockdown=0`、`dumpsys device_policy` 里 `mAlwaysOnVpnPackage=com.balloondog.agent` / `mAlwaysOnVpnLockdown=false`；`am start -a android.settings.VPN_SETTINGS` 被 `Blocked by your IT admin` 弹窗挡住；家长关掉后 10 秒 `已解除永久 VPN`、`mAlwaysOnVpnPackage=null` |
+| 阻止孩子从下拉快捷开关断开网址拦截的 VPN | ⚠️ **未验证**（本机没有 VPN 磁贴） | 代码路径：5 分钟巡检 + `applyAlwaysOn` 会把 `always_on_vpn_app` 重新写回；但**「磁贴能不能断开」这台模拟器上测不出来** —— `sysui_qs_tiles` 默认没有 VPN 磁贴，手动加 `vpn` 并重启 SystemUI 也没出现，A13 的「互联网」磁贴弹窗里也没有 VPN 开关。按保守口径归「只能检测 + 上报」，**不写成已堵死**；真机复测前请按未验证对待 |
 
 ### 7.3 本工程自身的取舍
 
@@ -956,6 +1228,19 @@ android/
 - **锁屏强度降级只提示、不阻断**：家长选了 Kiosk 但设备只是设备管理器时，
   设备端会在界面上写明「已降级为中：能调系统锁屏，但孩子用自己的密码解锁后就能继续用」，
   而不是拒绝工作。家长需要看到真实强度，而不是一个失败弹窗。
+- **永久 VPN 不开 lockdown**：`setAlwaysOnVpnPackage(admin, pkg, /* lockdown */ false)`。
+  lockdown=true 会在 VPN 起不来的瞬间**切断整台设备的网络**（连家长端的心跳与指令通道一起断），
+  代价高于收益；因此传 false。代价是「取消永久 VPN」到「自愈重新绑定」之间有一小段窗口，
+  且孩子如果先断网再关 VPN，这一段时间内网址拦截不生效（但会有 `tamper` 事件留痕）。
+- **20 条静态 `DISALLOW_*`（另有按档位动态施加的 `no_install_apps`）一起上，设备会「不像正常手机」**：孩子不能加用户/访客、不能改语言与区域、
+  不能重置网络、看不到开发者选项、不能配置私有 DNS 与 VPN…… 这是「堵死绕过面」和「可用性」之间的取舍。
+  家长若觉得太狠，可以在设置里关掉「最强防护」开关；`OwnerHardening.release()` 会解除这批收紧项，
+  但**刻意不主动放开**已经施加的限制（避免「一关开关就把防护清空」这种反向惊喜）。
+- **`hardening_enabled` 目前没有 UI 入口**：`AgentStore.setHardeningEnabled(boolean)` 在整仓库里没有调用者，主界面只有 `@+id/textHardening` 这个 TextView。也就是说「关掉管控加固」这条家长逃生通道在代码层（拦截只在加固开启时生效）是成立的，但家长**在设备上点不到**；本轮是 root 改 prefs + 重启进程验证的。接 UI 或家长端开关之前，不要对外宣称「家长可以随时关掉加固」。
+- **无障碍被关掉这一条堵不死**：设备所有者可以「允许哪些无障碍服务」，但没有 API 能**强制开启**一个服务
+  （实测被 `Permission denial` 拒绝）。与其在文档里写「已加固」，不如老实做三件事：检测（常驻巡检 +
+  `onUnbind` 一次性信号）、上报（`tamper` 事件，家长端可见）、兜底（悬浮窗 + Kiosk 其余手段）。
+  这也意味着家长端必须**有人看告警**，否则这段时间的绕过不会被发现。
 
 ---
 
@@ -997,13 +1282,14 @@ android/
 | 环节 | 类 | 说明 |
 | --- | --- | --- |
 | 前台应用 | `ForegroundAppTracker` | 记录当前前台包名，给每张截图标注来源 |
-| 采样 | `ScreenSampler` | 复用 `ScreenCapturer` 的**常驻 MediaProjection**（不重复弹授权框），按 `captureIntervalSeconds` 截一张 |
+| 采样 | `ScreenSampler` | 按 `captureIntervalSeconds` 截一张，走 `ScreenCapturer.captureScreenshotLowRes()` —— **优先无障碍免授权路径**，拿不到才回退常驻 MediaProjection（见 10.5） |
 | 压缩 | `ScreenCapturer.captureScreenshotLowRes()` | 长边 ≤ 480px + JPEG q=45，单张约 15–30 KB |
 | 打包 | `FrameBatchArchiver` | 攒够 `framesPerBatch`（默认 10）张打成 zip：`frames/*.jpg` + `manifest.json`（时间、包名、序号）。**stored 模式**——JPEG 已经压过了，再 deflate 纯属浪费电 |
 | 上传 | `FrameBatchUploader` | `POST /api/agent/screen-batches`，失败按 5s/15s/60s 退避重试 |
 | 磁盘保护 | `ScreenSampler` | 目录超过 50 MB 或 200 张时丢弃最旧的；上传成功后立即删除 |
 
 授权失效（Android 14 每次新会话都要重新授权）时记日志并在设置页提示，**不静默失败**。
+这条只影响 MediaProjection 兜底路径 —— 无障碍路径（10.5）不需要任何授权。
 
 #### 锁定期间不采样、也不申请授权
 
@@ -1034,3 +1320,89 @@ android/
   `status: 'skipped'`）或 `heuristic`（纯本地规则：只能从包名和时间推断，
   **明确不是 AI**，也**判断不了「结算画面是否出现」「这一局是否打完」**）。
 - **不做跨账号聚合**，不用于营销。
+
+### 10.5 截图的两条路径：无障碍免授权优先，MediaProjection 兜底
+
+「远程截图」与「周期采样」共用 `ScreenCapturer`，它按顺序试两条路：
+
+| 顺序 | 路径 | 前提 | 要不要人点弹框 |
+| --- | --- | --- | --- |
+| 1 | `AccessibilityScreenCapture`（`AccessibilityService.takeScreenshot`） | API ≥ 30 **且**无障碍服务在跑 | **不要** |
+| 2 | `MediaProjection`（常驻投影 + `ImageReader`） | 孩子设备上点过一次系统授权框 | 要（授权被回收后每次都要） |
+
+为什么把无障碍放到第一位：MediaProjection 的授权框是**孩子设备上的系统弹框**
+「Start recording or casting with 气球狗守护?」。家长在千里之外按「截图」，那头没人点，
+20 秒后只能报失败 —— 等于这个功能不可用。无障碍截图不需要任何授权，
+实测 1080×2340 全屏出图约 130–280 ms。
+
+`android/app/src/main/res/xml/accessibility_watchdog.xml` 里的
+`android:canTakeScreenshot="true"` 就是这条路径的开关：它让系统在 `dumpsys accessibility`
+的 `capabilities` 里加上 `CAPABILITY_CAN_TAKE_SCREENSHOT`（值 **128**，可直接用来验收；
+加上原有的 `FEEDBACK_GENERIC`(1) 后应显示 **129**）。
+
+**怎么知道「现在」走的是哪条路**（这次修复前最查不清的一件事）：`ScreenCapturer.lastCapturePath()`
+记录最近一次**实际走通**的路径；周期采样还会往应用内日志记一行
+`周期采样截图走无障碍免授权路径（不需要点系统弹框）` /
+`周期采样截图回退到屏幕共享授权路径（无障碍截图不可用）`，时机是三者之一：**路径变了**、
+**采样刚恢复**（家长刚打开开关 / 服务刚重启）、或**距上次记录满 60 秒**（心跳）。采样是 10 秒一张的
+持续行为，**不能逐张打成功日志**（应用内日志环只有最近 200 条，会被刷屏，见 `quiet` 参数）；
+留一条 60 秒心跳是为了让「此刻走的是免授权」在任何时刻都能被观测到 —— 只按前两个时机记，
+日志会整段窗口一条都没有。`android/scripts/e2e-gaps.mjs` 第 10 节就是断言这一行
+（它先读 `pref bool capture_enabled=true`，再清空 logcat、轮询这条日志）。
+
+**诚实边界**（都是实测踩到的，不是推测）：
+
+- **必须无障碍服务在跑**。关掉无障碍开关就退回要点弹框的 MediaProjection，
+  而那条路没人点时一定失败。开不开由家长在系统设置里决定，应用不能自己开。
+- **API 30 以下不可用**（`minSdk 24`）。`Build.VERSION.SDK_INT < R` 时能力类直接返回 `null`
+  交给上层回退，不抛异常。
+- **装完更新后要重开一次无障碍开关**。如果无障碍服务在安装 APK 之前就开着，装包会把它杀掉
+  并在系统里记成 `Crashed services`；此后 `takeScreenshot` 会一直回错误码 1（内部错误），
+  截图静默退化到 MediaProjection。重写一次
+  `settings put secure enabled_accessibility_services` 即可恢复。
+  **这是系统的行为、不是本工程的缺陷，但用户看到的就是「更新完截图就不好用了」。**
+- **MediaProjection 兜底路径会拍到自己**：黑底的 `ProjectionConsentActivity` 或系统授权框
+  会被截进图里，家长看到的是黑图或授权框，而不是孩子的屏幕（实测抓到过这两种图）。
+  无障碍路径没有这个问题。
+- **无障碍路径在锁定态也能截图**，MediaProjection 路径不行（锁定期间刻意拒绝申请授权，
+  免得授权页盖住锁定页）。对家长来说这反而是好事。
+- **`OPSTR_PROJECT_MEDIA` 在 API 33 的公开 SDK 里没有导出**，代码里用字面量
+  `"android:project_media"`（与 `adb shell appops get` 打印的标识一致）。
+
+两条路径的实测数据（Android 13 模拟器 / arm64）：
+
+```
+无障碍开 + appop 任意     → succeeded，68469 B，日志「已通过无障碍接口截屏（免授权），66 KB」，授权框 0 次
+无障碍关 + appop=allow    → succeeded，129669 B，走 MediaProjection，授权页出现后 ~700ms 被系统自动放行
+无障碍关 + appop=ignore   → 授权框照样弹（点了就成功）；不点则 20s 超时，报错会点名 AppOps 与放行命令
+```
+
+> 与常见说法不同的实测结论：`appops get ... PROJECT_MEDIA` 显示 `ignore` **并不等于**
+> 「系统从此不再弹授权框、截图永久失败」。本机实测 `ignore` 下授权框照常出现、点「Start now」
+> 就成功。`ignore` 只是「上一次授权被划掉/超时」留下的记录。
+> 因此代码里的报错措辞是「屏幕共享授权没拿到（AppOps …）… 请在设备上点「立即开始」，
+> 或让家长在设置里重新授权」，没有断言「再也不会弹框」。
+
+端到端验收的三个落点是 `MediaAsset.kind='screenshot'`（家长要的那张图）、
+`MediaAsset.kind='video'`（录像）与 `ScreenFrame` / `GET /api/insights`（周期采样）。
+`npm run android:e2e:gaps` 里有三节专门盯它们：
+
+- 「8. 屏幕截图」：**先关掉「屏幕洞察」**再下发截图（回归「截图被错挂在 screenMonitor 上」这个门禁缺陷），
+  断言无障碍服务声明了 `CAPABILITY_CAN_TAKE_SCREENSHOT`、指令 `succeeded`、日志命中
+  「已通过无障碍接口截屏（免授权）」且**不**出现「等待屏幕共享授权超时」、全程没有
+  `MediaProjectionPermissionActivity`、媒体列表出现新行、文件可下载且首两字节是 JPEG（`FFD8`）。
+- 「9. 连续录像」（它只能走 MediaProjection）：断言 start/stop 都成功、媒体列表出现新录像、
+  文件可下载且第 4~8 字节是 MP4 的 `ftyp`。这一节会先 `appops set … PROJECT_MEDIA allow`，
+  与上面 provisioning 的做法一致 —— 否则测的是「没 provisioning 过」而不是录像本身。
+- 「10. 屏幕洞察周期采样」：把间隔/批量压到 schema 下限（10 秒 / 2 张）后，等设备端
+  `已上传截屏包`，并断言采样同样走无障碍免授权路径、没有 `采样截图失败`、没有授权页，
+  最后以 `GET /api/insights` 出现新洞察作为链路走通的终端证据。
+
+一节一节的实测数字（2026-10-11 全量跑，`EXIT_GAPS=0`）：整轮 **131 项通过 / 0 项失败 /
+2 项跳过**，其中第 8 节 9 项、第 9 节 7 项、第 10 节 8 项全绿（跳过的是两处设备级无法断言的：
+DNS 层实际拦截效果、局数预算的离线兜底锁屏）。跑测凭据 —— APK `app-debug.apk` md5
+`7c65b24b28e034b26250621dbc5a36fb`（11022834 字节）、`android/scripts/e2e-gaps.mjs` md5
+`6551098b84a72dac572360e88f25fe9a`（2221 行）、`git status --porcelain -- android` 指纹
+`1764100902f6cfee5cd35652e985b9cd4b5eddbf`（跑前跑后一致，说明这一轮的结论没有被别人中途改代码污染）。
+跑测之后只给 `android/scripts/e2e-gaps.mjs` 第 1813 行那条注释补了「60 秒心跳」四个字（无逻辑差异，
+md5 现为 `6797fa5bd59f01315e5061f412e1682b`），跑测版本的原文快照留在 `/tmp/e2e-gaps.snapshot.mjs`。

@@ -147,6 +147,11 @@ export const authService = {
     return { url: wechat.buildOAuthUrl(state, redirectAfter) };
   },
 
+  /** 网页 JS-SDK 的 config 签名（家长端「扫一扫」用）。 */
+  wechatJsapiSignature(url: string) {
+    return wechat.jsapiSignature(url);
+  },
+
   /** 本地联调：模拟扫码授权（未配置真实微信时才允许）。 */
   async devWechatScan(state: string): Promise<void> {
     wechat.assertMockScanAllowed();

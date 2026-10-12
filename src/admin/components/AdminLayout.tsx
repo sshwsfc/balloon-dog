@@ -16,6 +16,7 @@ import {
   Users,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { BrandLogo } from '@/components/BrandLogo'
 import { useAdminAuth } from '../context/AdminAuthContext'
 import { cn } from '@/lib/utils'
 
@@ -60,9 +61,7 @@ export default function AdminLayout() {
   const sidebar = (
     <div className="flex h-full flex-col">
       <div className="flex h-16 shrink-0 items-center gap-2.5 border-b border-border px-5">
-        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-[#07c160] to-[#06a050] text-lg">
-          🐕
-        </div>
+        <BrandLogo className="h-9 w-9 rounded-xl" />
         <div className="leading-tight">
           <div className="text-sm font-semibold text-foreground">气球狗</div>
           <div className="text-xs text-muted-foreground">管理后台</div>

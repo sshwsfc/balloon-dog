@@ -1,0 +1,17 @@
+<!--
+  气球狗品牌标识（favicon / apple-touch-icon 用）。
+  ★画稿与 React 组件 src/components/BrandLogo.tsx、以及孩子端启动图标
+    android/app/src/main/res/drawable/ic_launcher.xml 三处保持一致，改一处要同步另两处。
+  这里比组件多一个 rx：网页图标没有 CSS 可用，圆角只能画在 SVG 里
+  （孩子端的圆角由 Android 的启动图标遮罩产生，同样不是画在矢量里的）。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108" role="img" aria-label="气球狗">
+  <rect width="108" height="108" rx="18" fill="#07C160" />
+  <path fill="#FFFFFF" d="M54,16 L86,29 V53 C86,72 72,87 54,93 C36,87 22,72 22,53 V29 Z" />
+  <g fill="#07C160">
+    <path d="M54,38 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0" />
+    <path d="M41,47 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+    <path d="M67,47 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+    <path d="M54,52 C46,52 41,58 41,64 C41,70 47,73 54,73 C61,73 67,70 67,64 C67,58 62,52 54,52 Z" />
+  </g>
+</svg>

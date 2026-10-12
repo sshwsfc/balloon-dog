@@ -536,16 +536,26 @@ export const devicesService = {
     type: 'remote_photo' | 'screenshot' | 'start_recording' | 'start_audio',
     payload: Record<string, unknown> = {},
   ) {
-    // 这些能力必须在设备上真实执行，因此要求对应功能开关已打开
-    const featureKey =
-      type === 'remote_photo'
-        ? 'remotePhoto'
-        : type === 'screenshot'
-          ? 'screenMonitor'
+    // 拍照 / 录像 / 录音各自有对应的家长开关，必须在设备上真实执行，所以要求开关已打开。
+    //
+    // `screenshot` 刻意**没有门禁**，原因有二：
+    // 1. FEATURE_DEFS 里根本没有「截图」这个开关。过去把它挂在 screenMonitor（屏幕洞察）
+    //    上是错的：屏幕洞察是「周期截屏 + AI 分析」的持续采集，而截图是家长按一次看一次的
+    //    即时动作。想截一张图先得打开一个会持续采集的功能，本身就是更严重的隐私问题；
+    //    而且报错是「请先开启「屏幕洞察」功能」，家长拿着一个跟截图毫不相干的名字找不到北。
+    // 2. 能不能截到取决于孩子端的能力（无障碍服务是否在运行、系统是否 ≥ API 30，见
+    //    android/app/src/main/java/com/balloondog/agent/capability/AccessibilityScreenCapture.java），
+    //    服务端凭空编一个开关既管不住设备，也只是多一道假门禁。截不到时由设备端回报真实原因，
+    //    落在 DeviceCommand.error 上给家长看。
+    if (type !== 'screenshot') {
+      const featureKey =
+        type === 'remote_photo'
+          ? 'remotePhoto'
           : type === 'start_recording'
             ? 'videoRecord'
             : 'remoteRecord';
-    await requireFeatureEnabled(device.id, featureKey);
+      await requireFeatureEnabled(device.id, featureKey);
+    }
 
     return dispatchCommand(device, userId, type, payload, {});
   },

@@ -2,6 +2,64 @@ plugins {
     id 'com.android.application'
 }
 
+// ---------------------------------------------------------------------------
+// 孩子端内置的后端地址（BuildConfig.DEFAULT_BASE_URL）
+//
+// 两个构建类型取不同的值，这是有意的：
+//
+//   debug   → 固定 10.0.2.2:4000（模拟器访问宿主机 localhost 的别名），
+//             所以 android/scripts/e2e-*.mjs 那几套套件不需要任何额外配置 ——
+//             它们会 `adb install -r -g` 并清掉 shared_prefs，设备必然回落到
+//             这个编译期默认值，一旦把它改成线上地址，套件就会去连线上数据库。
+//
+//   release → 取仓库根目录 .env 里的 VITE_SERVER_URL（与家长端二维码、家长端
+//             页面同源），这样 `npm run android:copy-apk` 发布到 public/download/
+//             的包，装到孩子手机上天然就连着线上后端，不会出现「家长端连线上、
+//             孩子端连本机」这种最难查的对不上。
+//
+// 两者都可以用 -Pballoon.serverUrl=https://xxx 或环境变量 BALLOON_SERVER_URL
+// 临时覆盖（真机联调 debug 包时用得上）。
+// ---------------------------------------------------------------------------
+
+/** 模拟器访问宿主机 localhost 的别名。 */
+def LOCAL_AGENT_BASE_URL = 'http://10.0.2.2:4000'
+
+/**
+ * 从仓库根目录的 .env 里读 VITE_SERVER_URL。
+ *
+ * 不用 dotenv 插件：项目里只有这一个变量，多引一个 Gradle 插件不划算。
+ * 正则兼容 `KEY=value` / `KEY = "value"` / 行尾注释，取不到就返回 null。
+ */
+def readEnvFileServerUrl = {
+    def envFile = rootProject.file('../.env')
+    if (!envFile.exists()) {
+        return null
+    }
+    def matcher = envFile.text =~ /(?m)^\s*VITE_SERVER_URL\s*=\s*(.+?)\s*$/
+    if (!matcher.find()) {
+        return null
+    }
+    return matcher.group(1).replaceAll(/^["']|["']$/, '').trim()
+}
+
+/** 统一成「不带 /api 的基址」，再补上 /api（AgentStore.normalizeBaseUrl 也是这个规则）。 */
+def toApiBase = { String raw ->
+    def url = (raw ?: '').trim().replaceAll(/\/+$/, '')
+    if (url.isEmpty()) {
+        return null
+    }
+    return url.endsWith('/api') ? url : url + '/api'
+}
+
+/** 显式覆盖优先：-Pballoon.serverUrl=… > BALLOON_SERVER_URL 环境变量。 */
+def overrideUrl =
+        toApiBase(project.findProperty('balloon.serverUrl')?.toString() ?: System.getenv('BALLOON_SERVER_URL'))
+def debugBaseUrl = toApiBase(overrideUrl ?: LOCAL_AGENT_BASE_URL)
+def releaseBaseUrl = toApiBase(overrideUrl ?: readEnvFileServerUrl() ?: LOCAL_AGENT_BASE_URL)
+
+// 打出来，免得「以为读到了 .env 其实没有」这种静默失败
+println "[balloon] 孩子端默认服务器地址： debug=${debugBaseUrl}  release=${releaseBaseUrl}"
+
 android {
     namespace 'com.balloondog.agent'
 
@@ -43,11 +101,15 @@ android {
         debug {
             minifyEnabled false
             signingConfig signingConfigs.debug
+            // 模拟器/真机联调用，连本机后端
+            buildConfigField 'String', 'DEFAULT_BASE_URL', "\"${debugBaseUrl}\""
         }
         release {
             minifyEnabled false
             signingConfig signingConfigs.debug
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // 对外发布的包，连 .env 里配的公网后端
+            buildConfigField 'String', 'DEFAULT_BASE_URL', "\"${releaseBaseUrl}\""
         }
     }
 
@@ -81,4 +143,8 @@ dependencies {
     implementation 'androidx.core:core:1.10.1'
     // OkHttp：长轮询（读超时需大于 wait 秒）、multipart 上传、连接复用都由它兜住
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    // ZXing core：只用来「生成」绑定码二维码，让家长端扫码代替手输那 8 位码。
+    // 刻意只引 core —— zxing-android-embedded 会一并带进相机预览/解码那一整套，
+    // 而本机只需要把一串文本编码成位图，不需要扫任何码。
+    implementation 'com.google.zxing:core:3.5.3'
 }

@@ -5,6 +5,7 @@ import { ProfilePage } from './pages/ProfilePage'
 import { QuizUnlockPage } from './pages/QuizUnlockPage'
 import { SchedulePage } from './pages/SchedulePage'
 import { LoginPage } from './pages/LoginPage'
+import { OnboardingPage } from './pages/OnboardingPage'
 import { DeviceManagePage } from './pages/DeviceManagePage'
 import { MediaPage } from './pages/MediaPage'
 import { InsightsPage } from './pages/InsightsPage'
@@ -21,13 +22,16 @@ import { BottomNav, SIDEBAR_WIDTH_CLASS } from './components/BottomNav'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Toaster } from 'sonner'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { DeviceProvider, RequireDevice } from './contexts/DeviceContext'
+import { useTranslation } from 'react-i18next'
 
 function LoadingScreen() {
+  const { t } = useTranslation()
   return (
     <div className="min-h-screen bg-gray-100 flex items-center justify-center">
       <div className="text-center">
         <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#07c160]" />
-        <p className="mt-2 text-gray-500 text-sm">加载中...</p>
+        <p className="mt-2 text-gray-500 text-sm">{t('加载中...')}</p>
       </div>
     </div>
   )
@@ -49,17 +53,32 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 function AppShell() {
   const location = useLocation()
   const { user } = useAuth()
+  // 订阅语言变化。页面上有一批**模块级**工具函数（formatDateTime / kindLabel 之类）
+  // 用的是 i18n 实例的 tt()，它们不会自己触发重渲染；这里让整棵树重渲一次，
+  // 那些函数随之用新语言重新求值。切勿删掉这个调用。
+  useTranslation()
   // 登录页、答题页都是沉浸式页面，不显示底部导航
-  const hideNavPaths = ['/login', '/quiz-unlock', '/media']
+  // 引导页是全屏的任务流，不该出现底部导航把「下一步」挤掉
+  const hideNavPaths = ['/login', '/quiz-unlock', '/media', '/onboarding']
   const showNav = Boolean(user) && !hideNavPaths.includes(location.pathname)
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    // `.has-nav` 是给固定定位浮层用的（见 FeatureTip）：它们要知道当前有没有导航，
+    // 才能决定是「抬到导航之上、让出侧栏」还是「贴底居中」。
+    <div className={`min-h-screen bg-gray-100${showNav ? ' has-nav' : ''}`}>
       {/* 宽屏下底部导航变成左侧栏，主内容要让出侧栏的宽度。
           只在「确实有导航」时让位，否则登录页/沉浸式页面会平白缩进一条。 */}
       <div className={showNav ? SIDEBAR_WIDTH_CLASS : undefined}>
         <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/onboarding"
+          element={
+            <ProtectedRoute>
+              <OnboardingPage />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="/"
           element={
@@ -72,7 +91,9 @@ function AppShell() {
           path="/location"
           element={
             <ProtectedRoute>
-              <LocationPage />
+              <RequireDevice>
+                <LocationPage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -88,7 +109,9 @@ function AppShell() {
           path="/quiz-unlock"
           element={
             <ProtectedRoute>
-              <QuizUnlockPage />
+              <RequireDevice>
+                <QuizUnlockPage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -104,7 +127,9 @@ function AppShell() {
           path="/media"
           element={
             <ProtectedRoute>
-              <MediaPage />
+              <RequireDevice>
+                <MediaPage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -112,7 +137,9 @@ function AppShell() {
           path="/schedule"
           element={
             <ProtectedRoute>
-              <SchedulePage />
+              <RequireDevice>
+                <SchedulePage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -120,7 +147,9 @@ function AppShell() {
           path="/insights"
           element={
             <ProtectedRoute>
-              <InsightsPage />
+              <RequireDevice>
+                <InsightsPage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -129,7 +158,9 @@ function AppShell() {
           path="/mode"
           element={
             <ProtectedRoute>
-              <ModePage />
+              <RequireDevice>
+                <ModePage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -137,7 +168,9 @@ function AppShell() {
           path="/mode/schedule"
           element={
             <ProtectedRoute>
-              <ModeSchedulePage />
+              <RequireDevice>
+                <ModeSchedulePage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -145,7 +178,9 @@ function AppShell() {
           path="/mode/apps"
           element={
             <ProtectedRoute>
-              <ModeAppsPage />
+              <RequireDevice>
+                <ModeAppsPage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -153,7 +188,9 @@ function AppShell() {
           path="/eye-care"
           element={
             <ProtectedRoute>
-              <EyeCarePage />
+              <RequireDevice>
+                <EyeCarePage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -162,7 +199,9 @@ function AppShell() {
           path="/app-plugins"
           element={
             <ProtectedRoute>
-              <AppPluginsPage />
+              <RequireDevice>
+                <AppPluginsPage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -170,7 +209,9 @@ function AppShell() {
           path="/app-plugins/:packageName"
           element={
             <ProtectedRoute>
-              <AppPluginDetailPage />
+              <RequireDevice>
+                <AppPluginDetailPage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -178,7 +219,9 @@ function AppShell() {
           path="/app-audit"
           element={
             <ProtectedRoute>
-              <AppAuditPage />
+              <RequireDevice>
+                <AppAuditPage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -187,7 +230,9 @@ function AppShell() {
           path="/call-sms"
           element={
             <ProtectedRoute>
-              <CallSmsPage />
+              <RequireDevice>
+                <CallSmsPage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -196,7 +241,9 @@ function AppShell() {
           path="/remote-help"
           element={
             <ProtectedRoute>
-              <RemoteHelpPage />
+              <RequireDevice>
+                <RemoteHelpPage />
+            </RequireDevice>
             </ProtectedRoute>
           }
         />
@@ -213,9 +260,11 @@ function App() {
   return (
     <ErrorBoundary>
       <AuthProvider>
-        <BrowserRouter>
-          <AppShell />
-        </BrowserRouter>
+        <DeviceProvider>
+          <BrowserRouter>
+            <AppShell />
+          </BrowserRouter>
+        </DeviceProvider>
       </AuthProvider>
     </ErrorBoundary>
   )

@@ -40,6 +40,9 @@ router.post('/logout', ah(controller.logout));
 router.get('/wechat/qr', ah(controller.wechatQr));
 router.get('/wechat/state', ah(controller.wechatState));
 router.get('/wechat/authorize-url', ah(controller.wechatAuthorizeUrl));
+// 扫一扫签名：只读且带进程内缓存（access_token/jsapi_ticket 各缓存 2 小时），
+// 不挂 authLimiter —— 家长点了扫一扫才调一次，挂在限流后面反而会误伤。
+router.get('/wechat/jsapi-signature', ah(controller.wechatJsapiSignature));
 router.post('/wechat/dev-scan', authLimiter, ah(controller.wechatDevScan));
 router.get('/wechat/callback', ah(controller.wechatCallback));
 

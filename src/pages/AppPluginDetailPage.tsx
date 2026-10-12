@@ -4,10 +4,12 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ToggleSwitch } from '@/components/ToggleSwitch'
+import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
 import { toast } from 'sonner'
-import { AlertTriangle, ArrowLeft, Info, Loader2, Puzzle, RefreshCw, XCircle, CheckCircle2 } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Info, Loader2, Puzzle, XCircle, CheckCircle2 } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
 import type { AppPluginCategory, AppPluginTarget, AppPluginUpdateItem } from '@/types'
+import { useTranslation } from 'react-i18next'
 
 /** 分类展示顺序与中文名；与后端目录里的 category 取值一一对应 */
 const CATEGORY_ORDER: AppPluginCategory[] = [
@@ -31,6 +33,7 @@ const CATEGORY_LABEL: Record<AppPluginCategory, string> = {
 }
 
 export function AppPluginDetailPage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const params = useParams<{ packageName: string }>()
 
@@ -56,14 +59,14 @@ export function AppPluginDetailPage() {
         setTargets(data.targets ?? [])
         setError(null)
       } catch (err) {
-        const message = toUserMessage(err, '加载插件清单失败')
+        const message = toUserMessage(err, t('加载插件清单失败'))
         setError(message)
         if (!options?.silent) toast.error(message)
       } finally {
         setLoading(false)
       }
     },
-    [],
+    [t],
   )
 
   useEffect(() => {
@@ -84,7 +87,7 @@ export function AppPluginDetailPage() {
       setTargets(result.targets ?? [])
       toast.success(successText)
     } catch (err) {
-      toast.error(toUserMessage(err, '保存失败，请稍后重试'))
+      toast.error(toUserMessage(err, t('保存失败，请稍后重试')))
       console.error('保存插件开关失败：', err)
     } finally {
       setBusyKey(null)
@@ -95,7 +98,7 @@ export function AppPluginDetailPage() {
     if (!target) return
     await applyItems(
       [{ packageName: target.packageName, pluginKey, enabled }],
-      enabled ? '已允许该功能' : '已关闭该功能',
+      enabled ? t('已允许') : t('已关闭'),
       pluginKey,
     )
   }
@@ -109,7 +112,7 @@ export function AppPluginDetailPage() {
     }))
     await applyItems(
       items,
-      enabled ? `已全部允许（${items.length} 项）` : `已全部关闭（${items.length} 项）`,
+      enabled ? t('已全部允许（{{v0}} 项）', { v0: items.length }) : t('已全部关闭（{{v0}} 项）', { v0: items.length }),
       enabled ? 'bulk-on' : 'bulk-off',
     )
   }
@@ -119,7 +122,7 @@ export function AppPluginDetailPage() {
       <div className="page-shell page-shell--wide page-shell--center">
         <div className="text-center">
           <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#07c160]" />
-          <p className="mt-2 text-gray-500 text-sm">加载中...</p>
+          <p className="mt-2 text-gray-500 text-sm">{t('加载中...')}</p>
         </div>
       </div>
     )
@@ -132,7 +135,7 @@ export function AppPluginDetailPage() {
           <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
             <ArrowLeft className="w-5 h-5" />
           </Button>
-          <h1 className="text-xl font-medium text-gray-900 flex-1">插件清单</h1>
+          <h1 className="text-xl font-medium text-gray-900 flex-1">{t('插件清单')}</h1>
         </div>
         <div className="px-6 py-20 text-center">
           <Puzzle className="w-12 h-12 text-gray-300 mx-auto mb-3" />
@@ -144,7 +147,7 @@ export function AppPluginDetailPage() {
               void loadData()
             }}
           >
-            重新加载
+            {t('重新加载')}
           </Button>
         </div>
       </div>
@@ -159,17 +162,17 @@ export function AppPluginDetailPage() {
           <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
             <ArrowLeft className="w-5 h-5" />
           </Button>
-          <h1 className="text-xl font-medium text-gray-900 flex-1">插件清单</h1>
+          <h1 className="text-xl font-medium text-gray-900 flex-1">{t('插件清单')}</h1>
         </div>
         <div className="px-6 py-20 text-center">
           <Puzzle className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-          <p className="text-gray-700 font-medium">插件目录里没有这个应用</p>
-          <p className="text-sm text-gray-500 mt-2 break-all">{packageName || '（缺少包名）'}</p>
+          <p className="text-gray-700 font-medium">{t('插件目录里没有这个应用')}</p>
+          <p className="text-sm text-gray-500 mt-2 break-all">{packageName || t('（缺少包名）')}</p>
           <p className="text-xs text-gray-400 mt-2 leading-relaxed">
-            可管控的应用目录由服务端维护（微信、QQ、抖音、应用商店、浏览器与跨应用支付）。
+            {t('可管控的应用由服务端维护（微信、QQ、抖音、应用商店、浏览器与跨应用支付）。')}
           </p>
           <Button className="mt-4 bg-[#07c160] hover:bg-[#06a050]" onClick={() => navigate('/app-plugins')}>
-            返回插件管理
+            {t('返回插件管理')}
           </Button>
         </div>
       </div>
@@ -187,14 +190,7 @@ export function AppPluginDetailPage() {
           <ArrowLeft className="w-5 h-5" />
         </Button>
         <h1 className="text-xl font-medium text-gray-900 flex-1 truncate">{target.appName}</h1>
-        <button
-          type="button"
-          onClick={() => void loadData({ silent: true })}
-          className="text-gray-400 p-1"
-          aria-label="刷新"
-        >
-          <RefreshCw className="w-5 h-5" />
-        </button>
+        <HeaderRefreshButton onRefresh={() => loadData({ silent: true })} />
       </div>
 
       {/* ---------------- 概览 ---------------- */}
@@ -210,7 +206,7 @@ export function AppPluginDetailPage() {
                 <div className="text-[11px] text-gray-400 truncate mt-0.5">{target.packageName}</div>
               </div>
               <Badge className="bg-red-50 text-red-600 flex-shrink-0">
-                已关闭 {target.blocked} / 共 {target.total}
+                {t('已关闭')} {target.blocked}{t('/ 共')}{target.total}
               </Badge>
             </div>
 
@@ -227,7 +223,7 @@ export function AppPluginDetailPage() {
                 ) : (
                   <XCircle className="w-3.5 h-3.5 mr-1" />
                 )}
-                全部关闭
+                {t('全部关闭')}
               </Button>
               <Button
                 size="sm"
@@ -241,7 +237,7 @@ export function AppPluginDetailPage() {
                 ) : (
                   <CheckCircle2 className="w-3.5 h-3.5 mr-1" />
                 )}
-                全部允许
+                {t('全部允许')}
               </Button>
             </div>
           </CardContent>
@@ -258,7 +254,7 @@ export function AppPluginDetailPage() {
               className="text-xs text-[#07c160] flex-shrink-0"
               onClick={() => void loadData({ silent: true })}
             >
-              重试
+              {t('重试')}
             </button>
           </div>
         </div>
@@ -271,9 +267,9 @@ export function AppPluginDetailPage() {
         return (
           <div key={category} className="px-3 mt-3">
             <div className="mb-2 px-1 flex items-center justify-between">
-              <span className="text-sm font-medium text-gray-500">{CATEGORY_LABEL[category]}</span>
+              <span className="text-sm font-medium text-gray-500">{t(CATEGORY_LABEL[category])}</span>
               <span className="text-xs text-gray-400">
-                {plugins.filter((plugin) => !plugin.enabled).length} / {plugins.length} 已关闭
+                {plugins.filter((plugin) => !plugin.enabled).length} / {plugins.length} {t('已关闭')}
               </span>
             </div>
             <Card className="overflow-hidden">
@@ -283,25 +279,25 @@ export function AppPluginDetailPage() {
                     <div className="flex items-center py-3 px-4">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center space-x-1.5 min-w-0">
-                          <span className="text-sm text-gray-900 truncate">{plugin.label}</span>
+                          <span className="text-sm text-gray-900 truncate">{t(plugin.label)}</span>
                           {plugin.customized && (
                             <Badge className="bg-blue-50 text-blue-600 text-[10px] flex-shrink-0">
-                              已自定义
+                              {t('已自定义')}
                             </Badge>
                           )}
                           {!plugin.enabled && (
-                            <Badge className="bg-red-50 text-red-600 text-[10px] flex-shrink-0">已关闭</Badge>
+                            <Badge className="bg-red-50 text-red-600 text-[10px] flex-shrink-0">{t('已关闭')}</Badge>
                           )}
                         </div>
                         <div className="text-[11px] text-gray-400 mt-0.5">
-                          {plugin.enabled ? '允许使用' : '命中即拦截'}
+                          {plugin.enabled ? t('允许使用') : t('命中即拦截')}
                         </div>
                       </div>
                       <ToggleSwitch
                         checked={plugin.enabled}
                         busy={busyKey === plugin.key}
                         disabled={busyKey !== null}
-                        label={`${plugin.label}开关`}
+                        label={t('{{v0}}开关', { v0: plugin.label })}
                         onChange={() => void handleTogglePlugin(plugin.key, !plugin.enabled)}
                       />
                     </div>
@@ -319,13 +315,10 @@ export function AppPluginDetailPage() {
           <div className="flex items-start space-x-2">
             <Info className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
             <div className="text-xs text-gray-500 leading-relaxed space-y-1">
-              <p className="font-medium text-gray-700">这些开关的边界</p>
-              <p>· 默认全部放行：产品升级新增插件时不会突然拦住孩子正常在用的功能。</p>
-              <p>
-                · 拦截靠孩子设备上的无障碍服务按界面文案匹配，应用改版可能漏拦；
-                WebView 与游戏画布里的内容看不见。
-              </p>
-              <p>· 改动会随设备端配置刷新（≤15 秒）生效，设备离线时等它上线后生效。</p>
+              <p className="font-medium text-gray-700">{t('这些开关的边界')}</p>
+              <p>{t('· 默认全部放行：新增插件不会突然拦住孩子在用的功能。')}</p>
+              <p>{t('· 拦截靠孩子端无障碍服务匹配界面文案，应用改版可能漏拦；WebView 与游戏画布里的内容看不见。')}</p>
+              <p>{t('· 改动随设备端配置刷新（≤15 秒）生效；设备离线时等上线后生效。')}</p>
             </div>
           </div>
         </div>

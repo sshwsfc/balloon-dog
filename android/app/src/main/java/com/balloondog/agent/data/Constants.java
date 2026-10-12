@@ -1,5 +1,7 @@
 package com.balloondog.agent.data;
 
+import com.balloondog.agent.BuildConfig;
+
 /**
  * 全局常量：设备端协议里出现的字符串、默认值、SharedPreferences 键。
  *
@@ -50,13 +52,21 @@ public final class Constants {
     // ---------------- 默认服务端地址 ----------------
 
     /**
-     * 默认后端地址。
+     * 默认后端地址，构建期由 Gradle 烘焙进来（见 {@code android/app/build.gradle}）。
      *
-     * <p>10.0.2.2 是 Android 模拟器里访问宿主机 localhost 的固定别名 ——
-     * 后端跑在开发机的 4000 端口时，模拟器开箱即用。
-     * 真机请在「设置」里改成开发机的局域网地址，例如 http://192.168.1.10:4000/api。
+     * <p>两个构建类型取不同的值：
+     * <ul>
+     *   <li><b>debug</b> —— 固定 {@code http://10.0.2.2:4000/api}。10.0.2.2 是 Android
+     *       模拟器里访问宿主机 localhost 的固定别名，后端跑在开发机的 4000 端口时开箱即用，
+     *       自动化测试套件也依赖这个默认值。</li>
+     *   <li><b>release</b> —— 取仓库根目录 {@code .env} 里的 {@code VITE_SERVER_URL}
+     *       （与家长端页面、安装包二维码同源），所以发布出去的包装到孩子手机上直接就能连线上。</li>
+     * </ul>
+     *
+     * <p>用户仍然可以在 App 的「设置」里改成别的地址（存进 SharedPreferences 后优先于本值），
+     * 例如真机联调时填开发机的局域网地址 {@code http://192.168.1.10:4000/api}。
      */
-    public static final String DEFAULT_BASE_URL = "http://10.0.2.2:4000/api";
+    public static final String DEFAULT_BASE_URL = BuildConfig.DEFAULT_BASE_URL;
 
     // ---------------- 指令类型（与 devices.constants.ts 的 COMMAND_TYPES 对齐） ----------------
 
@@ -195,6 +205,15 @@ public final class Constants {
 
     /** 网址拦截命中（DNS 过滤）。让家长能看到「拦了哪个站」，而不是只看到一个开关。 */
     public static final String EVENT_WEB_BLOCKED = "web_blocked";
+
+    /**
+     * 管控被改动 / 被绕过（加固项失效、无障碍看门狗被关、VPN 授权被撤、电池白名单被取消…）。
+     *
+     * <p>服务端 {@code reportEventsSchema} 对 {@code type} 只做长度校验、没有枚举白名单
+     * （见 {@code server/src/features/mode/mode.dto.ts}），家长端对未知类型原样展示，
+     * 所以新增这个类型不会让上报 400。它的 {@code detail} 是一句完整的、可直接展示的中文。
+     */
+    public static final String EVENT_TAMPER = "tamper";
     /**
      * 设备加密存储（device-protected）里的偏好文件名。
      *

@@ -29,7 +29,11 @@ export const FEATURE_DEFS: FeatureDef[] = [
   { key: 'appPlugin', label: '功能管控', group: 'basic', defaultEnabled: false, description: '按应用关闭微信 / QQ 等具体功能' },
   // ---- 高级功能 ----
   { key: 'quizUnlock', label: '答题解锁', group: 'advanced', defaultEnabled: false, description: '通过答题获得使用时长' },
-  { key: 'screenMonitor', label: '同屏监控', group: 'advanced', defaultEnabled: false, description: '实时查看屏幕内容' },
+  // label 必须和家长端界面的名字一致：requireFeatureEnabled 的报错是
+  // 「请先开启「${label}」功能」，label 写成「同屏监控」而家长端到处写着「屏幕洞察」时，
+  // 家长会拿着一个界面上根本不存在的名字去找开关。产品上也确实没有实时投屏能力，
+  // 「同屏监控」是个名不副实的名字（见 docs/FEATURE-STATUS.md §3.9）。
+  { key: 'screenMonitor', label: '屏幕洞察', group: 'advanced', defaultEnabled: false, description: '按需抓取屏幕画面交给 AI 分析' },
   { key: 'remoteHelp', label: '远程协助', group: 'advanced', defaultEnabled: false, description: '远程操作帮助' },
   { key: 'callSms', label: '电话短信', group: 'advanced', defaultEnabled: false, description: '查看通话和短信' },
   { key: 'remotePhoto', label: '远程拍照', group: 'advanced', defaultEnabled: false, description: '远程拍摄照片' },

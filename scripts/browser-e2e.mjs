@@ -6,8 +6,10 @@
  * （用 Node 内置的 fetch 与 WebSocket 与 DevTools 协议通信）。
  *
  * 前置条件：
- *   1. 后端与前端都在跑：npm run dev:all
- *   2. 数据库已灌入演示数据：npm run db:seed
+ *   1. 前端在跑：npm run preview（2727，默认目标；先 npm run build）
+ *      或 npm run dev（5173，配合 APP_URL=http://localhost:5173）
+ *   2. 后端在跑：npm run server:dev
+ *   3. 数据库已灌入演示数据：npm run db:seed
  *
  * 运行：
  *   npm run e2e              # 两套都跑
@@ -15,7 +17,7 @@
  *   npm run e2e:admin        # 只跑管理后台
  *
  * 环境变量：
- *   APP_URL       前端地址，默认 http://localhost:5173
+ *   APP_URL       前端地址，默认 http://localhost:2727（见 vite.config.ts 的 PREVIEW_PORT）
  *   CHROME_PATH   Chrome 可执行文件路径（默认 macOS 上的 Google Chrome）
  *   ADMIN_USER / ADMIN_PASS / ADMIN_OPERATOR_PASS  后台账号（默认取种子数据）
  *
@@ -24,11 +26,14 @@
  * 表现为「CDP 连上几秒后 ECONNREFUSED」。脚本里已经加上这些 flag。
  */
 import { spawn } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const APP = process.env.APP_URL || 'http://localhost:5173'
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+const APP = process.env.APP_URL || 'http://localhost:2727'
 const CHROME =
   process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const DEBUG_PORT = Number(process.env.CDP_PORT || 9333)
@@ -43,6 +48,28 @@ const only = (process.argv.find((a) => a.startsWith('--only=')) || '').split('='
 const runParent = !only || only === 'parent'
 const runAdmin = !only || only === 'admin'
 const runResponsive = only === 'responsive'
+const runUx = only === 'ux'
+
+/**
+ * 种子数据里的中文串 —— 判定「英文界面还剩多少中文」时要把它们扣掉。
+ *
+ * 演示库中的设备昵称（`小明的小米手机`）、家长姓名（`张小明`）、安全区名与地址
+ * （`北京市朝阳区望京西园四区`、`学校`）都是**用户自己敲进去的内容**，真机上也会
+ * 是「爸爸的手机」这种中文，本来就不该被翻译。不扣掉的话，这个断言永远红着，
+ * 久了就没人看了。做法是从 server/prisma/seed.ts 里把所有中文串抽出来当白名单：
+ * 页面上出现的中文只要在种子数据里出现过，就算数据而不是漏翻的文案。
+ *
+ * 代价是「某条界面文案恰好和某个种子串一模一样」会被漏报，所以这份白名单
+ * **只用于这个检查**，不影响别的断言。
+ */
+function seedChineseRuns() {
+  try {
+    const seed = readFileSync(join(ROOT, 'server/prisma/seed.ts'), 'utf8')
+    return [...new Set(seed.match(/[\u4e00-\u9fff]{2,}/g) || [])]
+  } catch {
+    return []
+  }
+}
 
 // ============================================================
 // 断言与工具
@@ -52,6 +79,7 @@ const results = {
   parent: { pass: 0, fail: 0, failures: [] },
   admin: { pass: 0, fail: 0, failures: [] },
   responsive: { pass: 0, fail: 0, failures: [] },
+  ux: { pass: 0, fail: 0, failures: [] },
 }
 let suite = 'parent'
 
@@ -133,6 +161,30 @@ class CDP {
 
   async reload() {
     await this.send('Page.reload', {}, this.sessionId)
+  }
+
+  /**
+   * 轮询等待页面进入某个状态，而不是睡一个固定时长。
+   *
+   * 为什么要这样：SPA 的渲染 + 接口往返耗时是浮动的，机器一忙（比如刚跑完 build）
+   * 固定 sleep 就不够用 —— 断言会在页面还没渲染完时跑掉，报出「找不到内容」「导航
+   * 形态不对」这类**假失败**。轮询真实条件后，快的时候立刻通过、慢的时候肯等。
+   *
+   * 页面切换途中的求值异常（文档还没换过来）按「未就绪」处理，不往外抛。
+   */
+  async waitFor(expression, { timeout = 15_000, interval = 100 } = {}) {
+    const deadline = Date.now() + timeout
+    for (;;) {
+      let value
+      try {
+        value = await this.eval(expression)
+      } catch {
+        value = false
+      }
+      if (value) return { ok: true, value }
+      if (Date.now() >= deadline) return { ok: false, value }
+      await sleep(interval)
+    }
   }
 
   async shot(file) {
@@ -640,6 +692,22 @@ async function testAdmin(cdp) {
   await sleep(2800)
   text = await cdp.eval('document.body.innerText')
   check('家长账号列表显示演示账号', text.includes('张小明') || text.includes(PARENT_PHONE))
+  /*
+   * 再确认一次「搜得到」。上面那条依赖演示账号恰好落在第一页，而冒烟测试每跑一次
+   * 都会注册两个临时家长账号 —— 攒到几十个之后，按注册时间倒序的第一页就全是
+   * 「后台处置测试」，演示账号被挤到第二页，这条断言会无缘无故地红。
+   * 搜索路径不依赖分页顺序，和操作日志那节用的是同一个办法。
+   */
+  await cdp.fill('input[placeholder*="搜索手机号"]', PARENT_PHONE)
+  await sleep(2200)
+  const searched = await cdp.eval('document.body.innerText')
+  check(
+    '可按手机号搜到演示家长账号',
+    searched.includes(PARENT_PHONE),
+    searched.slice(0, 200).replace(/\n/g, ' | '),
+  )
+  await cdp.fill('input[placeholder*="搜索手机号"]', '')
+  await sleep(1200)
 
   await cdp.goto('/admin/questions')
   await sleep(2800)
@@ -765,10 +833,22 @@ const RESPONSIVE_ROUTES = [
   { path: '/quiz-unlock', wide: false, must: '答题', immersive: true },
   { path: '/devices', wide: false, must: '设备' },
   { path: '/media', wide: false, must: '', immersive: true },
+  // 新手引导同样是全屏任务流（刻意不给导航，避免「下一步」按钮被底部导航挤掉）。
+  // 它内容最长、步骤最多，是最容易在横屏 / 超宽屏下撑破布局的一页，必须纳入回归。
+  { path: '/onboarding', wide: false, must: '新手引导', immersive: true },
 ]
 
 /** 页头到 1024px 才出现侧栏，与 BottomNav 里的约定必须一致。 */
 const SIDEBAR_BREAKPOINT = 1024
+
+/**
+ * 「等页面就绪」的轮询上限。
+ *
+ * 正常情况下几百毫秒就满足，这个上限只在真的渲染失败时才走完 —— 所以调大几乎不花
+ * 时间，却能在慢机器 / 冷启动时少一批假失败。可用 `E2E_READY_TIMEOUT=2000`
+ * 临时调小，便于快速迭代调试（失败会更快暴露）。
+ */
+const READY_TIMEOUT = Number(process.env.E2E_READY_TIMEOUT || 10_000)
 
 /**
  * 找出横向溢出的元素。
@@ -889,10 +969,69 @@ async function testResponsive(cdp) {
     await sleep(400)
 
     for (const route of routes) {
-      await cdp.goto(route.path)
-      await sleep(vp.mobile ? 1400 : 1100)
-
       const label = `${vp.name} ${route.path}`
+      await cdp.goto(route.path)
+
+      /*
+       * 等页面真的渲染好，而不是睡一个固定时长。
+       *
+       * 之前这里是 `await sleep(vp.mobile ? 1400 : 1100)`：机器一忙（比如刚跑完
+       * build）这个时长就不够，断言会在页面还没渲染完时跑掉，报出「找不到内容 /
+       * 导航形态不对」这类**假失败**。
+       *
+       * 三个条件缺一不可，尤其是第一个：
+       *  - `location.pathname` 必须已经是目标路由 —— SPA 导航期间旧文档还在，
+       *    只等「导航出现」会被**上一页**的导航立刻满足，等于没等；
+       *  - `readyState === 'complete'`：文档与资源都加载完；
+       *  - 关键文案已经出现：证明 React 渲染过、接口也回来了。
+       */
+      const readyExpr = `(() => {
+        if (location.pathname !== ${JSON.stringify(route.path)}) return false;
+        if (document.readyState !== 'complete') return false;
+        const text = document.body ? document.body.innerText : '';
+        if (!text.trim()) return false;
+        return true${route.must ? ` && text.includes(${JSON.stringify(route.must)})` : ''};
+      })()`
+      const ready = await cdp.waitFor(readyExpr, { timeout: READY_TIMEOUT })
+      if (!ready.ok) {
+        // 这一页没渲染出来，后面几条断言只会跟着报同样的病，跳过以免淹掉真因。
+        // 失败时把当时实际观察到的状态一并带上，否则只看到「超时」根本没法查。
+        const diag = await cdp.eval(`(async () => {
+          const text = document.body ? document.body.innerText : '';
+          const info = {
+            pathname: location.pathname,
+            readyState: document.readyState,
+            textLen: text.length,
+            head: text.slice(0, 80).replace(/\\s+/g, ' '),
+          };
+          /*
+           * 被弹回登录页，绝大多数不是「真的没登录」，而是后端限流把
+           * /api/user/info 打成了 429（全局 RATE_LIMIT_MAX 按 IP 算）。
+           * 顺手探一下这个接口，把状态码带进报错里 —— 否则只能看到
+           * 「页面上找不到「设备」」这种和真因毫无关系的现象。
+           */
+          if (location.pathname === '/login') {
+            try {
+              const res = await fetch('/api/user/info');
+              info.probeStatus = res.status;
+            } catch (e) {
+              info.probeStatus = 'NETWORK_ERROR';
+            }
+          }
+          return info;
+        })()`).catch(() => null)
+        problems.push(
+          `${label} 等待就绪超时（要 pathname=${route.path}${route.must ? ` 且含「${route.must}」` : ''}，`
+          + `实得 ${JSON.stringify(diag)}）`
+          + (diag && diag.probeStatus === 429
+            ? '　← /api/user/info 返回 429：这是后端限流把登录态打掉了，'
+              + '不是页面坏了。请调大 server/.env 的 RATE_LIMIT_MAX（见 server/.env.example 的限流说明）。'
+            : ''),
+        )
+        continue
+      }
+      // 就绪后再让限宽 / 栅格的样式变更彻底回流，否则量到的宽度可能是中间态
+      await sleep(150)
 
       // 1) 不能有元素横向溢出视口
       const overflow = await cdp.eval(OVERFLOW_PROBE)
@@ -1046,6 +1185,514 @@ async function testResponsive(cdp) {
   }
 }
 
+// ============================================================
+// 家长端 UX 回归（--only=ux）
+// ============================================================
+
+/** 量登录卡片：左右留白是否相等、是否完整落在视口内。 */
+const LOGIN_PROBE = `(() => {
+  // 先按表单找它的卡片祖先，找不到再退回「带 max-w 的块」
+  const form = document.querySelector('form');
+  const el = (form && form.closest('[class*="max-w"]'))
+    || document.querySelector('[class*="max-w-sm"]')
+    || document.querySelector('[class*="max-w-md"]')
+    || form;
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return {
+    left: Math.round(r.left),
+    right: Math.round(window.innerWidth - r.right),
+    width: Math.round(r.width),
+    top: Math.round(r.top),
+    bottom: Math.round(r.bottom),
+    viewportW: window.innerWidth,
+    viewportH: window.innerHeight,
+    fits: r.left >= -1 && r.right <= window.innerWidth + 1,
+  };
+})()`;
+
+/** 量提示浮层与底部导航是否打架。 */
+const TIP_NAV_PROBE = `(() => {
+  const tip = document.querySelector('[role="note"]');
+  const nav = document.querySelector('nav');
+  if (!tip) return null;
+  const t = tip.getBoundingClientRect();
+  const n = nav ? nav.getBoundingClientRect() : null;
+  return {
+    tipBottom: Math.round(t.bottom),
+    tipTop: Math.round(t.top),
+    navTop: n ? Math.round(n.top) : null,
+    overlapsNav: n ? t.bottom > n.top + 1 : false,
+    inViewport: t.top >= -1 && t.bottom <= window.innerHeight + 1,
+  };
+})()`;
+
+/** 点提示上的「知道了」；中英文都认。 */
+const DISMISS_TIP = `(() => {
+  const tip = document.querySelector('[role="note"]');
+  if (!tip) return false;
+  const btn = [...tip.querySelectorAll('button')]
+    .find((b) => b.textContent.trim() === '知道了' || b.textContent.trim() === 'Got it');
+  if (!btn) return false;
+  btn.click();
+  return true;
+})()`;
+
+const TIPS_STORAGE_KEY = 'balloon_dog_dismissed_tips_v1'
+
+/** 每个功能页 → 它挂的提示 id（与 src/hooks/useFeatureTips.ts 的 TIP_IDS 对应）。 */
+const TIP_ROUTES = [
+  ['/', 'home'],
+  ['/location', 'location'],
+  ['/schedule', 'schedule'],
+  ['/mode', 'mode'],
+  ['/eye-care', 'eyeCare'],
+  ['/app-plugins', 'appPlugins'],
+  ['/app-audit', 'appAudit'],
+  ['/call-sms', 'callSms'],
+  ['/remote-help', 'remoteHelp'],
+  ['/insights', 'insights'],
+  ['/media', 'media'],
+  ['/quiz-unlock', 'quiz'],
+  ['/devices', 'devices'],
+]
+
+async function loginAsParent(cdp, width = 390, height = 844, mobile = true) {
+  await cdp.send(
+    'Emulation.setDeviceMetricsOverride',
+    { width, height, deviceScaleFactor: 2, mobile },
+    cdp.sessionId,
+  )
+  await cdp.goto('/login')
+  await sleep(1800)
+  await cdp.clearStorage(['balloon_dog_token'])
+  await cdp.goto('/login')
+  await sleep(1600)
+  await cdp.fill('input[type="tel"]', PARENT_PHONE)
+  await cdp.fill('input[type="password"]', PARENT_PASSWORD)
+  await sleep(300)
+  await cdp.clickText('登录')
+  await sleep(3500)
+}
+
+async function testUx(cdp) {
+  suite = 'ux'
+
+  // ---------- 1. 登录框在各尺寸下水平居中 ----------
+  // 用户原话：「登录页的登录框在如何尺寸下都应该是水平居中显示的」。
+  // 之前是 flex 居中 + 内容宽度不确定，超宽屏下面板会被拉到很宽或偏向一侧。
+  section('UX · 登录框水平居中')
+  await cdp.goto('/login')
+  await sleep(1500)
+  await cdp.clearStorage(['balloon_dog_token'])
+
+  for (const vp of RESPONSIVE_VIEWPORTS) {
+    await cdp.send(
+      'Emulation.setDeviceMetricsOverride',
+      { width: vp.width, height: vp.height, deviceScaleFactor: 1, mobile: vp.mobile },
+      cdp.sessionId,
+    )
+    await cdp.goto('/login')
+    await sleep(900)
+
+    const m = await cdp.eval(LOGIN_PROBE)
+    if (!m) {
+      check(`${vp.name} 能定位到登录卡片`, false, '探针没找到表单/卡片')
+      continue
+    }
+    // 允许 2px 误差：小数像素取整 + 滚动条宽度
+    check(
+      `${vp.name} 登录框左右留白相等（水平居中）`,
+      Math.abs(m.left - m.right) <= 2,
+      `左 ${m.left}px / 右 ${m.right}px（宽 ${m.width}px，视口 ${m.viewportW}px）`,
+    )
+    check(`${vp.name} 登录框完整落在视口内`, m.fits, `left=${m.left} right=${m.right - m.viewportW + m.viewportW}`)
+    await cdp.shot(`/tmp/ux-login-${vp.width}x${vp.height}.png`)
+  }
+
+  // ---------- 2. 新手引导 ----------
+  section('UX · 新手引导')
+  await loginAsParent(cdp)
+  check('已登录（准备验证引导流程）', (await cdp.eval('location.pathname')) === '/')
+
+  const OVERFLOW_PROBE = `(() => {
+    const vw = document.documentElement.clientWidth;
+    let worst = 0, worstTag = '';
+    for (const el of document.querySelectorAll('*')) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      const over = Math.max(r.right - vw, -r.left);
+      if (over > worst) { worst = Math.round(over); worstTag = el.tagName + '.' + (el.className || '').toString().slice(0, 40); }
+    }
+    return { worst, worstTag, vw };
+  })()`
+
+  for (const vp of [RESPONSIVE_VIEWPORTS[0], RESPONSIVE_VIEWPORTS[1], RESPONSIVE_VIEWPORTS[4]]) {
+    await cdp.send(
+      'Emulation.setDeviceMetricsOverride',
+      { width: vp.width, height: vp.height, deviceScaleFactor: 1, mobile: vp.mobile },
+      cdp.sessionId,
+    )
+    await cdp.goto('/onboarding')
+    await sleep(1400)
+
+    check(`${vp.name} 引导页渲染成功`, (await cdp.eval(`document.body.innerText.includes('新手引导')`)) === true)
+    const ov = await cdp.eval(OVERFLOW_PROBE)
+    check(`${vp.name} 引导页无横向溢出`, ov.worst <= 1, ov.worst > 1 ? `${ov.worst}px by ${ov.worstTag}` : '')
+
+    // 主按钮必须完整可见 —— 引导页最容易出的问题就是「下一步」被挤到屏幕外
+    const cta = await cdp.eval(`(() => {
+      const b = [...document.querySelectorAll('button')]
+        .find((x) => /下一步|开始|进入家长端|Next|Start|Enter/.test(x.textContent));
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { bottom: Math.round(r.bottom), vh: window.innerHeight, visible: r.bottom <= window.innerHeight + 1 && r.top >= -1 };
+    })()`)
+    check(`${vp.name} 引导页主按钮完整可见`, cta ? cta.visible : false, cta ? `bottom=${cta.bottom} vh=${cta.vh}` : '没找到主按钮')
+    await cdp.shot(`/tmp/ux-onboarding-${vp.width}x${vp.height}.png`)
+  }
+
+  // ---------- 2b. 三步引导的内容（改版后新增） ----------
+  /*
+   * 用户原话：「下载安装包不用显示下载按钮，显示一下二维码……两个手机同一个 wifi
+   * 的方式行不通，去掉……绑定码输入框后面加一个扫一扫图标」。
+   *
+   * 绑定步骤的输入框与扫一扫图标**只在还没绑设备时**渲染（已经绑过则显示
+   * 「你已经绑定好设备了」），所以这里把 /api/devices 打桩成空列表来复现新用户。
+   */
+  section('UX · 新手引导三步')
+  await cdp.send(
+    'Emulation.setDeviceMetricsOverride',
+    { width: 390, height: 844, deviceScaleFactor: 2, mobile: true },
+    cdp.sessionId,
+  )
+
+  const devStub = await cdp.send(
+    'Page.addScriptToEvaluateOnNewDocument',
+    {
+      source: `(() => {
+        const orig = window.fetch;
+        window.fetch = function (input, init) {
+          const url = typeof input === 'string' ? input : (input && input.url) || '';
+          if (url.slice(-13) === '/api/devices') {
+            return Promise.resolve(new Response(JSON.stringify({ success: true, devices: [] }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }));
+          }
+          return orig.apply(this, arguments);
+        };
+      })();`,
+    },
+    cdp.sessionId,
+  )
+
+  // 引导进度是模块级缓存的，必须整页重载才会真的回到第一步
+  await cdp.clearStorage(['balloon_dog_onboarding_v1'])
+  await cdp.goto('/onboarding')
+  await sleep(1200)
+
+  const stepLabel = await cdp.eval(
+    `((document.body.innerText.match(/第 \\d+ \\/ \\d+ 步/) || [''])[0])`,
+  )
+  check('引导页是三步（不含庆功页）', stepLabel === '第 1 / 3 步', `实得「${stepLabel}」`)
+
+  /*
+   * 认二维码不能靠「path 数量多」：qrcode.react v4 只画两条 path（底色 + 模块），
+   * 而页面上排在它前面的 lucide 图标也常有一两条 path，数量打平就选错元素了。
+   * 模块 path 的 d 属性要把每个黑点串起来，长度是四位数量级，用它区分最稳。
+   */
+  const qr = await cdp.eval(`(async () => {
+    let best = null;
+    for (const s of document.querySelectorAll('svg')) {
+      let dLen = 0;
+      for (const p of s.querySelectorAll('path')) dLen += (p.getAttribute('d') || '').length;
+      if (!best || dLen > best.dLen) {
+        best = {
+          el: s,
+          dLen,
+          w: Math.round(s.getBoundingClientRect().width),
+          role: s.getAttribute('role') || '',
+          title: (s.querySelector('title') || {}).textContent || '',
+        };
+      }
+    }
+    const text = document.body.innerText;
+    /*
+     * 真的把屏幕上的那张二维码解码一遍：只有解出来的内容对得上，才能说明它是
+     * 一张「能扫的码」，而不只是一堆长得像二维码的方块。BarcodeDetector 在
+     * Chromium 上可用（扫码对话框能走到「没有摄像头权限」这一步就证明它在）。
+     */
+    let decoded = 'no-detector';
+    if (best && typeof BarcodeDetector !== 'undefined') {
+      try {
+        const xml = new XMLSerializer().serializeToString(best.el);
+        const blobUrl = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml' }));
+        const img = new Image();
+        await new Promise((res, rej) => {
+          img.onload = res;
+          img.onerror = rej;
+          img.src = blobUrl;
+        });
+        const codes = await new BarcodeDetector({ formats: ['qr_code'] }).detect(
+          await createImageBitmap(img),
+        );
+        decoded = codes.length ? codes[0].rawValue : '';
+        URL.revokeObjectURL(blobUrl);
+      } catch (error) {
+        decoded = 'error: ' + error.message;
+      }
+    }
+    /*
+     * 页面下方那行等宽文字里手敲的地址，必须与二维码里编的是同一个 ——
+     * 两者都来自 serverUrl()，一处改了另一处没改就会「扫码装的和手敲装的不是一回事」。
+     */
+    let shownUrl = '';
+    for (const p of document.querySelectorAll('p')) {
+      const text = (p.textContent || '').trim();
+      if (text.startsWith('http') && text.endsWith('/download/balloon-dog-agent.apk')) {
+        shownUrl = text;
+        break;
+      }
+    }
+    return {
+      best: best && { dLen: best.dLen, w: best.w, role: best.role, title: best.title },
+      decoded,
+      shownUrl,
+      hasUrl: text.includes('/download/balloon-dog-agent.apk'),
+      hasManual: text.includes('手动下载方式'),
+    };
+  })()`)
+  check(
+    '第一步渲染出下载二维码（不是空白 svg）',
+    !!qr.best && qr.best.dLen > 500 && qr.best.w >= 100,
+    qr.best ? `模块路径长=${qr.best.dLen} 宽=${qr.best.w}px role=${qr.best.role}` : '页面上没有 svg',
+  )
+  check('二维码是 role=img 的可访问图形', !!qr.best && qr.best.role === 'img', qr.best && qr.best.role)
+  check(
+    '二维码能解码出孩子端安装包地址',
+    typeof qr.decoded === 'string' && qr.decoded.endsWith('/download/balloon-dog-agent.apk'),
+    `解码结果=${qr.decoded}`,
+  )
+  check('二维码带可读的替代标题', !!qr.best && qr.best.title.length > 0, qr.best && qr.best.title)
+  check('第一步给出可手敲的下载地址', qr.hasUrl === true)
+  check('第一步保留手动下载方式作为退路', qr.hasManual === true)
+  check(
+    '二维码内容与页面展示的下载地址一致',
+    !!qr.shownUrl && qr.decoded === qr.shownUrl,
+    `二维码=${qr.decoded} 页面=${qr.shownUrl}`,
+  )
+
+  // 第二步：安装说明
+  await cdp.clickText('下一步')
+  await sleep(600)
+  const install = await cdp.eval(`(() => {
+    const text = document.body.innerText;
+    return {
+      isInstall: text.includes('在孩子手机上装好孩子端'),
+      hasScanMethod: text.includes('用孩子手机扫上一步的二维码'),
+      hasWifi: text.includes('同一个 WiFi') || text.includes('同一 WiFi'),
+    };
+  })()`)
+  check('第二步是安装说明', install.isInstall === true, await cdp.eval('document.body.innerText.slice(0, 80)'))
+  check('第二步首推「扫上一步的二维码」', install.hasScanMethod === true)
+  check('已去掉「两台手机连同一个 WiFi」这条路', install.hasWifi === false)
+
+  // 第三步：绑定码输入框 + 右侧扫一扫图标
+  await cdp.clickText('下一步')
+  await sleep(600)
+  const bind = await cdp.eval(`(() => {
+    const btn = document.querySelector('button[aria-label="扫一扫"]');
+    if (!btn) return { has: false, head: document.body.innerText.slice(0, 140) };
+    const r = btn.getBoundingClientRect();
+    const input = document.getElementById('onboarding-code');
+    const ir = input ? input.getBoundingClientRect() : null;
+    return {
+      has: true,
+      visible: r.width > 0 && r.height > 0,
+      insideRight: !!ir && r.left > ir.left + ir.width / 2 && r.right <= ir.right + 1,
+    };
+  })()`)
+  check('第三步有绑定码输入框', (await cdp.eval(`!!document.getElementById('onboarding-code')`)) === true)
+  check(
+    '绑定码输入框后面有扫一扫图标',
+    bind.has === true && bind.visible === true,
+    bind.has ? '' : `没找到，正文=${bind.head}`,
+  )
+  check('扫一扫图标落在输入框右端内侧', bind.insideRight === true)
+
+  // 点开扫码对话框：无头环境没有摄像头，应退化成手输提示，而不是一直转圈
+  await cdp.eval(`document.querySelector('button[aria-label="扫一扫"]').click()`)
+  const dialogUp = await cdp.waitFor(`document.body.innerText.includes('扫一扫绑定码')`, {
+    timeout: 5000,
+  })
+  check('点扫一扫能打开扫码对话框', dialogUp.ok === true)
+
+  const fallback = await cdp.waitFor(
+    `(() => {
+      const d = document.querySelector('[role="dialog"]');
+      if (!d) return false;
+      const t = d.innerText;
+      return t.includes('手动输入绑定码') || t.includes('正在打开摄像头');
+    })()`,
+    { timeout: 8000 },
+  )
+  check(
+    '扫码对话框给出可用退路（手输或摄像头）',
+    fallback.ok === true,
+    fallback.ok ? '' : '既没有手输按钮，也没有摄像头提示',
+  )
+  await cdp.shot('/tmp/ux-onboarding-scan.png')
+
+  // 关掉：有手输按钮就点它，否则点右上角 Close，最后按 Esc
+  await cdp.eval(`(() => {
+    const d = document.querySelector('[role="dialog"]');
+    if (!d) return true;
+    const byText = (s) => [...d.querySelectorAll('button')].find((x) => x.textContent.trim() === s);
+    const target = byText('手动输入绑定码') || byText('Close');
+    if (target) { target.click(); return true; }
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    return false;
+  })()`)
+  const dialogGone = await cdp.waitFor(`!document.querySelector('[role="dialog"]')`, { timeout: 5000 })
+  check('扫码对话框可以关掉', dialogGone.ok === true)
+
+  // 撤掉打桩，并把引导标记成已走完 —— 后面几节不该被引导流程影响
+  await cdp.send(
+    'Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: devStub.identifier },
+    cdp.sessionId,
+  )
+  await cdp.eval(`localStorage.setItem('balloon_dog_onboarding_v1', JSON.stringify({
+    completed: ['welcome', 'install', 'bind'],
+    finishedAt: new Date().toISOString(),
+  }))`)
+
+  // ---------- 3. 功能小提示 ----------
+  // 用户原话：「每个功能首次使用的时候最好在下方有个功能小提示，用户可以随时关闭」。
+  section('UX · 功能小提示')
+  await cdp.send(
+    'Emulation.setDeviceMetricsOverride',
+    { width: 390, height: 844, deviceScaleFactor: 2, mobile: true },
+    cdp.sessionId,
+  )
+  // 每个页面开始时都清空「已关闭」，保证测的是「首次进入」
+  await cdp.clearStorage([TIPS_STORAGE_KEY])
+
+  let firstTipText = ''
+  for (const [path, id] of TIP_ROUTES) {
+    await cdp.goto(path)
+    await sleep(1300)
+
+    const visible = await cdp.eval(`!!document.querySelector('[role="note"]')`)
+    check(`首次进入 ${path} 浮出功能提示（${id}）`, visible === true)
+    if (!visible) continue
+
+    const geom = await cdp.eval(TIP_NAV_PROBE)
+    check(`${path} 的提示不与底部导航重叠`, Boolean(geom && !geom.overlapsNav), geom ? `tip.bottom=${geom.tipBottom} nav.top=${geom.navTop}` : '')
+    check(`${path} 的提示完整落在视口内`, Boolean(geom && geom.inViewport))
+
+    if (!firstTipText) {
+      firstTipText = await cdp.eval(`document.querySelector('[role="note"]').innerText.replace(/\\s+/g, ' ').slice(0, 80)`)
+      await cdp.shot('/tmp/ux-tip.png')
+    }
+
+    const clicked = await cdp.eval(DISMISS_TIP)
+    check(`${path} 的提示可以随时关闭`, clicked === true)
+    await sleep(500)
+    check(`${path} 关闭后提示立即消失`, (await cdp.eval(`!document.querySelector('[role="note"]')`)) === true)
+
+    // 重新进入（不只是同页停留）也不能再出现
+    await cdp.goto(path)
+    await sleep(1200)
+    check(`${path} 重新进入后不再打扰`, (await cdp.eval(`!document.querySelector('[role="note"]')`)) === true)
+  }
+
+  if (firstTipText) console.log(`  \u001b[2m提示文案示例：${firstTipText}\u001b[0m`)
+
+  // ---------- 4. 提示可以整体重置 ----------
+  section('UX · 提示重置')
+  await cdp.goto('/profile')
+  await sleep(1400)
+  const resetOk = await cdp.eval(`(() => {
+    const b = [...document.querySelectorAll('button')]
+      .find((x) => /重置功能提示|Reset tips/.test(x.textContent));
+    if (!b) return false;
+    b.click();
+    return true;
+  })()`)
+  check('「我的」里有「重置功能提示」入口', resetOk === true)
+  await sleep(700)
+  const cleared = await cdp.eval(`(() => {
+    try { return localStorage.getItem(${JSON.stringify('balloon_dog_dismissed_tips_v1')}) } catch { return null }
+  })()`)
+  check('点击后关闭记录被清空', cleared !== null && JSON.parse(cleared).length === 0, `storage=${cleared}`)
+
+  await cdp.goto('/location')
+  await sleep(1300)
+  check('重置后提示会重新出现', (await cdp.eval(`!!document.querySelector('[role="note"]')`)) === true)
+  await cdp.shot('/tmp/ux-profile.png')
+
+  // ---------- 5. 英文界面 ----------
+  // i18n 的验收标准：切到英文后，页面上不该再剩下成片的中文。
+  section('UX · 英文界面')
+  await cdp.eval(`localStorage.setItem('balloon_dog_language', 'en')`)
+  const enProblems = []
+  const seedZh = seedChineseRuns()
+  for (const [path] of [['/'], ['/location'], ['/schedule'], ['/insights'], ['/media'], ['/profile'], ['/onboarding']]) {
+    await cdp.goto(path)
+    await sleep(1500)
+    // 数「界面上还剩多少中文」：先扣掉种子数据里的用户内容，再看还剩多少中文
+    const zh = await cdp.eval(`(() => {
+      let text = document.body.innerText || '';
+      for (const s of ${JSON.stringify(seedZh)}) text = text.split(s).join(' ');
+      const runs = text.match(/[\\u4e00-\\u9fff]{2,}/g) || [];
+      return { runs: runs.slice(0, 8), total: runs.reduce((n, s) => n + s.length, 0) };
+    })()`)
+    if (zh.total > 12) enProblems.push(`${path}: ${zh.total} 个中文字（${zh.runs.join(' / ')}）`)
+    // 不能用正则字面量做替换：这里的 `\/` 会提前结束正则，反编译成 `g is not defined`
+    await cdp.shot(`/tmp/ux-en-${(path.split('/').join('_') || 'home')}.png`)
+  }
+  check(
+    '切到英文后各页面不再出现成片中文',
+    enProblems.length === 0,
+    enProblems.slice(0, 5).join('；'),
+  )
+  await cdp.eval(`localStorage.setItem('balloon_dog_language', 'zh')`)
+
+  // ---------- 6. 登录态健壮性：一次接口失败不能把用户踢出登录 ----------
+  /*
+   * 回归测试。以前 AuthContext 恢复登录态时，只要 getProfile() 抛错就无条件
+   * setAuthToken(null) + setUser(null)：于是限流 429、后端 5xx、一次网络抖动，
+   * 统统被当成「登录已过期」——用户被弹回登录页，本地令牌还被删掉，只能重新
+   * 输密码。现在只有 401/403 才清凭证，其余情况保留令牌、退避重试。
+   *
+   * 这里只挡 /api/user/info（而不是直接 offline），因为断网连 HTML 和 JS 都拉不到，
+   * 页面根本不跑，就测不到应用自己的行为了。
+   */
+  section('UX · 登录态健壮性')
+  await cdp.send('Network.enable', {}, cdp.sessionId)
+  await cdp.goto('/')
+  await sleep(1800)
+  check('断网前处于已登录状态', (await cdp.eval(`!!localStorage.getItem('balloon_dog_token')`)) === true)
+
+  await cdp.send('Network.setBlockedURLs', { urls: ['*/api/user/info*'] }, cdp.sessionId)
+  await cdp.goto('/')
+  await sleep(4000) // 要等满 3 次尝试与退避（400ms + 800ms）
+  const keptToken = await cdp.eval(`!!localStorage.getItem('balloon_dog_token')`)
+  check(
+    '接口失败时保留本地令牌（不再误删登录凭证）',
+    keptToken === true,
+    keptToken ? '' : '令牌被清掉了：一次请求失败就把用户登出了',
+  )
+
+  await cdp.send('Network.setBlockedURLs', { urls: [] }, cdp.sessionId)
+  await cdp.goto('/')
+  await sleep(2500)
+  const recovered = await cdp.eval('location.pathname')
+  check('恢复后刷新一次即回到已登录状态', recovered === '/', `实际停在 ${recovered}`)
+}
+
 async function main() {
   console.log(`\n🧪 浏览器端到端测试 → ${APP}\n`)
 
@@ -1054,7 +1701,9 @@ async function main() {
     if (!health.ok) throw new Error(`HTTP ${health.status}`)
   } catch (err) {
     console.error(`\u001b[31m无法访问前端（${APP}）：${err.message}\u001b[0m`)
-    console.error('请先执行：npm run dev:all')
+    console.error('请先启动前端：npm run build && npm run preview（2727）')
+    console.error('或者跑开发服务器：npm run dev，并加 APP_URL=http://localhost:5173')
+    console.error('后端另需：npm run server:dev')
     process.exit(1)
   }
 
@@ -1070,6 +1719,7 @@ async function main() {
     if (runParent) await testParent(cdp)
     if (runAdmin) await testAdmin(cdp)
     if (runResponsive) await testResponsive(cdp)
+    if (runUx) await testUx(cdp)
   } finally {
     ws.close()
     chrome.kill()
@@ -1077,14 +1727,15 @@ async function main() {
 
   console.log('\n' + '═'.repeat(54))
   let totalFail = 0
-  for (const key of ['parent', 'admin', 'responsive']) {
+  for (const key of ['parent', 'admin', 'responsive', 'ux']) {
     const r = results[key]
     if (!runParent && key === 'parent') continue
     if (!runAdmin && key === 'admin') continue
     if (!runResponsive && key === 'responsive') continue
+    if (!runUx && key === 'ux') continue
     if (r.pass + r.fail === 0) continue
     totalFail += r.fail
-    const label = { parent: '家长端', admin: '管理后台', responsive: '响应式' }[key]
+    const label = { parent: '家长端', admin: '管理后台', responsive: '响应式', ux: '家长端 UX' }[key]
     if (r.fail === 0) {
       console.log(`\u001b[32m${label}：全部通过（${r.pass} 项）\u001b[0m`)
     } else {

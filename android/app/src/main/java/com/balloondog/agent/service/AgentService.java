@@ -112,6 +112,19 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
      */
     private static volatile AgentService current;
 
+    /**
+     * 本次服务停止是不是「家长显式点的停止守护」。
+     *
+     * <p>{@code onDestroy()} 靠它区分两种情况：
+     * <ul>
+     *   <li>{@code true}：家长不想守了 —— 关掉守护开关、解除锁定、取消所有唤醒源；</li>
+     *   <li>{@code false}（默认）：系统/ROM 回收了进程 —— 保留守护开关与锁定状态，
+     *       只重排看门狗等自愈。旧实现在这条路径上也无条件关掉守护开关，
+     *       于是三条复活链路（WatchdogReceiver / AgentJobService / BootReceiver）全部失效。</li>
+     * </ul>
+     */
+    private volatile boolean explicitStop;
+
     private com.balloondog.agent.capability.LockReassertor lockReassertor;
     /** 护眼执行者：连续用眼计时 → 强制休息；夜间护眼；亮度上限。 */
     private com.balloondog.agent.capability.EyeCareController eyeCare;
@@ -218,6 +231,16 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
         serviceRunning = true;
         store.markServiceAlive();
         EventLog.info("Agent 服务已启动");
+
+        // 启动即自愈：每次进程被拉起（开机 / 看门狗唤醒 / 孩子手动点开）都重新施加一遍
+        // 加固项与授权。孩子若在限制生效前抢到一次机会（撤销权限、关掉无障碍、取消电池白名单），
+        // 下一次启动会补上；补不上的由 LongevityGuard 如实上报成一条 tamper 事件。
+        // 放后台线程：里面有几十次 binder 调用，不能拖住 onCreate / 前台服务建立。
+        Thread heal = new Thread(
+                () -> LongevityGuard.selfHeal(AgentService.this, store, "服务启动"),
+                "balloon-agent-heal");
+        heal.setDaemon(true);
+        heal.start();
     }
 
     /**
@@ -267,6 +290,9 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
         if (Constants.ACTION_STOP_AGENT.equals(action)) {
+            // 只有家长显式停止才认这个标记：onDestroy 靠它区分
+            // 「家长不想守了」与「系统/ROM 把进程回收了」。
+            explicitStop = true;
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -329,7 +355,24 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
         serviceRunning = false;
         current = null;
         EventLog.info("Agent 服务已停止");
-        store.setAgentEnabled(false);
+
+        // 关键修复：必须区分「家长显式停止」与「系统/ROM 回收进程」。
+        //
+        // 旧实现无条件做三件事：setAgentEnabled(false) + releaseAll()（解除锁定）
+        // + WatchdogScheduler.cancel()。而 WatchdogReceiver、AgentJobService、BootReceiver
+        // 三条复活链路都是先看 store.isAgentEnabled()——于是任何一次低内存回收
+        // （厂商 ROM 的后台清理尤其常见）都会把三条保活链路一起废掉，
+        // 应用再也回不来，孩子的手机直接自由。这是长活链路上最致命的一处缺陷。
+        boolean parentStopped = explicitStop;
+        if (parentStopped) {
+            EventLog.warn("家长已停止守护：关闭守护开关、解除锁定、取消所有唤醒源");
+            store.setAgentEnabled(false);
+        } else {
+            // 系统回收：守护开关保持打开，锁定状态与加固项一概不动（孩子不该因此被放行），
+            // 同时立刻重排看门狗 —— 下一次唤醒（≤60 秒）会把服务重新拉起来。
+            EventLog.warn("守护服务被系统回收（家长未停止）：保留守护开关与锁定状态，重排看门狗等待自愈");
+            WatchdogScheduler.scheduleWatchdog(this);
+        }
 
         Thread thread = loopThread;
         if (thread != null) {
@@ -342,26 +385,30 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
             tickerThread = null;
         }
 
-        // 家长显式停止守护时，把锁定副作用收干净 —— 否则孩子会被困在一个
-        // 再也没人来解锁的锁定页上
-        try {
-            lockEnforcer.releaseAll(this, store);
-        } catch (Exception e) {
-            EventLog.error("停止守护时解除锁定失败：" + e.getMessage());
+        if (parentStopped) {
+            // 家长显式停止守护时，把锁定副作用收干净 —— 否则孩子会被困在一个
+            // 再也没人来解锁的锁定页上
+            try {
+                lockEnforcer.releaseAll(this, store);
+            } catch (Exception e) {
+                EventLog.error("停止守护时解除锁定失败：" + e.getMessage());
+            }
+            WatchdogScheduler.cancel(this);
+
+            // 家长停守护 = 停掉设备端一切管控副作用。VPN 尤其不能留着：
+            // 一个「家长已经关了、但还在改写 DNS」的后台服务，孩子和家长都无法理解。
+            if (DnsFilterVpnService.isRunning()) {
+                DnsFilterVpnService.stop(this);
+            }
         }
+
         unregisterScreenStateReceiver();
-        WatchdogScheduler.cancel(this);
 
         // 正在进行的采集要收干净，否则相机/麦克风会被一直占着
         com.balloondog.agent.capability.AmbientRecorder.stop("守护服务已停止");
         AudioRecorder.discard();
         ScreenCapturer.shutdown();
 
-        // 家长停守护 = 停掉设备端一切管控副作用。VPN 尤其不能留着：
-        // 一个「家长已经关了、但还在改写 DNS」的后台服务，孩子和家长都无法理解。
-        if (DnsFilterVpnService.isRunning()) {
-            DnsFilterVpnService.stop(this);
-        }
         ForegroundCompat.stop(this);
         super.onDestroy();
     }
@@ -684,9 +731,11 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
      * 而不是假装已经拦上了。
      */
     private void syncWebBlockService() {
-        boolean wanted = store.isWebBlockEnabled()
-                && !com.balloondog.agent.capability.DomainBlocker
-                        .parseList(store.getBlockedUrls()).isEmpty();
+        // 永久 VPN 与功能开关保持一致：开着就绑成本应用（快捷开关断不掉），
+        // 关掉就解除。这一步放在最前面，保证任何一次配置刷新都重新施加一次。
+        DnsFilterVpnService.applyAlwaysOn(this);
+
+        boolean wanted = DnsFilterVpnService.isWanted(this);
 
         if (!wanted) {
             if (DnsFilterVpnService.isRunning()) {
@@ -820,6 +869,15 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
                 // 都不该出现在 onAccessibilityEvent 的关键路径上，否则输入会卡顿。
                 tickAppUsage(nowMono);
                 tickCallsSms(nowMono);
+
+                // ---- 4.7) 长活巡检（加固项/看门狗/授权是否被孩子动过）----
+                // 放在 1 秒心跳里而不是只靠闹钟：Doze 下闹钟可能被推迟到 15 分钟以上，
+                // 而进程只要活着，这一秒就一定会走到这里。内部按 5 分钟限频。
+                try {
+                    LongevityGuard.tick(this, store, nowWall);
+                } catch (Exception e) {
+                    EventLog.warn("长活巡检异常：" + e.getMessage());
+                }
                 if (changed) {
                     EventLog.warn("锁定状态变化 → " + state.describe());
                     updateNotification("已绑定 · " + state.describe());

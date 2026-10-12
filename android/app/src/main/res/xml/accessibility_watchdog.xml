@@ -13,12 +13,21 @@
 
   isAccessibilityTool=false：诚实声明。这个标记本意是给「服务残障用户」的工具用的，
   本应用是家长管控工具，不该冒用；代价是系统设置里会显示一则提醒，文档中已说明。
+
+  canTakeScreenshot=true 是「截图」功能能不能用起来的关键：
+  AccessibilityService.takeScreenshot()（API 30+）不需要任何用户授权弹框，
+  而原先唯一可用的 MediaProjection 每次新会话都必须由孩子在那台设备上点一次
+  「Start recording or casting with 气球狗守护?」，不点就超时 ——
+  等于家长端的截图按钮在实际使用中永远拿不到图（库里 screenshot 一直是 0 行）。
+  加上这个声明后，无障碍服务在跑时截图完全免授权；服务没在跑或 API < 30 时
+  才回退到需要点弹框的 MediaProjection（见 capability/ScreenCapturer.java）。
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
     android:description="@string/accessibility_description"
     android:isAccessibilityTool="false"
     android:notificationTimeout="100"

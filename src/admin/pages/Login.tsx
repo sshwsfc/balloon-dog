@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { BrandLogo } from '@/components/BrandLogo'
 import { useAdminAuth } from '../context/AdminAuthContext'
 import { errorMessageOf } from '../api/client'
 
@@ -43,9 +44,7 @@ export default function LoginPage() {
     <div className="admin-shell flex min-h-screen items-center justify-center bg-gradient-to-br from-[#07c160] to-[#059a4d] p-4">
       <Card className="w-full max-w-sm shadow-xl">
         <CardHeader className="text-center">
-          <div className="mx-auto mb-2 flex h-12 w-12 items-center justify-center rounded-2xl bg-white text-2xl shadow">
-            🐕
-          </div>
+          <BrandLogo className="mx-auto mb-2 h-12 w-12 rounded-2xl shadow" />
           <CardTitle className="text-xl">管理后台登录</CardTitle>
           <CardDescription>气球狗 · 平台运营与安全审计</CardDescription>
         </CardHeader>

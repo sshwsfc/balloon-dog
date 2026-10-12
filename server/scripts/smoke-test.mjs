@@ -22,6 +22,8 @@ const DEMO_PASSWORD = process.env.SMOKE_PASSWORD || 'balloon123';
 let passed = 0;
 let failed = 0;
 const failures = [];
+/** 本次冒烟注册出来的临时账号，跑完统一删掉（见最后一节） */
+const createdUsers = [];
 
 function check(name, condition, extra = '') {
   if (condition) {
@@ -82,7 +84,9 @@ async function registerFreshUser(label) {
   if (!reg.body?.token) {
     throw new Error(`${label}: 注册失败 ${reg.status} ${JSON.stringify(reg.body)}`);
   }
-  return { phone, token: reg.body.token, userId: reg.body.user?.id };
+  const created = { phone, token: reg.body.token, userId: reg.body.user?.id };
+  createdUsers.push(created);
+  return created;
 }
 
 async function main() {
@@ -743,6 +747,24 @@ async function main() {
   // 设备令牌不能进后台
   const deviceAsAdmin = await req('GET', '/admin/stats', { token: deviceToken });
   check('设备令牌访问后台接口被拒（401）', deviceAsAdmin.status === 401, `实际 ${deviceAsAdmin.status}`);
+
+  // ============================================================
+  section('18. 清理冒烟测试自己造的账号');
+  // ============================================================
+  /*
+   * 每跑一次冒烟都会注册两个临时家长账号（隔离测试用、后台处置用）。以前不删，
+   * 几十次之后管理后台的家长列表第一页就全是「后台处置测试」「隔离测试B」，
+   * 连种子里的演示账号都被挤出分页，浏览器 E2E 里那条「列表显示演示账号」于是
+   * 无缘无故地红 —— 顺手清掉，别污染开发库。
+   */
+  const cleanupLogin = await req('POST', '/admin/login', {
+    body: { username: ADMIN_USER, password: ADMIN_PASS },
+  });
+  const cleanupToken = cleanupLogin.body?.token || adminToken;
+  for (const user of createdUsers) {
+    const removed = await req('DELETE', `/admin/users/${user.userId}`, { token: cleanupToken });
+    check(`清理冒烟临时账号 ${user.phone}`, removed.status === 200, `实际 ${removed.status}`);
+  }
 
   // ============================================================
   console.log('\n' + '═'.repeat(52));

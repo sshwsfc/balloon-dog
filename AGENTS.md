@@ -8,9 +8,14 @@ architecture, full API reference, and the admin/auth design.
 ## Commands
 
 ### Development
-- `npm run dev` - Start Vite dev server (parent app at `/`, admin console at `/admin`)
+- `npm run preview:all` - Build, then serve the built site + backend. **This is the exposed one**:
+  `vite preview` on :2727 — the reverse proxy and the public domain point here, because the dev
+  server is noticeably slower over a remote proxy (on-demand module transform + HMR websocket)
+- `npm run preview` - Serve the built `dist/` on :2727 only (needs `npm run build` first)
+- `npm run dev` - Vite dev server on :5173 (parent app at `/`, admin console at `/admin`), HMR,
+  local development only
 - `npm run server:dev` - Start the backend (http://localhost:4000)
-- `npm run dev:all` - Start both frontend and backend concurrently
+- `npm run dev:all` - Dev server + backend concurrently (:5173 + :4000)
 
 ### Database
 - `npm run db:up` / `db:down` - Start/stop the PostgreSQL container (port **5433**)
@@ -24,20 +29,61 @@ architecture, full API reference, and the admin/auth design.
 ### Build & Quality
 - `npm run build` - TypeScript type check + Vite production build (frontend)
 - `npm run lint` - Run ESLint (frontend)
-- `npm run preview` - Preview production build locally
+- `npm run preview` - Serve the production build on :2727 (see Development above)
 - `npm run server:typecheck` - Type check the backend
 - `npm --prefix server run lint` - Run ESLint (backend)
 
 ### Testing
-- `npm run server:smoke` - End-to-end backend smoke test (158 assertions: auth, authorization,
+- `npm run server:smoke` - End-to-end backend smoke test (160 assertions: auth, authorization,
   multi-user isolation, device binding, the full device-command queue round trip, and the admin
   console's auth isolation / role split / audit trail). Requires a running backend and a seeded
-  database.
+  database. It registers two throwaway parent accounts and deletes them again in its last section.
 - `cd server && npm run agent:example` - Run a simulated child device that polls for commands.
-- `npm run e2e` - Browser end-to-end test (parent app + admin console, 55 checks) driving headless
-  Chrome over CDP with no npm dependencies. Requires `npm run dev:all` to be running. Override the
-  browser with `CHROME_PATH`.
+- `npm run e2e` - Browser end-to-end test (parent app + admin console, 77 checks) driving headless
+  Chrome over CDP with no npm dependencies. Targets `http://localhost:2727` by default, so it needs
+  `npm run preview:all` running; set `APP_URL=http://localhost:5173` to point it at the dev server
+  instead. Override the
+  browser with `CHROME_PATH`. Use `--only=parent` / `--only=admin` / `--only=responsive` /
+  `--only=ux` to run a single suite; `e2e:responsive` walks 5 viewports × 17 routes (84 checks per
+  viewport) and `e2e:ux` (122 checks) covers the first-run guide (including the APK download QR
+  code, which it decodes with `BarcodeDetector`), the per-feature tips, login centering, the
+  English UI and session robustness. **`e2e:responsive` needs a raised
+  `RATE_LIMIT_MAX`**: it does 85 full page reloads, peaking at 300+ requests/minute, and being
+  rate-limited makes the app look logged-out (`/login`) so failures masquerade as missing text.
 - No frontend unit-test framework is configured yet.
+
+## Internationalization
+
+The parent app ships in **Chinese and English**. The rule is **the Chinese source text IS the
+i18n key** — `zh` has no locale file at all (i18next echoes the key when no translation exists, so
+Chinese is always correct), and `en` needs only one dictionary:
+[`src/i18n/locales/en.ts`](src/i18n/locales/en.ts).
+
+- Components use `t()` from `useTranslation()`; module-level helpers that cannot call a hook use
+  `tt()` from [`src/i18n`](src/i18n/index.ts), which reads the singleton directly. The app shell
+  re-renders the whole tree on `languageChanged`, so `tt()` output stays fresh after a switch.
+- **Never wrap a module-level Chinese constant in `t()` at its definition** — modules evaluate once,
+  which would freeze the language at first load. Keep the constant in Chinese and wrap at the *read*
+  site instead.
+- Dates, numbers and sorting must go through [`src/lib/format.ts`](src/lib/format.ts)
+  (`formatDateTime` / `formatDateTimeShort` / `formatTime` / `compareByLocale`). Never call
+  `toLocaleString('zh-CN')` directly — it would ignore the selected language.
+- The backend sends some display-ready Chinese (command names, command errors, insight notes and
+  alert titles). The client wraps those fields in `t()` as well: same "Chinese is the key" rule, and
+  unknown keys pass through unchanged, so it is zero-risk.
+
+Tooling:
+
+- `npm run i18n:coverage` - **the acceptance check**: lists every Chinese string in `src/` with no
+  English entry; exits 1 when anything is missing, so it can be wired into CI. It also catches the
+  dynamic `t(SOME_CONST[x].label)` cases the codemod's static scan cannot see.
+- `npm run i18n:wrap` - wrap unwrapped Chinese literals in the right helper (`t` / `tt`) and add the
+  missing import / `useTranslation()` binding.
+- `npm run i18n:wrap-consts` - wrap *accesses* to module-level Chinese constant tables.
+- `npm run i18n:keys` - dump the static keys each file uses.
+- Both wrap modes are idempotent, and they deliberately skip `key` / `id` / `value` identity
+  attributes (a `key` that changes with the language would remount the subtree).
+- `src/admin/**` is Chinese-only by design and is excluded from all of the above.
 
 ## Tech Stack
 - **Framework**: React 19 + TypeScript

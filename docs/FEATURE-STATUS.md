@@ -59,14 +59,14 @@
 | 模式切换（学习模式） | ✅ | ✅ | ✅ **真实执行** | 无障碍 + 前台包名白名单，**本地求值** |
 | 护眼设置 | ✅ | ✅ | ✅ **真实执行** | 连续用眼计时 → 注入锁定源 → **真锁屏** |
 | 微信 / QQ 功能管控 | ✅ | ✅ | ✅ **真实执行** | 无障碍 + 界面文本关键词匹配 → 按返回推走 |
-| 周期截屏 + AI 洞察 | ✅ | ✅ | ✅ **真实执行** | MediaProjection 常驻投影 → 打包上传 → 服务端分析 |
+| 周期截屏 + AI 洞察 | ✅ | ✅ | ✅ **真实执行** | 无障碍免授权截图优先（`AccessibilityScreenCapture`，API 30+）→ 打包上传 → 服务端分析，拿不到才回退常驻 MediaProjection。已上机验证：`ScreenFrame` 真的有行（20 秒内 14→16），采样全程 0 次授权页。`e2e-gaps` 第 10 节把它做成 8 项永久断言（配置回读、`pref capture_enabled=true`、logcat「已上传截屏包」、`GET /api/insights` 出现新行、路径日志「周期采样截图走无障碍免授权路径」、无「采样截图失败」、无系统授权页），2026-10-11 全绿 |
 | 局数 / 集数预算 | ✅ | ✅ | 🟡 **部分执行** | 服务端 AI 计数 + **设备端本地兜底**（`UsageBudget` 参与 `LockState` 判定）。配置下发已上机验证；**「离线兜底锁屏」只有编译/JVM 级**（构造不出 `used >= limit`，见 §3A） |
 | 应用审核 | ✅ | ✅ | 🟡 **部分执行** | 安装器识别 → 上报审批 → `DISALLOW_INSTALL_APPS` + 10 分钟批准窗口。`no_install_apps` 真的生效（孩子侧装不了）、审批链路真的通；但**走的是卸载确认页**，真安装页无法从 adb 构造（§3A） |
 | 应用限制（逐应用限时） | ✅ | ✅ | ✅ **真实执行** | `UsageStatsManager` 累计前台时长 → 超限按返回推走。**已修复并上机验证**：家长端从设备清单选应用（必须带 `packageName`）→ 设备拦截规则表真的落进带包名的规则 → 真的拦到了（logcat `看门狗：拦截 com.google.android.deskclock —— Clock 今日 1 分钟已用完`）、家长端「已用 529 秒」不再恒为 0。原先的「三层静默丢弃」见 §4.5 缺陷 1/2 |
 | 网址拦截 | ✅ | ✅ | 🟡 **部分执行** | `VpnService` 只接管 DNS：解析命中即回 NXDOMAIN。tun **真的建立**、系统 DNS 真的指向它；但**「某域名真被拦」无法在设备上断言**（隧道存在时所有域名都解析失败，区分不出「被拦」与「隧道不通」），解析逻辑只有 JVM 级证据（§3A） |
 | 远程拍照 | ✅ | ✅ | ✅ **真实执行** | Camera2 拍照 → 上传 → 回填 `mediaId` |
-| 屏幕截图 | ✅ | ✅ | ✅ **真实执行** | MediaProjection 截一张 → 上传 |
-| 连续录像 | ✅ | ✅ | ✅ **真实执行** | MediaProjection 持续录 → 上传 |
+| 屏幕截图 | ✅ | ✅ | ✅ **真实执行** | 优先无障碍 `takeScreenshot`（免授权，API 30+）→ 上传，拿不到才回退 MediaProjection。已上机验证（Android 13 模拟器，**全程无人点屏幕**）：指令 `succeeded`、68469 B JPEG 可下载、`MediaAsset.kind='screenshot'` 新增、授权框 0 次。`e2e-gaps` 第 8 节 9 项永久断言（`capabilities=129` 含 `CAPABILITY_CAN_TAKE_SCREENSHOT`、**关掉「屏幕洞察」也能截**、`succeeded`、走免授权路径、无「等待屏幕共享授权超时」、无系统授权页、媒体新增、102212 B 可下载、首两字节 `FFD8`）2026-10-11 全绿 |
+| 连续录像 | ✅ | ✅ | ✅ **真实执行** | MediaProjection 持续录 → 上传。已上机验证：11 秒 → 138824 B `ISO Media, MP4 v2` |
 | 远程录音 | ✅ | ✅ | ✅ **真实执行** | MediaRecorder 录一段 → 上传 |
 | 定位上报 | ✅ | ✅ | ✅ **真实执行** | 首次启动 + 每 5 分钟自动上报，`fetch_location` 也可触发 |
 | 安全区 | ✅ | ✅ | ✅ **真实执行** | 设备端 `Geofence` 本地判定进出 → 上报事件（不依赖服务端往返）。已上机验证：真实坐标 → `geofence_enter` → 移走中心 → `geofence_exit` |
@@ -76,8 +76,8 @@
 | 环境监听 | ✅ 键 | ✅ 键 | ✅ **真实执行** | `MediaRecorder` 5 分钟分段循环录音上传（1 小时安全阀）。已上机验证：录到 135159 字节 audio/mp4 且可下载。**但首次下发可能丢，见下方 ⚠️** |
 | 隐藏图标 | — | ✅ | ✅ **真实执行** | `activity-alias` 切换图标可见性；设置页给出恢复路径。已上机验证：入口真的不可解析、别名 `disabled`、关掉后恢复 |
 | 家庭成员 | — | ✅ 占位 | ⚪ **未实现** | 家长端显示为「未开放」灰态 |
-| 防杀 / 保活 | — | — | ✅ **真实执行** | 前台服务 + START_STICKY + 三重看门狗 + DO 限制 |
-| 防卸载 / 防恢复出厂 | ✅ | ✅ | ✅ **真实执行** | 设备所有者 7 条 `UserManager` 限制 |
+| 防杀 / 保活 | — | — | ✅ **真实执行** | 前台服务 + `START_STICKY` + `stopWithTask=false` + 双闹钟 + 持久化 Job + `LongevityGuard` 自愈；实测 `kill -9` 后 10 秒恢复 |
+| 防卸载 / 防恢复出厂 | ✅ | ✅ | ✅ **真实执行** | `setUninstallBlocked` + 受保护包（`setUserControlDisabledPackages`，API 30+）+ 20 条 `UserManager` 限制；实测三个系统按钮变灰、`pm uninstall`/`pm disable-user` 均被拒 |
 
 > ⚠️ **一个曾经横跨所有指令型功能的缺陷（已修）**：设备端 E2E 发现，
 > **任意指令都可能被一条已经断开的旧长轮询连接抢领，然后永久卡在 `dispatched`** ——
@@ -182,7 +182,7 @@ if (config.studyApps.contains(pkg)) return null;
 ```
 ForegroundAppTracker 记录前台包名
    ↓
-ScreenSampler 复用常驻 MediaProjection（不重复弹授权框）
+ScreenSampler 走 ScreenCapturer：优先无障碍免授权截图，拿不到才回退常驻 MediaProjection
    ↓ 长边 ≤480px + JPEG q=45（单张 15–30KB）
 FrameBatchArchiver 攒够 N 张打成 zip（stored 模式，JPEG 已压过，再 deflate 是浪费电）
    ↓
@@ -203,16 +203,19 @@ FrameBatchUploader POST /api/agent/screen-batches
 
 | 手段 | 实现 |
 | --- | --- |
-| 前台服务 | 常驻通知，`START_STICKY` |
+| 前台服务 | 常驻通知，`START_STICKY`，`android:stopWithTask="false"` |
 | 任务被划掉 | `onTaskRemoved` 立刻重新拉起 |
-| 进程被杀 | `AlarmManager` 自续期看门狗（60 秒）+ 持久化 `JobScheduler`（15 分钟） |
+| 进程被杀 | `AlarmManager` 自续期看门狗（60 秒）+ **精确备用闹钟**（15 分钟，`setExactAndAllowWhileIdle`）+ 持久化 `JobScheduler`（15 分钟） |
 | 开机自启 | `BootReceiver`（含 `LOCKED_BOOT_COMPLETED`，解锁前就跑） |
-| 防卸载/强停 | 设备所有者 7 条限制：`DISALLOW_APPS_CONTROL` / `UNINSTALL_APPS` / `FACTORY_RESET` / `SAFE_BOOT` / `ADD_USER` / `CONFIG_DATE_TIME` |
-| 改系统时间绕过作息 | 同上（`DISALLOW_CONFIG_DATE_TIME`） |
+| 防卸载/强停 | 设备所有者：`setUninstallBlocked` + **受保护包 `setUserControlDisabledPackages`（API 30+）** + 20 条 `UserManager` 限制（`DISALLOW_APPS_CONTROL` / `UNINSTALL_APPS` / `FACTORY_RESET` / `SAFE_BOOT` / `ADD_USER` / `USER_SWITCH` / `CONFIG_DATE_TIME` / `CONFIG_LOCALE` / `CONFIG_PRIVATE_DNS` / `CONFIG_VPN` / `AIRPLANE_MODE` …） |
+| 改系统时间绕过作息 | 同上（`DISALLOW_CONFIG_DATE_TIME`；**不存在 `DISALLOW_CONFIG_TIMEZONE`**，时区与日期共用这一个 key） |
 | 锁定复核 | 每 3 秒核实"实际锁住了没"；**亮屏广播**立即把锁定界面重新摆到最前 |
-| 无障碍被关 | 看门狗 + DO 限制挡回去 |
+| 加固自检与自愈 | `OwnerHardening.apply()/audit()` 可枚举逐项清单（28 项，本轮实测 `26/28 项生效`）+ `LongevityGuard` 服务启动/每 5 分钟巡检/家长手动自检三次重新施加，缺口变化时发 `tamper` 事件 |
+| 无障碍被关 | **堵不掉**：DO 也无法强制开启（实测 `Permission denial: Device owners cannot update enabled_accessibility_services`）。**加固开启时会把「无障碍设置页」推走**（`LockWatchdogService.isAccessibilitySettingsPage()` → `GLOBAL_ACTION_BACK`，实测 `am start -a android.settings.ACCESSIBILITY_SETTINGS` 2 秒内被弹回桌面并留下 `tamper`；关掉加固后同一命令能正常进入 = 家长逃生通道）。**检测是秒级的**（`onUnbind` 一次性信号，实测同一秒 16:37:14.128），5 分钟巡检只是兜底；自愈做不到 → 上报 `tamper` → 悬浮窗兜底 |
+| 网址拦截 VPN 被断开 | 设备所有者把本应用钉成永久 VPN：`setAlwaysOnVpnPackage(admin, pkg, /* lockdown */ false)` + `no_config_vpn`。实测：开启 `webBlock` 后 41 秒 `always_on_vpn_app=com.balloondog.agent`、`mAlwaysOnVpnLockdown=false`、VPN 设置页被 `Blocked by your IT admin` 挡死；关闭后 10 秒 `已解除永久 VPN`。**不开 lockdown**（理由见 `android/README.md` §7.3）；**「下拉快捷开关的 VPN 磁贴能否断开」本机没有磁贴、未验证** |
+| 使用情况访问被关 | **授不了也补不回**（appop 型），但已接进巡检：限时功能在用时会发 `tamper` |
 
-实测：`kill -9` 后 **3 秒**恢复。设备所有者应用**杀不掉**（`am force-stop` 无效，PID 不变）。
+实测（Android 13 / emulator-5554）：受保护包生效 —— `Uninstall`/`Force stop`/`Clear storage` 三个按钮 `enabled="false"`、`pm disable-user` 报 `Cannot disable a protected package`、`am force-stop` 后 PID 不变（同一命令杀系统时钟立刻生效）；`pm uninstall` → 普通状态 `Failure [DELETE_FAILED_USER_RESTRICTED]`（4 条变体实测同码），**锁屏（lock task）状态**下同一条命令变成 `Failure [DELETE_FAILED_APP_PINNED]`——两条独立拦截路径，两种状态都 exit 1；`pm hide` 回显 `Package com.balloondog.agent new hidden state: false`（exit 0 但没隐藏成功，PID/DO/无障碍全不变）；`pm clear` **本轮未实测**（会清掉绑定与授权、无法回滚，为不污染后续 agent 的验证刻意跳过）；`dpm remove-active-admin` → `SecurityException: Attempt to remove non-test admin`；`kill -9` 后自愈**必发生但耗时不是固定值**：实测 2 / 4 / 10 / 16 / 64 秒（连续被杀时 AMS 对 `START_STICKY` 服务做重启退避，60 秒主看门狗闹钟兜底）——只承诺「分钟级以内」，不承诺毫秒级（16:13:21 杀、16:13:31 `Agent 服务已启动`）。加固自检汇总：`26/28 项生效（2 项本机不支持）`（不支持的是模拟器跳过的 `no_debugging_features` 与 DO 写不进的 `app_auto_restriction_enabled`）；唯一持久缺口是电池优化白名单（无 DPM 静默 API）。**本轮另测**：`adb reboot` 后 `boot_completed=1` 与 agent pid 同在 **+21 秒**，DO 仍 `DeviceOwner,Affiliated`、受保护包与限制项都在、`PROJECT_MEDIA: allow` 跨重启保留；撤销「使用情况访问」的检测与恢复各 **T+284 秒**（`appops set GET_USAGE_STATS ignore` → tamper；`allow` → `管控已恢复正常`）；电池白名单缺口保持 10 分钟**没有**被反复当「新增」上报（此前那 13 条来自引入集合差分之前的旧构建）。**诚实边界**：`hardening_enabled` 目前**没有 UI 入口**（`AgentStore.setHardeningEnabled` 无调用者），家长逃生通道只在代码层成立。详见 `android/README.md` §2.5 / §2.10。
 
 ---
 
@@ -438,6 +441,7 @@ FrameBatchUploader POST /api/agent/screen-batches
 | `android/.../data/AgentStore.java` | `KEY_APP_LIMITS` 是**无包名**的展示串（形如 `抖音=60`），无法支撑逐应用限时判定 | 已新增结构化 `KEY_APP_LIMIT_RULES`；旧键**保留未删**，避免升级丢数据 |
 | 已修：`.gitignore` | `android/scripts/crosstest/.work/` 下 **22 个编译产物被 git 跟踪** | ✅ 已加 ignore 规则并 `git rm -r --cached`（**只动索引不删文件**）。现 crosstest 下被跟踪的只剩 12 个源文件 |
 | 已修：`android/README.md` §1.1 | 原文写「11 组接口」，漏了 `/agent/apps` 与 `/agent/events` | ✅ 已补齐为 17 组 |
+| 已修：截图「不好用」的两层根因（本轮的第 2 个重要新发现） | **缺陷 1（服务端门禁错挂）**：`server/src/features/devices/devices.service.ts` 的 `requestCapture()` 把 `screenshot` 挂到 `screenMonitor`（屏幕洞察，语义是「周期采集 + AI 分析」）上，家长按一次截图会被 400 挡回「请先开启「屏幕洞察」功能」；`FEATURE_DEFS`（`devices.constants.ts`）里**根本没有截图专用键**。家长端还有两处镜像门禁（`src/pages/HomePage.tsx` 的 `CAPTURE_FEATURE`、`src/pages/RemoteHelpPage.tsx` 与 `src/pages/InsightsPage.tsx` 的 `FeatureGate`）。**缺陷 2（设备端真正根因）**：`ScreenCapturer` 只有 MediaProjection 一条路，必须在孩子设备上点系统弹框「Start recording or casting with 气球狗守护?」，没人点就 20 秒超时（logcat `屏幕截图执行失败：等待屏幕共享授权超时，请在设备上点击「立即开始」`）；同一根因也打死了「屏幕洞察」的周期采样（`ScreenSampler.java` 调的就是 `ScreenCapturer.captureScreenshotLowRes`）。授权框被划掉后系统把 appop `PROJECT_MEDIA` 记成 `ignore`，家长侧表现就是「截图一直失败」。 | ✅ **已修并上机验证**：①服务端不再给截图加门禁（注释写清「FEATURE_DEFS 里没有截图开关，能不能截由设备端能力决定」，`remote_photo`/`start_recording`/`start_audio` 的映射未动），家长端 3 处镜像门禁一并撤掉；②新增 `capability/AccessibilityScreenCapture.java`（`AccessibilityService.takeScreenshot`，免授权）+ `accessibility_watchdog.xml` 加 `android:canTakeScreenshot="true"`，`ScreenCapturer.captureScreenshot*` 改为**先试无障碍、拿不到再回退 MediaProjection**；③`e2e-gaps` 新增「8. 屏幕截图」一节做永久回归。**实测（Android 13 模拟器，全程无人点屏幕）**：指令 `succeeded`、68469 B JPEG 可下载、`MediaAsset.kind='screenshot'` 新增、授权页 0 次（logcat `已通过无障碍接口截屏（免授权），66 KB`，耗时 ~270ms）；`ScreenFrame` 20 秒内 14→16。**诚实边界**：无障碍被系统记入 `Crashed services`（装包杀了服务进程）时 `takeScreenshot` 会持续回错误码 1，需重开一次无障碍开关；关掉无障碍就退回要点弹框的 MediaProjection；API 30 以下不可用。**全量回归（2026-10-11）**：`npm run android:e2e:gaps` → **131 通过 / 0 失败 / 2 跳过**（`EXIT_GAPS=0`），第 8 节截图 9 项、第 9 节录像 7 项、第 10 节周期采样 8 项全绿；跑测凭据 APK md5 `7c65b24b28e034b26250621dbc5a36fb`、脚本 md5 `6551098b84a72dac572360e88f25fe9a`、android 子树指纹 `1764100902f6cfee5cd35652e985b9cd4b5eddbf`（跑前跑后一致）。详见 `android/README.md` §10.5 |
 
 ### 4.3 设备端能力的诚实边界（不是 bug，是方案的天花板）
 
@@ -450,6 +454,10 @@ FrameBatchUploader POST /api/agent/screen-batches
 - **网址拦截只拦 DNS**：靠 IP 直连、DoH/DoT、应用内写死 IP 的请求拦不到（原因见 §3.1）。
 - **护眼「距离 / 姿势提醒」没做**：「学习模式专用桌面」没做。
 - **应用审核不是系统级审批**：它是「无障碍识别 + 设备所有者限制」的近似。
+- **免授权截图靠无障碍**：关掉无障碍就退回「要在孩子设备上点系统弹框」的 MediaProjection
+  （没人点即失败）；API 30 以下（`minSdk 24`）不可用；装包更新后无障碍服务可能被系统记进
+  `Crashed services`，此时 `takeScreenshot` 会一直回错误码 1，需重开一次无障碍开关才恢复。
+  详见 `android/README.md` §10.5。
 
 ### 4.4 环境攻坚：模拟器一开始为什么起不来、后来怎么起起来的
 
@@ -620,11 +628,12 @@ grep -rn "audioRecord\|remoteHelp\|callSms" --include=*.ts --include=*.tsx --inc
 | `android:e2e:mode`（23 项） | **学习模式真的拦住应用**、护眼/插件配置下发落盘 | 上机跑过 |
 | `android:e2e:screen`（21 项） | 截屏采集→上传→AI 分析→锁定复核 | 上机跑过 |
 | `android:crosstest` | 作息 2016 点、模式 3024 点、`GuardCheck` 16 项、**`PureLogicCheck` 63 项** | 本轮 EXIT=0 |
-| `server:smoke`（158 项） | 服务端全接口 | 本轮 158/158 |
+| `server:smoke`（160 项） | 服务端全接口 | 本轮 160/160 |
 | `server:e2e:mode`（64 项） | 模式/护眼/插件/事件/越权 | 上机跑过 |
 | `server:e2e:insights` + `:ai`（各 28 项） | 屏幕洞察与 AI 全链路 | 上机跑过 |
-| `e2e:parent` / `e2e:admin`（25 + 30 项） | 家长端与管理后台 | 本轮全绿 |
-| `e2e:responsive`（5 视口 × **16 页**，各 79 项） | 响应式布局 | 本轮全绿 |
+| `e2e:parent` / `e2e:admin`（46 + 31 项） | 家长端与管理后台 | 本轮全绿 |
+| `e2e:ux`（122 项） | 首次引导三步、功能提示、英文界面、登录态健壮性 | 本轮全绿 |
+| `e2e:responsive`（5 视口 × **17 页**，各 84 项） | 响应式布局 | 本轮全绿 |
 
 **教训**：§3.1 / §3.2 这类"仅存储"的功能，**端到端测试抓不到** ——
 因为断言的是"配置能下发、能落盘"，那确实通过了。

@@ -34,6 +34,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>采集结束后由 {@link ScreenCapturer} 调用 {@link #stopIfIdle(Context)} 关掉，
  * 不留常驻通知。
+ *
+ * <p><b>注意：这个服务只服务于 MediaProjection 回退路径。</b> 截图的主路径现在是
+ * {@code capability/AccessibilityScreenCapture}（无障碍 {@code takeScreenshot}，免授权、
+ * 不需要前台服务）；只有当无障碍服务没在跑或系统版本低于 API 30 时，
+ * {@link ScreenCapturer} 才会走到这里，而那条路必然要求孩子在那台设备上点一次系统授权框。
  */
 public class ScreenCaptureService extends Service {
 
@@ -99,7 +104,8 @@ public class ScreenCaptureService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // 不粘性重启：采集是一次性动作，进程被杀后不应该自动重来（否则会反复弹授权）
+        // 不粘性重启：采集是一次性动作，进程被杀后不应该自动重来
+        // （这条是 MediaProjection 回退路径，重来会反复弹授权框）
         return START_NOT_STICKY;
     }
 

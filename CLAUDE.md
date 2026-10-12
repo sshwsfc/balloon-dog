@@ -5,9 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Common Commands
 
 ### Development
-- `npm run dev` - Start Vite dev server (parent app `/`, admin console `/admin`)
+- `npm run preview:all` - Build, then serve the built site + backend (**this is the exposed one**:
+  `vite preview` on :2727 — the reverse proxy and the public domain point here)
+- `npm run preview` - Serve the built `dist/` on :2727 only (requires `npm run build` first)
+- `npm run dev` - Vite dev server on :5173 (parent app `/`, admin console `/admin`), HMR, local only
 - `npm run server:dev` - Start the backend (http://localhost:4000)
-- `npm run dev:all` - Start frontend and backend concurrently (recommended)
+- `npm run dev:all` - Dev server + backend concurrently (:5173 + :4000)
 
 ### Database
 - `npm run db:up` / `npm run db:down` - Start/stop the PostgreSQL container (port **5433**)
@@ -23,20 +26,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm --prefix server run lint` - ESLint (backend)
 
 ### Testing
-- `npm run server:smoke` - End-to-end backend smoke test (158 assertions). Needs a running backend
+- `npm run server:smoke` - End-to-end backend smoke test (160 assertions). Needs a running backend
   and a seeded database. Covers auth, authorization, multi-user isolation, device binding, the full
-  device-command queue round trip, and the admin console (token isolation, role split, audit).
+  device-command queue round trip, and the admin console (token isolation, role split, audit). Its
+  two throwaway parent accounts are deleted again in the last section.
 - `cd server && npm run agent:example` - Simulated child device that polls for and executes commands.
-- `npm run e2e` - Browser end-to-end test for both SPAs (55 checks) via CDP-driven headless Chrome;
-  requires `npm run dev:all` running.
+- `npm run e2e` - Browser end-to-end test for both SPAs (77 checks) via CDP-driven headless Chrome;
+  targets `http://localhost:2727` by default, so have `npm run preview:all` running (override with
+  `APP_URL=http://localhost:5173` to run against the dev server instead).
+  `--only=parent|admin|responsive|ux` runs one suite;
+  `e2e:responsive` walks 5 viewports × 17 routes, `e2e:ux` (122 checks) covers the first-run guide
+  (decoding the APK QR code with `BarcodeDetector`), per-feature tips, login centering, the English
+  UI and session robustness. Running
+  `e2e:responsive` requires a raised `RATE_LIMIT_MAX` (see `server/.env.example`) — it peaks at
+  300+ requests/minute and a 429 otherwise shows up as a bogus "logged out" failure.
 - No frontend unit-test framework is configured.
+
+## Internationalization
+
+The parent app ships in **Chinese and English**. **The Chinese source text IS the i18n key** — `zh`
+has no locale file (i18next echoes the key when no translation exists, so Chinese is always
+correct), and `en` needs only [`src/i18n/locales/en.ts`](src/i18n/locales/en.ts).
+
+- Components use `t()` from `useTranslation()`; module-level helpers that cannot call a hook use
+  `tt()` from [`src/i18n`](src/i18n/index.ts). The app shell re-renders the tree on
+  `languageChanged`, so `tt()` output stays fresh.
+- **Never wrap a module-level Chinese constant in `t()` at its definition** — modules evaluate once,
+  which would freeze the language at first load. Keep the constant in Chinese, wrap at the *read*
+  site.
+- Dates, numbers and sorting go through [`src/lib/format.ts`](src/lib/format.ts). Never call
+  `toLocaleString('zh-CN')` directly.
+- Backend-sent Chinese (command names, command errors, insight notes, alert titles) is wrapped in
+  `t()` at the render site too — same key rule, and unknown keys pass through unchanged.
+- `npm run i18n:coverage` is the acceptance check (exits 1 on any untranslated string — CI-ready).
+  `i18n:wrap` / `i18n:wrap-consts` are idempotent codemods that add the wrapping; `i18n:keys` lists
+  static keys. All of them skip `src/admin/**`, which is Chinese-only by design.
 
 ## Architecture
 
 Parental control / child device monitoring app with a **two-package, three-SPA layout**:
 
-1. **Parent app** (repo root, Vite dev server on :5173, entry `index.html`) — React 19 +
+1. **Parent app** (repo root, entry `index.html`) — React 19 +
    TypeScript, React Router, Tailwind v4 + shadcn/ui, WeChat-style mobile UI.
+   Two ports, see `vite.config.ts`: **`:2727`** = `vite preview` on the built `dist/`, this is
+   what the reverse proxy and the public domain hit (dev server is noticeably slower over a
+   remote proxy); **`:5173`** = `vite dev` for local work, HMR, not exposed.
 2. **Admin console** (`/admin`, entry `admin/index.html`, code in `src/admin/`) — desktop-oriented
    operator console: dashboard, account/device/command management, question bank, SMS audit,
    operation logs. Built as a **second Vite entry** so its code never ships to parents.
@@ -134,7 +168,7 @@ import { Card } from '@/components/ui/card'
 - **UI Language**: All user-facing text is in Chinese (this is a Chinese parental control app)
 - **Responsive**: 页面最外层用 `.page-shell`（详见 [`docs/RESPONSIVE.md`](docs/RESPONSIVE.md)），
   栅格要给出 `sm:` / `lg:` 档位，导航统一走 `BottomNav`；横屏与宽屏都要能用。
-  验证：`npm run e2e:responsive`（5 档视口 × 14 个页面）
+  验证：`npm run e2e:responsive`（5 档视口 × 17 个页面，每档 84 项）
 - **Component Exports**: Use named exports: `export function HomePage() {}`
 - **Styling**: WeChat-inspired UI with primary green `#07c160`, shadcn/ui, Tailwind CSS v4
 - **Error Handling**: try-catch with `toast.error(toUserMessage(error))`; type caught values as `unknown`

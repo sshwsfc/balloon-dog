@@ -228,13 +228,18 @@ POST /api/agent/register  ──────────────►  建一�
 这样后台代码不会进家长端的产物包，家长端的改动也不会意外暴露后台页面。
 
 ```bash
-npm run dev              # 家长端与后台同一个 dev server
+npm run preview          # 对外站点（2727，跑 dist/ 产物，需先 npm run build）
+# 家长端： http://localhost:2727/
+# 管理后台：http://localhost:2727/admin
+
+npm run dev              # 本机开发（5173，带 HMR；家长端与后台同一个 dev server）
 # 家长端： http://localhost:5173/
 # 管理后台：http://localhost:5173/admin
 ```
 
-开发态由 Vite 插件把 `/admin/**` 回落到 `admin/index.html`（否则刷新深层路由会 404），
-生产部署时需要 nginx 做同样的 try_files 配置。
+`vite.config.ts` 里的 `admin-history-fallback` 插件会给 dev 与 preview 两个服务器都装上
+`/admin/**` → `admin/index.html` 的回落（否则刷新深层路由会 404），
+生产部署时 nginx 需要做同样的 try_files 配置。
 
 ---
 
@@ -254,6 +259,7 @@ npm run dev              # 家长端与后台同一个 dev server
 | GET | `/wechat/authorize-url` | 微信内置浏览器直接授权跳转 |
 | POST | `/wechat/dev-scan` | 联调模拟扫码（仅未配置真实微信时可用） |
 | GET | `/wechat/callback` | 微信授权回调（返回 HTML，postMessage + 顶层跳转双模式） |
+| GET | `/wechat/jsapi-signature` | 微信 JS-SDK 签名（给家长端在微信里扫孩子端绑定码二维码用）。`url` 必填且必须是绝对 http(s) 地址，**不能 trim/转义** —— 微信要求它与页面 url 逐字符一致，签名串固定为 `jsapi_ticket=…&noncestr=…&timestamp=…&url=…` 再 SHA-1。`access_token` / `jsapi_ticket` 各缓存 2 小时（提前 5 分钟过期），否则每次扫码都换 token 会烧光每天 2000 次的配额；未配置公众号凭证时返回 503 `WECHAT_NOT_CONFIGURED`，前端据此退回页面内摄像头扫码 |
 | GET/PUT | `/profile` | 读取/更新资料 |
 | POST | `/change-password` | 修改密码 |
 | POST | `/bind-phone` | 绑定/换绑手机号 |

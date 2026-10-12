@@ -387,6 +387,100 @@ async function waitFor(probe, { timeoutMs = 120_000, intervalMs = 3000, label = 
   return { ok: false, detail: '', elapsedMs: Date.now() - start, last }
 }
 
+/**
+ * 只在失败时才抓证据的断言。
+ *
+ * <p>诊断要跑好几条 adb；如果直接当 extra 传进去，**每条断言（哪怕通过）都要付这个代价**，
+ * 所以传函数、只在失败时调用。
+ */
+function checkDiag(cond, label, evidence = '') {
+  if (cond) {
+    ok(label)
+    return true
+  }
+  let extra
+  try {
+    extra = typeof evidence === 'function' ? evidence() : evidence
+  } catch (error) {
+    extra = `（抓取诊断时又出错了：${error.message}）`
+  }
+  bad(label, extra)
+  return false
+}
+
+/**
+ * 从 `dumpsys accessibility` 里切出「气球狗守护」这一条 Service 记录。
+ *
+ * <p>不要用正则 `Service\[label=[^\]]*气球狗守护[^\]]*\]` 去匹配：这条记录里**还嵌着方括号**
+ * （`feedbackType[FEEDBACK_GENERIC]`、`eventTypes=[…]`），`[^\]]*` 会在第一个内层 `]` 处停住，
+ * 于是排在它们后面的 `capabilities=129` 落在匹配之外，能力位被永久读成 0
+ * —— 实测踩过：产品明明是 `capabilities=129`，断言却报「读到 0」。
+ * 所以改成切片：从 `Service[label=气球狗守护` 起，到下一个 `Service[label=` 或结尾为止。
+ */
+function a11yServiceChunk(dump) {
+  const at = (dump || '').indexOf('Service[label=气球狗守护')
+  if (at < 0) return ''
+  const rest = dump.slice(at)
+  const next = rest.indexOf('Service[label=', 1)
+  return next > 0 ? rest.slice(0, next) : rest
+}
+
+/**
+ * `dumpsys accessibility` 里与「气球狗守护」有关的原始行。
+ *
+ * <p>刻意用不抛异常的 {@link adb}：这些 dump 的某些形态会让命令返回非零，
+ * 那只是「没这条记录」，不是脚本错误。
+ */
+function a11ySummary() {
+  const dump = adb('shell', 'dumpsys', 'accessibility').out || ''
+  return {
+    dump,
+    service: a11yServiceChunk(dump) || '(没有本服务的 Service 记录)',
+    bound: (dump.match(/Bound services:\{[^}]*\}/) || [])[0] || '(没有 Bound services 段)',
+    crashed: (dump.match(/Crashed services:[^\n]*/) || [])[0] || '(没有 Crashed services 段)',
+  }
+}
+
+/**
+ * 断言失败时的原始证据：一眼分清「产品缺陷」还是「测试竞态」。
+ *
+ * <p>包含：无障碍能力/绑定/崩溃名单、截图相关 pref、AppOps 放行状态、
+ * 以及最近 50 行带 BalloonDog 的日志。
+ */
+function diagnostics(tag) {
+  const lines = [`── 诊断快照：${tag} ──`]
+  try {
+    const a = a11ySummary()
+    lines.push(`无障碍能力：${a.service}`)
+    lines.push(`无障碍绑定：${a.bound}`)
+    lines.push(`无障碍崩溃：${a.crashed}`)
+  } catch (error) { lines.push(`无障碍 dump 失败：${error.message}`) }
+  try {
+    const enabled = (adb('shell', 'settings', 'get', 'secure', 'enabled_accessibility_services').out || '').trim()
+    const a11yOn = (adb('shell', 'settings', 'get', 'secure', 'accessibility_enabled').out || '').trim()
+    const pid = (adb('shell', 'pidof', PKG).out || '').trim()
+    lines.push(`settings enabled_accessibility_services=${enabled || '(空)'}`)
+    lines.push(`settings accessibility_enabled=${a11yOn || '(空)'}`)
+    // 服务绑定要求应用进程活着：pidof 空着基本就解释了「没绑定」
+    lines.push(`agent 进程 pid=${pid || '(没在跑)'}`)
+  } catch (error) { lines.push(`读无障碍设置 / pid 失败：${error.message}`) }
+  try {
+    lines.push(`pref capture_enabled=${prefTyped('capture_enabled') ?? '(无)'}`)
+  } catch (error) { lines.push(`读 pref 失败：${error.message}`) }
+  try {
+    const appops = (adb('shell', 'appops', 'get', PKG, 'PROJECT_MEDIA').out || '').split('\n')[0]
+    lines.push(`appops PROJECT_MEDIA：${appops || '(空)'}`)
+  } catch (error) { lines.push(`读 appops 失败：${error.message}`) }
+  try {
+    const logs = (adb('shell', 'logcat', '-d', '-t', '600').out || '')
+      .split('\n').filter((l) => l.includes('BalloonDog')).slice(-50)
+    lines.push('最近 BalloonDog 日志（最多 50 行）：')
+    if (logs.length) lines.push(...logs.map((l) => `  ${l}`))
+    else lines.push('  (一条都没有)')
+  } catch (error) { lines.push(`读 logcat 失败：${error.message}`) }
+  return `\n    ${lines.join('\n    ')}`
+}
+
 /** Lock Task 状态：NONE / PINNED / LOCKED。LOCKED 才算真正锁死。 */
 function lockTaskState() {
   const out = adb('shell', 'dumpsys', 'activity', 'activities').out || ''
@@ -464,8 +558,11 @@ function fmtMinute(minute) {
 
 /** 读取媒体原始字节（用后端返回的短时效签名 URL） */
 async function fetchMediaBytes(relativeUrl) {
+  // 服务端在配了 PUBLIC_BASE_URL 的环境里会签发绝对地址（线上就是这种情况），
+  // 没配时是 /api/media/... 这样的相对路径 —— 两种都要能取。
   const origin = API_BASE.replace(/\/api$/, '')
-  const res = await fetch(origin + relativeUrl)
+  const target = /^https?:\/\//i.test(relativeUrl) ? relativeUrl : origin + relativeUrl
+  const res = await fetch(target)
   const buffer = Buffer.from(await res.arrayBuffer())
   return { status: res.status, contentType: res.headers.get('content-type'), bytes: buffer }
 }
@@ -664,6 +761,30 @@ function localUserRestriction(name) {
   return new RegExp(`\\b${name}\\b`).test(local)
 }
 
+/**
+ * 「生效的限制」里有没有这一项（dumpsys user 的 Effective restrictions 段）。
+ *
+ * <p>为什么不能只看 {@link localUserRestriction}：Android 把 `UserManager` 的限制分成
+ * local（只在本用户生效，如 no_config_vpn / no_control_apps）与 global（所有用户生效，
+ * 如 no_factory_reset / no_safe_boot / no_config_date_time / no_add_user）两类；
+ * 设备所有者调 `addUserRestriction` 时，global 类会落到全局清单里，local 段里看不到它们，
+ * 只看 local 段会把「已经生效的限制」误判成没生效。Effective restrictions 是两类的并集，
+ * 也就是系统真正执行的那份清单。
+ */
+function effectiveUserRestriction(name) {
+  const out = adb('shell', 'dumpsys', 'user').out || ''
+  const after = out.split('Effective restrictions:')[1] || ''
+  const lines = after.split('\n')
+  const re = new RegExp(`\\b${name}\\b`)
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (!line.trim()) { if (i > 0) break; continue }
+    if (!/^\s{6,}\S/.test(line)) break
+    if (re.test(line)) return true
+  }
+  return false
+}
+
 /** 今天某个包的前台秒数（设备端缓存的 app_usage_json） */
 function usageSecondsFor(pkg) {
   const parsed = prefJson('app_usage_json')
@@ -788,6 +909,18 @@ async function listDeviceEvents(token, type, pageSize = 30) {
 async function listMedia(token, kind) {
   const res = await api('GET', dq(`/media?kind=${kind}`), { token })
   return res.ok ? (res.body?.media ?? []) : []
+}
+
+/**
+ * 家长端「屏幕洞察」列表。
+ *
+ * 这是「周期采样到底有没有用」的<em>终端证据</em>：截屏包上传后服务端会落
+ * ScreenBatch / ScreenFrame，再分析出 ScreenInsight，家长看到的就是它。
+ * 只断言「设备上传了」而不看这条，等于没验证链路走通。
+ */
+async function listInsights(token) {
+  const res = await api('GET', dq('/insights'), { token })
+  return res.ok ? (res.body?.items ?? []) : []
 }
 
 // ============================================================
@@ -1429,9 +1562,285 @@ async function main() {
   }
 
   // ============================================================
-  // 8. 网址拦截 / DNS 过滤
+  // 8. 屏幕截图
   // ============================================================
-  step('8. 网址拦截（DomainBlocker / DnsFilterVpnService）')
+  step('8. 屏幕截图（capability/AccessibilityScreenCapture.java）')
+  try {
+    // 回归缺陷 #1：截图原本被挂在「屏幕洞察」这个不相干的功能键上，家长一按就被服务端
+    // 400 挡回来（「请先开启「屏幕洞察」功能」）。所以这里刻意先把屏幕洞察关掉再下发 ——
+    // 指令还能发出去，才算门禁真的撤干净了。
+    await setFeature(token, 'screenMonitor', false)
+
+    // 回归缺陷 #2：截图原先只有 MediaProjection 一条路，必须在孩子设备上点系统弹框
+    // 「Start recording or casting with 气球狗守护?」，没人点就 20 秒超时。免授权路径靠
+    // 无障碍服务的 android:canTakeScreenshot="true"（系统能力位
+    // CAPABILITY_CAN_TAKE_SCREENSHOT = 128，会体现在 dumpsys accessibility 的 capabilities 里）。
+    // 只在「气球狗守护」这一条 Service 记录里找 capabilities：dumpsys 里可能还挂着别的
+    // 无障碍服务（系统自带的），全文取第一个 capabilities= 会抓到别人，断言就假了。
+    // 按位判 CAPABILITY_CAN_TAKE_SCREENSHOT(=128)，**不写成 capabilities=129 这种整值相等** ——
+    // feedbackType / eventTypes 一变整值就会假失败。
+    let a11yDump = shell('dumpsys accessibility') || ''
+    const capsFrom = (dump) => Number((a11yServiceChunk(dump).match(/capabilities=(\d+)/) || [])[1] || 0)
+
+    // 读不到 128 就先自愈一次，再轮询断言。触发条件刻意放宽成「**任何**读不到 128 的情况」，
+    // 而不是只看 Crashed 名单：
+    //   · 服务挂在系统的 Crashed services 名单里（装包杀进程造成）→ takeScreenshot 会一直回
+    //     错误码 1（内部错误），截图静默退化到要人点弹框的 MediaProjection；
+    //   · 或者 dumpsys 里**根本没有本服务的 Service 记录** —— 服务压根没绑上，它既不在
+    //     Bound 也不在 Crashed，只看 Crashed 名单会漏掉这一种（实测第三轮就是 capabilities=0，
+    //     跑完手工 dump 又是 129，说明服务是在这一轮之后才绑上的）。
+    // 上游 §1 把两个无障碍开关写回后只 sleep 1500ms 就往下走，系统重新绑定的耗时不确定，
+    // 而 §8 是第一个真去读 dumpsys 的地方 —— 这份不确定性落在这里，所以这里做的是
+    // **测试自愈**，不是产品兜底（产品侧的自愈在 LockWatchdogService/AgentService 里）。
+    if ((capsFrom(a11yDump) & 128) === 0) {
+      const before = capsFrom(a11yDump)
+      console.log(`  · 无障碍能力位读不到 128（capabilities=${before}），重新注册一次无障碍服务`)
+      shell('settings put secure enabled_accessibility_services null')
+      await sleep(2000)
+      shell(`settings put secure enabled_accessibility_services ${PKG}/${PKG}.service.LockWatchdogService`)
+      // 两个开关都要写回：§14 关掉它们时是**两个都关**的，只写回一个不等于恢复原状
+      shell('settings put secure accessibility_enabled 1')
+      await sleep(3000)
+    }
+
+    // 服务绑定是异步的：装包/重启后 dumpsys 里会晚几秒才出现这条 Service 记录，
+    // 直接读会读到 capabilities=0 的假失败。轮询到「绑定 + 能力位出现」为止。
+    // 最后一次 dump 存在 a11yDump 里，断言直接读它 —— **不依赖 waitFor 的 detail 语义**
+    // （失败时 detail 是空串、last 才是谓词的返回值，成功时 detail 才是那个字符串）。
+    await waitFor(() => {
+      a11yDump = shell('dumpsys accessibility') || ''
+      return (capsFrom(a11yDump) & 128) !== 0
+    }, { timeoutMs: 60_000, intervalMs: 2000, label: '无障碍服务绑定与能力位' })
+    const capabilities = capsFrom(a11yDump)
+    checkDiag((capabilities & 128) !== 0,
+      `无障碍服务声明了「可截图」能力（capabilities=${capabilities}，含 128）`,
+      () => diagnostics(`没等到 capabilities 含 128（最后读到 ${capabilities}）`))
+
+    const beforeShots = await listMedia(token, 'screenshot')
+    adb('logcat', '-c')
+
+    const queued = await api('POST', `/device/screenshot?deviceId=${deviceId}`, { token, body: {} })
+    checkDiag(queued.ok, '关掉「屏幕洞察」后仍能下发截图指令（服务端不再把截图挂在屏幕洞察上）',
+      `HTTP ${queued.status} ${JSON.stringify(queued.body).slice(0, 160)}`)
+
+    // 自己按 id 轮询指令终态：dispatchAndWait 会重新 POST 一条，这里要复用刚发的那条。
+    const commandId = queued.body?.command?.id
+    let command = null
+    const deadline = Date.now() + 90_000
+    while (commandId && Date.now() < deadline) {
+      const history = await apiOrThrow('GET', `/device/commands?deviceId=${deviceId}&limit=10`, { token })
+      command = (history.commands || []).find((c) => c.id === commandId) || null
+      if (command && ['succeeded', 'failed', 'expired', 'cancelled'].includes(command.status)) break
+      await sleep(1500)
+    }
+    const shotLogs = logLines('屏幕截图[^\\n]*|无障碍截图[^\\n]*|已通过无障碍接口截屏[^\\n]*|截图执行失败[^\\n]*')
+    checkDiag(command?.status === 'succeeded',
+      `截图指令成功（status=${command?.status}）`,
+      () => `${JSON.stringify(command?.result ?? command?.error ?? {})}${diagnostics('截图指令未成功')}`)
+    checkDiag(shotLogs.some((l) => /已通过无障碍接口截屏/.test(l)),
+      '截图走的是无障碍免授权路径（不需要人点系统弹框）',
+      () => (shotLogs.length
+        ? `命中：${shotLogs.slice(-3).join(' | ')}`
+        : '未在 logcat 里看到「已通过无障碍接口截屏」') + diagnostics('截图没走免授权路径'))
+    checkDiag(!shotLogs.some((l) => /等待屏幕共享授权超时/.test(l)),
+      '没有出现「等待屏幕共享授权超时」（免授权路径根本不等授权）',
+      () => shotLogs.filter((l) => /超时/.test(l)).slice(-2).join(' | '))
+    checkDiag(!/MediaProjectionPermissionActivity/.test(adb('shell', 'logcat', '-d').out || ''),
+      '全程没有拉起 systemui 的屏幕共享授权页')
+
+    let freshShot = null
+    const appeared = await waitFor(async () => {
+      const now = await listMedia(token, 'screenshot')
+      const added = now.filter((m) => !beforeShots.some((b) => b.id === m.id))
+      if (added.length === 0) return false
+      freshShot = added[0]
+      return `新增 ${added.length} 张（${added.map((m) => `${m.sizeBytes ?? '?'}B`).join('、')}）`
+    }, { timeoutMs: 60_000, intervalMs: 3000 })
+    checkDiag(appeared.ok, '截图出现在家长端媒体列表（GET /api/media?kind=screenshot）',
+      () => `未观察到新截图；设备端日志：${shotLogs.slice(-3).join(' | ') || '(无)'}${diagnostics('媒体列表没出现新截图')}`)
+
+    if (appeared.ok && freshShot) {
+      const bytes = await fetchMediaBytes(freshShot.url)
+      checkDiag(bytes.status === 200 && bytes.bytes.length > 0,
+        `截图文件可下载且非空（${bytes.bytes.length} 字节，${bytes.contentType}）`)
+      checkDiag(bytes.bytes[0] === 0xff && bytes.bytes[1] === 0xd8,
+        '下载回来的确实是 JPEG（首两字节 FFD8）',
+        `首两字节 ${bytes.bytes[0]?.toString(16)} ${bytes.bytes[1]?.toString(16)}`)
+    }
+
+    // 屏幕洞察是另一个功能，别把设备留在「关掉」的状态
+    await setFeature(token, 'screenMonitor', true)
+  } catch (error) {
+    bad('屏幕截图验证异常中断', error.message)
+  }
+
+  // ============================================================
+  // 9. 连续录像
+  // ============================================================
+  step('9. 连续录像（capability/ScreenCapturer.startVideo / stopVideo）')
+  try {
+    // 录像<em>没有</em>免授权方案：无障碍的 takeScreenshot 只能抓单帧，录不了像。
+    // 所以录像注定依赖 MediaProjection，而它的授权位是 AppOp PROJECT_MEDIA ——
+    // 真机上由 provisioning 放行（android/README.md 里 dpm set-device-owner 旁边那条
+    // appops 命令），这里照做。不放行的话测出来的是「模拟器没 provisioning 过」，
+    // 而不是「录像链路通不通」。
+    // 自己看退出码：非零只记进证据，不当异常抛（否则整节会被一句环境问题打断）
+    const appopsSet = adb('shell', 'appops', 'set', PKG, 'PROJECT_MEDIA', 'allow')
+    await setFeature(token, 'videoRecord', true)
+    adb('logcat', '-c')
+    const beforeVideos = await listMedia(token, 'video')
+
+    const started = await dispatchAndWait(token, deviceId, '/device/start-recording', {}, {
+      timeoutMs: 60_000,
+    })
+    checkDiag(started.command?.status === 'succeeded',
+      `开始录像成功（status=${started.command?.status}）`,
+      () => `appops set 退出码=${appopsSet.code}；${JSON.stringify(started.command?.error ?? {})}${diagnostics('开始录像失败')}`)
+    const recordingId = started.command?.result?.recordingId
+    checkDiag(typeof recordingId === 'string' && recordingId.length > 0,
+      `服务端拿到录制 ID（${recordingId ?? '(无)'}）`,
+      () => `指令返回：${JSON.stringify(started.command?.result ?? {})}${diagnostics('没拿到录制 ID')}`)
+
+    if (recordingId) {
+      // 录不到 2 秒的片段没有上传价值（MediaRecorder 收尾太早会得到空文件），
+      // 8 秒足够稳定拿到一段能播的 MP4。
+      await sleep(8000)
+      const stopped = await dispatchAndWait(token, deviceId, '/device/stop-recording', { recordingId }, {
+        timeoutMs: 90_000,
+      })
+      checkDiag(stopped.command?.status === 'succeeded',
+        `停止录像成功（status=${stopped.command?.status}）`,
+        () => `${JSON.stringify(stopped.command?.error ?? {})}${diagnostics('停止录像失败')}`)
+
+      const videoLogs = logLines('录像[^\\n]*')
+      checkDiag(videoLogs.some((l) => /录像完成并已上传/.test(l)),
+        '设备端确认录像已生成并上传',
+        () => (videoLogs.length
+          ? `命中：${videoLogs.slice(-2).join(' | ')}`
+          : '未在 logcat 里看到「录像完成并已上传」') + diagnostics('录像没上传'))
+
+      let freshVideo = null
+      const appeared = await waitFor(async () => {
+        const now = await listMedia(token, 'video')
+        const added = now.filter((m) => !beforeVideos.some((b) => b.id === m.id))
+        if (added.length === 0) return false
+        freshVideo = added[0]
+        return `新增 ${added.length} 个（${added.map((m) => `${m.sizeBytes ?? '?'}B`).join('、')}）`
+      }, { timeoutMs: 60_000, intervalMs: 3000 })
+      checkDiag(appeared.ok, '录像出现在家长端媒体列表（GET /api/media?kind=video）',
+        () => `未观察到新录像；设备端日志：${videoLogs.slice(-2).join(' | ') || '(无)'}${diagnostics('媒体列表没出现新录像')}`)
+
+      if (appeared.ok && freshVideo) {
+        const bytes = await fetchMediaBytes(freshVideo.url)
+        checkDiag(bytes.status === 200 && bytes.bytes.length > 0,
+          `录像文件可下载且非空（${bytes.bytes.length} 字节，${bytes.contentType}）`)
+        // ISO BMFF（MP4）第 4~8 字节固定是 'ftyp'
+        const isMp4 = bytes.bytes[4] === 0x66 && bytes.bytes[5] === 0x74
+          && bytes.bytes[6] === 0x79 && bytes.bytes[7] === 0x70
+        checkDiag(isMp4, '下载回来的确实是 MP4（第 4~8 字节 ftyp）',
+          `实际 ${[4, 5, 6, 7].map((i) => bytes.bytes[i]?.toString(16)).join(' ')}`)
+      }
+    }
+
+    await setFeature(token, 'videoRecord', false)
+  } catch (error) {
+    bad('连续录像验证异常中断', error.message)
+  }
+
+  // ============================================================
+  // 10. 屏幕洞察周期采样
+  // ============================================================
+  step('10. 屏幕洞察周期采样（ScreenSampler + FrameBatchUploader）')
+  try {
+    // 采集默认是关的，而且这台设备历史上连配置行都没有 —— 不显式打开就永远等不到帧。
+    // 间隔/批量压到 schema 允许的下限（captureIntervalSeconds ≥ 10、framesPerBatch ≥ 2），
+    // 否则默认 30 秒 × 10 张要等五分钟才有一批，测试等不起。
+    await apiOrThrow('PUT', dq('/screen-monitor'), {
+      token,
+      body: { captureEnabled: true, captureIntervalSeconds: 10, framesPerBatch: 2 },
+    })
+    const configWritten = await waitFor(async () => {
+      const res = await api('GET', dq('/screen-monitor'), { token })
+      if (!res.ok) return false
+      const cfg = res.body?.config ?? res.body ?? {}
+      return cfg.captureEnabled === true
+        ? `captureEnabled=true, interval=${cfg.captureIntervalSeconds}s, perBatch=${cfg.framesPerBatch}`
+        : false
+    }, { timeoutMs: 60_000, intervalMs: 2000, label: '采集配置写入服务端' })
+    checkDiag(configWritten.ok, '屏幕洞察采集配置已写入服务端（GET /screen-monitor 回读 captureEnabled=true）',
+      `60 秒内回读到的仍是：${JSON.stringify(configWritten.last ?? null).slice(0, 120)}`)
+
+    // 设备端不是立刻读配置：它按自己的轮询周期拉一次（实测约 50 秒才把 pref 翻成 true）。
+    // 所以这里**轮询到成立为止**，而不是「睡一会儿采样一次」。
+    // 必须用 prefBool：capture_enabled 是 putBoolean 写进去的，XML 形态是
+    // `<boolean name="capture_enabled" value="true" />`，prefValue（只认 <string> 的文本节点）
+    // 会永远读到 null —— 实测第一轮就是这么假失败的。
+    const pulled = await waitFor(() => prefBool('capture_enabled') === true && 'pref capture_enabled=true',
+      { timeoutMs: 150_000, intervalMs: 3000, label: '设备端拉到采集开关' })
+    checkDiag(pulled.ok, '设备端已拉到「开始周期采集」（pref capture_enabled=true）',
+      () => `150 秒内没置 true（当前=${prefTyped('capture_enabled') ?? '(无)'}；`
+        + `logcat 是否已出现「家长已开启周期截屏」：${logLines('家长已开启周期截屏[^\\n]*').length > 0}）`
+        + diagnostics('设备端没拉采集开关'))
+
+    // 采集前的洞察条数只作基线：后面用它判断「这一批真的被服务端分析成洞察了」。
+    // 不写成 check —— 恒真断言会把通过数注水，比没有断言更糟。
+    const beforeInsights = await listInsights(token)
+    adb('logcat', '-c')
+
+    // 上传→落库→分析是一条流水线，中间有间隔（间隔下限 10 秒、一批 2 张，实测约 20 秒一批，
+    // 服务端分析还要再晚一点）。**两个信号一起轮询**：只等其中一个会把「上传成功但分析还没跑完」
+    // 误判成失败 —— 只采样一次更是必然踩坑。
+    let uploadedLog = null
+    let freshInsights = []
+    const pipeline = await waitFor(async () => {
+      const hits = logLines('已上传截屏包[^\\n]*')
+      if (hits.length) uploadedLog = hits[hits.length - 1]
+      const now = await listInsights(token)
+      freshInsights = now.filter((i) => !beforeInsights.some((b) => b.id === i.id))
+      if (uploadedLog && freshInsights.length > 0) {
+        return `${uploadedLog}；洞察新增 ${freshInsights.length} 条`
+          + `（batch 帧数：${freshInsights[0]?.frameCount ?? '?'}）`
+      }
+      return false
+    }, { timeoutMs: 240_000, intervalMs: 5000, label: '采样→上传→服务端洞察' })
+    checkDiag(uploadedLog !== null, '设备端攒满一批并成功上传（logcat「已上传截屏包」）',
+      () => diagnostics('240 秒内没等到「已上传截屏包」'))
+    checkDiag(pipeline.ok, '截屏包被服务端落库并分析成洞察（GET /api/insights 出现新行）',
+      () => `上传日志=${uploadedLog ?? '(无)'}，新洞察=${freshInsights.length} 条${diagnostics('截屏包没变成洞察')}`)
+
+    // 采样和「手动截图」共用 ScreenCapturer，所以顺带回归：采样也不该掉进要人点弹框的老路。
+    // 注意采样路径**故意不逐张打成功日志**（10 秒一张会把应用内日志环刷屏，见 ScreenCapturer
+    // 的 quiet 参数），产品侧改成在「截图路径变了 / 采样刚恢复 / 距上次记录满 60 秒」时记一行
+    // 「周期采样截图走…路径」—— 免授权失败会静默回退到 MediaProjection，不留痕就查不出来。
+    // 那条 60 秒心跳同时也是这条断言能稳定轮询到、而不是跟上面 `logcat -c` 抢「采样第一张」
+    // 那条日志的原因（第一张正好可能落在清空之前）。
+    let samplePathLog = null
+    const samplePath = await waitFor(() => {
+      const hits = logLines('周期采样截图走[^\\n]*')
+      if (hits.length) samplePathLog = hits[hits.length - 1]
+      return logLines('周期采样截图走无障碍免授权路径[^\\n]*').length > 0
+    }, { timeoutMs: 60_000, intervalMs: 3000, label: '采样截图路径日志' })
+    checkDiag(samplePath.ok, '周期采样走的是无障碍免授权路径',
+      () => (samplePathLog ? `采样路径日志实际是：${samplePathLog}；` : '没有「周期采样截图走…路径」日志（产品侧应在本批采样恢复时打一行）；')
+        + `「无障碍截图失败」告警=${logLines('无障碍截图失败[^\\n]*').length} 条`
+        + diagnostics('采样没走免授权路径'))
+    checkDiag(logLines('采样截图失败[^\\n]*').length === 0,
+      '采样没有失败告警（没有「采样截图失败」）',
+      () => logLines('采样截图失败[^\\n]*').slice(-2).join(' | '))
+    checkDiag(!/MediaProjectionPermissionActivity/.test(adb('shell', 'logcat', '-d').out || ''),
+      '采样全程没有拉起 systemui 的屏幕共享授权页')
+
+    // 采样是持续行为，测完关掉，别让设备一直拍孩子屏幕
+    await apiOrThrow('PUT', dq('/screen-monitor'), { token, body: { captureEnabled: false } })
+    ok('已关闭屏幕洞察采集（不留后台持续截屏）')
+  } catch (error) {
+    bad('屏幕洞察采样验证异常中断', error.message)
+  }
+
+  // ============================================================
+  // 11. 网址拦截 / DNS 过滤
+  // ============================================================
+  step('11. 网址拦截（DomainBlocker / DnsFilterVpnService）')
   // 用真实可解析的域名做靶子：被拦的那个本来是能解析出来的，
   // 这样「解析失败」才归因于拦截而不是「本来就没这个域名」。
   const blockedHost = 'example.com'
@@ -1509,9 +1918,9 @@ async function main() {
   }
 
   // ============================================================
-  // 9. 局数 / 集数预算
+  // 12. 局数 / 集数预算
   // ============================================================
-  step('9. 局数 / 集数预算（LockState.Reason.BUDGET / LockEnforcer.budgetLockReason）')
+  step('12. 局数 / 集数预算（LockState.Reason.BUDGET / LockEnforcer.budgetLockReason）')
   let budgetId = null
   try {
     const created = await api('PUT', dq('/usage-budgets'), {
@@ -1548,9 +1957,9 @@ async function main() {
   }
 
   // ============================================================
-  // 10. 远程协助
+  // 13. 远程协助
   // ============================================================
-  step('10. 远程协助（CommandExecutor.doRemoteAction / remoteHelp）')
+  step('13. 远程协助（CommandExecutor.doRemoteAction / remoteHelp）')
   try {
     await setFeature(token, 'remoteHelp', true)
     // 设备端每 60 秒才拉一次配置（CONFIG_REFRESH_INTERVAL_MS），
@@ -1606,9 +2015,179 @@ async function main() {
   }
 
   // ============================================================
-  // 收尾
+  // 14. 长活与防卸载（需求 2「不能被杀死」/ 需求 3「不能被卸载」）
   // ============================================================
-  step('11. 收尾')
+  step('14. 长活与防卸载（受保护包 / 卸载被拒 / 强停无效 / 杀进程自愈 / 无障碍失效上报）')
+  try {
+    // pidof 在「进程不在」时 exit=1，而 shell()/adbOrThrow() 会把非零退出码当异常抛；
+    // 自愈轮询必须用这个不抛的版本，否则「还没起来」会被当成脚本崩溃。
+    const pidOf = () => {
+      const r = adb('shell', 'pidof', PKG)
+      return r.code === 0 ? (r.out || '').trim() : ''
+    }
+    const owners = shell('dpm list-owners') || ''
+    const isDeviceOwner = owners.includes(PKG) && /DeviceOwner/.test(owners)
+
+    if (!isDeviceOwner) {
+      skip('长活与防卸载的全部设备级断言',
+        `本机不是设备所有者（dpm list-owners: ${owners.trim() || '(空)'}）。受保护包、卸载拦截、`
+        + '强停拦截都只对设备所有者生效；没设 DO 时跑这些断言只会得到「产品不行」的假失败。')
+    } else {
+      ok(`前提：本应用是设备所有者（${owners.split('\n')[0].trim()}）`)
+
+      // —— 受保护包（API 30+）：系统层面禁止强停 / 清除数据 ——
+      const policy = shell('dumpsys device_policy') || ''
+      if (/protectedPackages=\[[^\]]*com\.balloondog\.agent/.test(policy)) {
+        ok('受保护包已登记（dumpsys device_policy 的 protectedPackages 含本应用）')
+      } else {
+        const api = Number((shell('getprop ro.build.version.sdk') || '').trim())
+        if (api >= 30) {
+          bad('受保护包未登记（protectedPackages 不含本应用）',
+            policy.match(/protectedPackages=\[[^\]]*\]/)?.[0] || '(dumpsys 里没有该字段)')
+        } else {
+          skip('受保护包断言',
+            `本机 API ${api} < 30：setUserControlDisabledPackages 是 API 30 才有的，`
+            + '低版本只剩 DISALLOW_APPS_CONTROL 兜底（按钮变灰但 am force-stop 仍可能生效）')
+        }
+      }
+
+      // —— 卸载被拒（真实命令，看退出码与原文）——
+      const uninstall = adb('shell', 'pm', 'uninstall', PKG)
+      check(uninstall.code !== 0,
+        `pm uninstall 被系统拒绝（exit=${uninstall.code}）`,
+        (uninstall.out || uninstall.err || '').trim())
+      check(/DELETE_FAILED|Failure|not allowed|protected/i.test(`${uninstall.out}${uninstall.err}`),
+        '拒绝理由是「不允许删除 / 受保护」，而不是「包不存在」',
+        (uninstall.out || uninstall.err || '').trim())
+
+      // —— 停用被拒：受保护包最直接的证据 ——
+      const disable = adb('shell', 'pm', 'disable-user', '--user', '0', PKG)
+      check(disable.code !== 0, `pm disable-user 被拒绝（exit=${disable.code}）`,
+        (disable.err || disable.out || '').trim())
+      check(/protected package/i.test(`${disable.err}${disable.out}`),
+        '拒绝原文是「Cannot disable a protected package」——受保护包在起作用',
+        (disable.err || disable.out || '').trim())
+
+      // —— 撤销设备管理员被拒 ——
+      const removeAdmin = adb('shell', 'dpm', 'remove-active-admin',
+        `${PKG}/.capability.AgentAdminReceiver`)
+      check(removeAdmin.code !== 0,
+        `dpm remove-active-admin 被拒绝（exit=${removeAdmin.code}）`,
+        (removeAdmin.err || removeAdmin.out || '').trim())
+
+      // —— 强行停止：受保护包连 shell 的 am force-stop 都挡得住 ——
+      const pidBefore = pidOf()
+      if (!pidBefore) {
+        bad('前提：应用进程在运行', 'pidof 为空，强停与自愈都无从验证')
+      } else {
+        adb('shell', 'am', 'force-stop', PKG)
+        await sleep(2500)
+        const pidAfterStop = pidOf()
+        check(pidAfterStop === pidBefore,
+          `am force-stop 没能杀掉受保护包（PID 保持 ${pidBefore}）`,
+          pidAfterStop === pidBefore ? '' : `PID 变成 ${pidAfterStop || '(空)'}`)
+      }
+
+      // —— 杀进程自愈（kill -9 走 root，绕开受保护包，模拟低内存回收）——
+      const rooted = await ensureRoot()
+      if (!rooted) {
+        skip('杀进程自愈断言', '拿不到 adb root：普通 shell 杀不掉应用进程（受保护包），kill -9 只会静默失败')
+      } else {
+        const beforeKill = pidOf()
+        // 先清 logcat：这样「Agent 服务已启动」只可能来自本次被杀之后的新进程。
+        // 多一条证据链是有原因的 —— 实测 adb 抖动时 `pidof` 会返回空，
+        // 只用 pidof 轮询会把「真的起来了」误判成「没起来」。
+        adb('logcat', '-c')
+        const t0 = Date.now()
+        const killed = await killAgentProcess()
+        check(killed, `已 kill -9 掉应用进程（旧 PID ${beforeKill || '(无)'}）`)
+        const back = await waitFor(() => {
+          const pid = pidOf()
+          if (pid && pid !== beforeKill) return `新 PID ${pid}`
+          return /Agent 服务已启动/.test(agentLog())
+            ? 'logcat 命中新进程的「Agent 服务已启动」' : false
+        }, { timeoutMs: 90_000, intervalMs: 3000, label: '进程自愈' })
+        if (!back.ok) {
+          bad('被杀后进程没有自己回来（90 秒内既没有新 PID，也没有启动日志）',
+            `旧 PID ${beforeKill || '(无)'}；当前 pidof=${pidOf() || '(空)'}；`
+            + `最近日志=${agentLog(6).trim().split('\n').slice(-2).join(' | ') || '(空)'}`)
+        }
+        const seconds = ((Date.now() - t0) / 1000).toFixed(0)
+        check(back.ok, `被杀后进程自己回来了（耗时 ${seconds} 秒）`, back.detail)
+      }
+
+      // —— 加固清单必须「可枚举 + 每次都重新施加」——
+      await sleep(3000)
+      const hardeningLog = agentLog()
+      const itemLines = hardeningLog.match(/气球狗加固\[[^\]]+\] applied=/g) || []
+      check(itemLines.length >= 15,
+        `加固自检逐项清单真的打出来了（${itemLines.length} 项，供家长端/自检页展示与断言）`,
+        hardeningLog.split('\n').filter((l) => /气球狗加固/.test(l)).slice(0, 3).join(' | '))
+      const summaries = hardeningLog.match(/气球狗加固自检（[^）]*）：\d+\/\d+ 项生效[^\n]*/g) || []
+      check(summaries.length > 0, '加固自检有汇总行（X/Y 项生效）', summaries.slice(-1)[0] || '(无)')
+      check(Boolean(summaries.slice(-1)[0]),
+        `汇总行里能读出「多少项生效」（${(summaries.slice(-1)[0] || '').trim()}）`)
+
+      if (prefBool('hardening_enabled') === false) {
+        skip('设备所有者限制清单断言', '家长把「最强防护」关掉了（pref hardening_enabled=false），限制本来就不该在')
+      } else {
+        for (const name of ['no_control_apps', 'no_uninstall_apps', 'no_factory_reset',
+          'no_safe_boot', 'no_config_date_time', 'no_add_user']) {
+          check(effectiveUserRestriction(name),
+            `设备所有者限制 ${name} 在生效（dumpsys user 的 Effective restrictions）`)
+        }
+      }
+
+      // —— 最严重的绕过面：孩子关掉无障碍服务 ——
+      // Android 不给设备所有者「强制开启无障碍服务」的权限（实测 dpm.setSecureSetting
+      // 被 Permission denial 拒绝），所以这里能钉死的是「检测 + 上报」这一半：
+      // 关掉后必须立刻检测到、并且真的在家长端留下一条 tamper 事件。
+      const a11yService = `${PKG}/${PKG}.service.LockWatchdogService`
+      adb('logcat', '-c')
+      adb('shell', 'settings', 'put', 'secure', 'enabled_accessibility_services', '""')
+      adb('shell', 'settings', 'put', 'secure', 'accessibility_enabled', '0')
+      const detected = await waitFor(() => {
+        return /气球狗保活检测到无障碍看门狗失效/.test(agentLog())
+          ? 'logcat 命中「气球狗保活检测到无障碍看门狗失效」' : false
+      }, { timeoutMs: 45_000, intervalMs: 3000, label: '无障碍失效检测' })
+      check(detected.ok,
+        '关掉无障碍后设备端立刻检测到并尝试自救（不去设置里点，设备端就该知道）',
+        agentLog().split('\n').filter((l) => /无障碍/.test(l)).slice(-3).join(' | ') || '(无日志)')
+      // 窗口给到 120 秒、翻 30 条：设备端事件是排队上传的，实测同一条事件在设备日志里
+      // 17:10:35.870 产生、服务端列表里时间戳一致，但 60 秒窗口内不一定已经翻到它。
+      //
+      // ⚠️ 现场噪声（务必先排除再判产品缺陷）：`adb shell uiautomator dump`（UiAutomation）
+      // **会把我们的无障碍服务挤掉**，制造一对**假** tamper —— `无障碍守护已被关闭` +
+      // `无法自动恢复无障碍守护`，几秒后服务自动重连。本脚本的 `dumpUi()`/`tapByText()`
+      // 正是这种写法，所以：①若这一对事件出现的时间和 dumpUi 对得上、且当下没有对
+      // `enabled_accessibility_services` / `accessibility_enabled` 的写入，那是脚手架噪声、
+      // 不是产品缺陷；②更隐蔽的是它也能让下面这条断言**假通过**（噪声同样匹配
+      // `无障碍守护已被关闭`），所以判别真伪要看上面那条 logcat 检测断言 + 本次是否真的写过设置键。
+      // 这也是为什么本节的关/开都是显式 `settings put`，而不是靠 dump 之后碰运气。
+      const reported = await waitFor(async () => {
+        const events = await listDeviceEvents(token, 'tamper', 30)
+        const hit = events.find((e) => /无障碍守护已被关闭/.test(e.detail || ''))
+        return hit ? `tamper：${hit.detail}` : false
+      }, { timeoutMs: 120_000, intervalMs: 5000, label: 'tamper 上报' })
+      check(reported.ok,
+        '家长端真的收到 tamper 事件（GET /api/device-events?type=tamper）', reported.detail)
+
+      // 还原现场：后面还有收尾步骤，不能让设备一直处于「无障碍被关掉」
+      adb('shell', 'settings', 'put', 'secure', 'enabled_accessibility_services', a11yService)
+      adb('shell', 'settings', 'put', 'secure', 'accessibility_enabled', '1')
+      const reconnected = await waitFor(() => {
+        return /无障碍看门狗已连接/.test(agentLog()) ? 'logcat 命中「无障碍看门狗已连接」' : false
+      }, { timeoutMs: 45_000, intervalMs: 3000, label: '无障碍重连' })
+      check(reconnected.ok, '恢复无障碍后看门狗重新连上（现场已还原）', reconnected.detail)
+    }
+  } catch (error) {
+    bad('长活与防卸载验证异常中断', error.message)
+  }
+
+  // ============================================================
+  // 15. 收尾
+  // ============================================================
+  step('15. 收尾')
   adbOrThrow('shell', 'am', 'start', '-n', `${PKG}/.ui.MainActivity`).toString()
   await sleep(2000)
   const purgedEnd = await purgeLeftoverDevices(deviceModel(), [deviceId])

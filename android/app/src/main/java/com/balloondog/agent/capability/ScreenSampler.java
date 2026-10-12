@@ -45,11 +45,20 @@ public final class ScreenSampler {
 
     private static final String DIR_NAME = "screen-frames";
 
+    /** 「采样走哪条截图路径」这类日志的最小间隔（60 秒一次心跳，其余只在路径变化时记）。 */
+    private static final long PATH_LOG_INTERVAL_MS = 60_000L;
+
     private final Context appContext;
     private final AgentStore store;
 
     /** 上一次采样的时刻（墙上时间）。 */
     private long lastSampleAt;
+
+    /** 上一次为「采样路径」打过日志的路径，用于只在路径变化时补一条日志。 */
+    private ScreenCapturer.CapturePath loggedCapturePath;
+
+    /** 上一次记录「采样走哪条截图路径」的时刻。 */
+    private long lastPathLogAt;
 
     public ScreenSampler(Context context, AgentStore store) {
         this.appContext = context.getApplicationContext();
@@ -98,11 +107,15 @@ public final class ScreenSampler {
 
         // 到点了：先试着截图。失败不推进 lastSampleAt，下一轮会立刻重试，
         // 这样「临时失败」不会让采样白白少一张
+        // 距上次采样超过 3 个间隔 ⇒ 这是「采样刚恢复」后的第一张（家长刚打开开关、
+        // 服务刚重启、或刚度过锁定态），值得把用的哪条截图路径记一笔。
+        boolean resumed = lastSampleAt == 0 || nowMillis - lastSampleAt > interval * 3;
         try {
             byte[] jpeg = ScreenCapturer.captureScreenshotLowRes(
                     appContext, SAMPLE_LONG_EDGE, SAMPLE_JPEG_QUALITY, CAPTURE_TIMEOUT_MS);
             lastSampleAt = nowMillis;
             writeFrame(jpeg, nowMillis);
+            logCapturePathIfNeeded(resumed);
             enforceQuota();
         } catch (CapabilityException e) {
             // 屏幕录制授权失效是最常见的原因（Android 14 每次新会话都要重新授权）
@@ -114,6 +127,36 @@ public final class ScreenSampler {
         }
 
         return takeBatchIfReady();
+    }
+
+    /**
+     * 把「本张采样走的是哪条截图路径」记进日志 —— 只在**采样刚恢复**或**路径变了**时记一行。
+     *
+     * <p>为什么不能每张都记：采样是 10 秒一张的持续行为，而应用内日志环只有最近 200 条，
+     * 逐张记会把它刷屏，家长端「运行日志」里就再也看不到锁定 / 篡改这类要紧事件
+     * （这也是 {@link ScreenCapturer} 给采样留 {@code quiet} 参数的原因）。
+     *
+     * <p>为什么又必须记：免授权截图（无障碍路径）失败时会**静默**回退到要点系统弹框的
+     * MediaProjection，运行态下从外部根本看不出来 —— 这正是「截图功能不好用」当初查不出
+     * 根因的原因之一。恢复采样时记一行、路径切换时再记一行，成本可忽略。
+     */
+    private void logCapturePathIfNeeded(boolean resumed) {
+        ScreenCapturer.CapturePath path = ScreenCapturer.lastCapturePath();
+        if (path == null) return;
+        boolean changed = path != loggedCapturePath;
+        long now = System.currentTimeMillis();
+        // 三条放行条件，缺一不可：
+        //  1) **路径变了** —— 最要紧的信号：免授权突然失败、静默回退到要授权的 MediaProjection；
+        //  2) **采样刚恢复** —— 家长刚打开开关 / 服务刚重启，给一个即时的「走的哪条路」；
+        //  3) **距上次记录满 60 秒** —— 一条心跳。它的存在不是为了刷屏，而是为了让「现在走的是
+        //     免授权」这件事在任何时刻都能被观测到：逐张打会刷屏（见方法注释），只在路径变化时打
+        //     则可能整段窗口一条都没有（采样第一张的日志会落在 e2e 清空 logcat 之前）。
+        if (!changed && !resumed && now - lastPathLogAt < PATH_LOG_INTERVAL_MS) return;
+        loggedCapturePath = path;
+        lastPathLogAt = now;
+        EventLog.info(path == ScreenCapturer.CapturePath.ACCESSIBILITY
+                ? "周期采样截图走无障碍免授权路径（不需要点系统弹框）"
+                : "周期采样截图回退到屏幕共享授权路径（无障碍截图不可用）");
     }
 
     /** 攒够一批就取走。 */

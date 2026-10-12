@@ -46,10 +46,13 @@ import java.util.List;
  *       权限清单见 {@link #requiredPermissions()}，入口是设置页的「一键授权」。</li>
  * </ol>
  *
- * <p><b>刻意不包含</b> {@code PACKAGE_USAGE_STATS}（使用情况访问）：
- * 它是 appop 型特殊权限，{@code setPermissionGrantState} 也授不了，
- * 只能在系统设置页手动开 —— 那条路见 {@link AppUsageTracker#openSettings(Context)}。
- * 也不包含 VPN 授权，那条见 {@code DnsFilterVpnService} 的 {@code VpnService.prepare()}。
+ * <p>另外尽力而为地处理两个 appop 型特殊权限：{@code SYSTEM_ALERT_WINDOW}（悬浮窗）与
+ * {@code PACKAGE_USAGE_STATS}（使用情况访问）。它们不是运行时权限，
+ * {@code requestPermissions} 弹不出来，只能去系统设置页手动开；而
+ * {@code setPermissionGrantState} <b>可能在部分 ROM 上支持代授</b>，
+ * 所以 {@link #grantSpecialAsDeviceOwner(Context)} 会试一次并如实报告结果
+ * （Android 13 模拟器实测：两条都被系统拒绝，仍需家长手动开）。
+ * VPN 授权不在其列，见 {@code DnsFilterVpnService} 的 {@code VpnService.prepare()}。
  */
 public final class PermissionGranter {
 
@@ -141,6 +144,75 @@ public final class PermissionGranter {
         }
     }
 
+    // ------------------------------------------------- appop 型特殊权限（尽力而为）
+
+    /**
+     * appop 型特殊权限。它们不是运行时权限，{@code requestPermissions} 弹不出来，
+     * 只能在系统设置里手动开 —— 但设备所有者<b>可能</b>能用
+     * {@code setPermissionGrantState} 代授，所以这里逐个试并如实回报结果。
+     *
+     * <p>本工程实测结论（写在 README 里）：在 Android 13 模拟器上这两条
+     * <b>都会被系统拒绝（返回 false / 抛 IllegalArgumentException）</b>，
+     * 所以「使用情况访问」和「悬浮窗」目前仍必须家长手动开。
+     * 保留这段代码的意义是：一旦某台机器的 ROM 支持，它会自动补上，且日志会写清楚。
+     */
+    public static List<String> specialPermissions() {
+        return Arrays.asList(
+                android.Manifest.permission.SYSTEM_ALERT_WINDOW,
+                "android.permission.PACKAGE_USAGE_STATS");
+    }
+
+    /** 某个特殊权限当前是否真的开着（读真实状态，不是读「我调过 API」）。 */
+    public static boolean isSpecialGranted(Context context, String permission) {
+        if (android.Manifest.permission.SYSTEM_ALERT_WINDOW.equals(permission)) {
+            return Settings.canDrawOverlays(context);
+        }
+        if ("android.permission.PACKAGE_USAGE_STATS".equals(permission)) {
+            try {
+                android.app.AppOpsManager ops = (android.app.AppOpsManager)
+                        context.getSystemService(Context.APP_OPS_SERVICE);
+                if (ops == null) return false;
+                return ops.checkOpNoThrow(android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+                        android.os.Process.myUid(), context.getPackageName())
+                        == android.app.AppOpsManager.MODE_ALLOWED;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 尝试用设备所有者身份静默代授 appop 型特殊权限。
+     *
+     * @return 本次真正补上的条数（0 表示系统不支持代授，需要家长手动开）
+     */
+    public static int grantSpecialAsDeviceOwner(Context context) {
+        DevicePolicyManager dpm =
+                (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
+        if (dpm == null || !dpm.isDeviceOwnerApp(context.getPackageName())) return 0;
+
+        ComponentName admin = new ComponentName(context, AgentAdminReceiver.class);
+        int granted = 0;
+        for (String permission : specialPermissions()) {
+            if (isSpecialGranted(context, permission)) continue;
+            try {
+                boolean ok = dpm.setPermissionGrantState(admin, context.getPackageName(), permission,
+                        DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED);
+                if (ok && isSpecialGranted(context, permission)) {
+                    granted++;
+                    EventLog.success("设备所有者已静默授予「" + labelOf(permission) + "」");
+                } else {
+                    EventLog.warn("设备所有者代授「" + labelOf(permission)
+                            + "」无效：系统不支持代授，只能由家长在系统设置里手动开启");
+                }
+            } catch (Exception e) {
+                EventLog.warn("设备所有者代授「" + labelOf(permission) + "」失败：" + e.getMessage());
+            }
+        }
+        return granted;
+    }
+
     /** 给人看的一行状态，设置页直接铺开显示。 */
     public static String describe(Context context) {
         StringBuilder sb = new StringBuilder();
@@ -164,6 +236,8 @@ public final class PermissionGranter {
         if (android.Manifest.permission.READ_CALL_LOG.equals(permission)) return "通话记录";
         if (android.Manifest.permission.READ_SMS.equals(permission)) return "短信";
         if ("android.permission.POST_NOTIFICATIONS".equals(permission)) return "通知";
+        if (android.Manifest.permission.SYSTEM_ALERT_WINDOW.equals(permission)) return "悬浮窗";
+        if ("android.permission.PACKAGE_USAGE_STATS".equals(permission)) return "使用情况访问";
         return permission;
     }
 }

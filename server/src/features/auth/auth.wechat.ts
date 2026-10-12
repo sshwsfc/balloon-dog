@@ -189,3 +189,157 @@ export async function exchangeCodeForOpenid(code: string): Promise<{ openid: str
 export function mockOpenidFor(state: string): string {
   return `mock_openid_${state}`;
 }
+
+// ---------------- 网页 JS-SDK（扫一扫）签名 ----------------
+
+/**
+ * 前端 `wx.config` 所需的签名参数。
+ *
+ * 家长端「绑定设备」里的扫一扫走微信 JS-SDK：前端把当前页面地址发过来，
+ * 这里用 jsapi_ticket 算出 signature 回给前端。
+ *
+ * 为什么签名必须放服务端：`jsapi_ticket` 要用公众号的 AppSecret 换，
+ * 而 AppSecret 绝不能下发到浏览器。
+ *
+ * 签名算法（微信官方规定，字段顺序不能变）：
+ *   string1 = jsapi_ticket=TICKET&noncestr=NONCESTR&timestamp=TIMESTAMP&url=URL
+ *   signature = sha1(string1)
+ * 其中 url 必须与调用 wx.config 的页面地址**逐字符一致**（含 query，不含 #hash）。
+ */
+export interface JsapiSignature {
+  appId: string;
+  timestamp: number;
+  nonceStr: string;
+  signature: string;
+}
+
+interface CachedCredential {
+  value: string;
+  /** 绝对过期时刻（毫秒）。 */
+  expiresAt: number;
+}
+
+/**
+ * access_token / jsapi_ticket 的进程内缓存。
+ *
+ * 必须缓存：这两个接口都是 7200 秒有效期，但 access_token 每天只有 2000 次
+ * 调用配额，每次扫码都去换很容易把当天额度烧光。
+ *
+ * 提前 `CREDENTIAL_SAFETY_MS` 过期，避开「刚取到就过期」的边界。多实例部署时
+ * 每个实例各自持有一份缓存，会各自消耗配额，但仍是可接受的数量级。
+ */
+let cachedAccessToken: CachedCredential | null = null;
+let cachedJsapiTicket: CachedCredential | null = null;
+
+const CREDENTIAL_SAFETY_MS = 5 * 60 * 1000;
+const CREDENTIAL_DEFAULT_TTL_MS = 7200 * 1000;
+
+/** 微信开放接口返回的错误形状（成功时不带 errcode 或为 0）。 */
+interface WechatApiError {
+  errcode?: number;
+  errmsg?: string;
+}
+
+async function fetchWechatApi<T>(url: string, what: string): Promise<T> {
+  const res = await fetch(url);
+  if (!res.ok) {
+    logger.warn({ msg: 'wechat api http failed', what, status: res.status });
+    throw new ServiceUnavailableError('微信接口暂时不可用，请稍后重试', 'WECHAT_UPSTREAM_ERROR');
+  }
+  const data = (await res.json()) as T & WechatApiError;
+  if (data.errcode) {
+    // errmsg 只写日志：可能带 appid / 内网信息
+    logger.warn({ msg: 'wechat api failed', what, errcode: data.errcode, errmsg: data.errmsg });
+    throw new ServiceUnavailableError('微信接口暂时不可用，请稍后重试', 'WECHAT_UPSTREAM_ERROR');
+  }
+  return data;
+}
+
+/** 取（并缓存）公众号全局 access_token。 */
+async function getAccessToken(): Promise<string> {
+  const now = Date.now();
+  if (cachedAccessToken && cachedAccessToken.expiresAt > now) return cachedAccessToken.value;
+
+  const appId = config.WECHAT_LOGIN_APP_ID!;
+  const secret = config.WECHAT_LOGIN_APP_SECRET!;
+  const data = await fetchWechatApi<{ access_token?: string; expires_in?: number }>(
+    'https://api.weixin.qq.com/cgi-bin/token?' +
+      `grant_type=client_credential&appid=${appId}&secret=${secret}`,
+    'access_token',
+  );
+  if (!data.access_token) {
+    logger.warn({ msg: 'wechat access_token missing in response' });
+    throw new ServiceUnavailableError('微信接口返回异常，请稍后重试', 'WECHAT_UPSTREAM_ERROR');
+  }
+  cachedAccessToken = {
+    value: data.access_token,
+    expiresAt:
+      now + (data.expires_in ? data.expires_in * 1000 : CREDENTIAL_DEFAULT_TTL_MS) - CREDENTIAL_SAFETY_MS,
+  };
+  return cachedAccessToken.value;
+}
+
+/** 取（并缓存）jsapi_ticket。 */
+async function getJsapiTicket(): Promise<string> {
+  const now = Date.now();
+  if (cachedJsapiTicket && cachedJsapiTicket.expiresAt > now) return cachedJsapiTicket.value;
+
+  const accessToken = await getAccessToken();
+  const data = await fetchWechatApi<{ ticket?: string; expires_in?: number }>(
+    'https://api.weixin.qq.com/cgi-bin/ticket/getticket?' +
+      `access_token=${accessToken}&type=jsapi`,
+    'jsapi_ticket',
+  );
+  if (!data.ticket) {
+    logger.warn({ msg: 'wechat jsapi_ticket missing in response' });
+    throw new ServiceUnavailableError('微信接口返回异常，请稍后重试', 'WECHAT_UPSTREAM_ERROR');
+  }
+  cachedJsapiTicket = {
+    value: data.ticket,
+    expiresAt:
+      now + (data.expires_in ? data.expires_in * 1000 : CREDENTIAL_DEFAULT_TTL_MS) - CREDENTIAL_SAFETY_MS,
+  };
+  return cachedJsapiTicket.value;
+}
+
+/** 给页面地址签名，供前端 `wx.config` 使用。 */
+export async function jsapiSignature(url: string): Promise<JsapiSignature> {
+  if (!wechatLoginConfigured) {
+    throw new ServiceUnavailableError('微信 JS-SDK 未配置', 'WECHAT_NOT_CONFIGURED');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new BadRequestError('url 参数不是合法的绝对地址');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new BadRequestError('url 参数必须是 http/https 地址');
+  }
+
+  const ticket = await getJsapiTicket();
+  const nonceStr = crypto.randomBytes(8).toString('hex');
+  const timestamp = Math.floor(Date.now() / 1000);
+  // 注意：这里对 url 不做任何规范化/解码，必须原样拼进去，
+  // 否则签名与前端页面地址不一致，微信会报 invalid signature。
+  const raw = `jsapi_ticket=${ticket}&noncestr=${nonceStr}&timestamp=${timestamp}&url=${url}`;
+  const signature = crypto.createHash('sha1').update(raw, 'utf8').digest('hex');
+
+  // host 与 PUBLIC_BASE_URL 不一致，最常见的原因是公众号后台没把当前域名填进
+  // 「JS 接口安全域名」。只告警不拒绝：本地/内网联调本来就允许不一致。
+  try {
+    const base = new URL(config.PUBLIC_BASE_URL);
+    if (base.host !== parsed.host) {
+      logger.warn({
+        msg: 'wechat jsapi url host mismatch',
+        urlHost: parsed.host,
+        publicHost: base.host,
+      });
+    }
+  } catch {
+    // PUBLIC_BASE_URL 没配或不是绝对地址时跳过这个检查
+  }
+
+  return { appId: config.WECHAT_LOGIN_APP_ID!, timestamp, nonceStr, signature };
+}

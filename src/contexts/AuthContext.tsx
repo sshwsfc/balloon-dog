@@ -11,6 +11,7 @@ import {
 } from '@/services/api'
 import type { User } from '@/types'
 import { toast } from 'sonner'
+import { useTranslation } from 'react-i18next'
 
 interface AuthContextValue {
   user: User | null
@@ -31,14 +32,15 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const { t } = useTranslation()
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
 
   const logout = useCallback((options?: { silent?: boolean }) => {
     setAuthToken(null)
     setUser(null)
-    if (!options?.silent) toast.success('已退出登录')
-  }, [])
+    if (!options?.silent) toast.success(t('已退出登录'))
+  }, [t])
 
   /**
    * 令牌失效的集中处理：API 层已经在 401 时清掉本地凭证，
@@ -62,21 +64,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return
       }
       setAuthToken(token)
-      try {
-        const profile = await userApi.getProfile()
-        if (!cancelled) setUser(profile)
-      } catch (error) {
-        // 令牌过期/账号被禁用：静默清理，不要弹错误打扰用户
-        if (!cancelled) {
-          setAuthToken(null)
-          setUser(null)
-          if (error instanceof ApiError && error.status !== 401) {
-            console.error('恢复登录态失败：', error)
+
+      /*
+       * 只有 401/403 才说明「令牌真的失效了」，那时才清凭证。
+       *
+       * 这里以前不分青红皂白，任何异常都走 setAuthToken(null) + setUser(null)：
+       * 于是限流 429、后端 5xx、一次网络抖动，统统被当成「登录已过期」，
+       * 用户被踢回登录页、本地令牌也被删掉，只能重新输一遍密码。
+       * 那些都不是登录态失效，只是这一次请求没成功，退避重试一下就该恢复。
+       */
+      const MAX_ATTEMPTS = 3
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+        try {
+          const profile = await userApi.getProfile()
+          if (!cancelled) setUser(profile)
+          break
+        } catch (error) {
+          if (cancelled) break
+
+          const authFailed =
+            error instanceof ApiError && (error.status === 401 || error.status === 403)
+          if (authFailed) {
+            // 令牌过期/账号被禁用：静默清理，不要弹错误打扰用户
+            setAuthToken(null)
+            setUser(null)
+            break
           }
+
+          if (attempt < MAX_ATTEMPTS) {
+            await new Promise((resolve) => setTimeout(resolve, 400 * attempt))
+            continue
+          }
+          /*
+           * 重试后仍然失败（离线、后端 5xx、被限流 429）：保留本地令牌。
+           * 清掉凭证会把「服务端抖了一下」升级成「必须重新登录」；留着它，
+           * 用户刷新一次页面就能恢复。
+           */
+          console.error('恢复登录态失败（已保留本地凭证，可刷新重试）：', error)
         }
-      } finally {
-        if (!cancelled) setLoading(false)
       }
+
+      if (!cancelled) setLoading(false)
     }
 
     void restore()
@@ -90,51 +118,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const res = await authApi.login({ phone, password })
       setAuthToken(res.token)
       setUser(res.user)
-      toast.success('登录成功')
+      toast.success(t('登录成功'))
       return true
     } catch (error) {
-      toast.error(toUserMessage(error, '登录失败，请稍后重试'))
+      toast.error(toUserMessage(error, t('登录失败，请稍后重试')))
       return false
     }
-  }, [])
+  }, [t])
 
   const smsLogin = useCallback(async (phone: string, code: string) => {
     try {
       const res = await authApi.smsLogin({ phone, code })
       setAuthToken(res.token)
       setUser(res.user)
-      toast.success(res.isNew ? '账号已创建，欢迎使用' : '登录成功')
+      toast.success(res.isNew ? t('账号已创建，欢迎使用') : t('登录成功'))
       return true
     } catch (error) {
-      toast.error(toUserMessage(error, '登录失败，请稍后重试'))
+      toast.error(toUserMessage(error, t('登录失败，请稍后重试')))
       return false
     }
-  }, [])
+  }, [t])
 
   const register = useCallback(async (phone: string, password: string, code: string) => {
     try {
       const res = await authApi.register({ phone, password, code })
       setAuthToken(res.token)
       setUser(res.user)
-      toast.success('注册成功')
+      toast.success(t('注册成功'))
       return true
     } catch (error) {
-      toast.error(toUserMessage(error, '注册失败，请稍后重试'))
+      toast.error(toUserMessage(error, t('注册失败，请稍后重试')))
       return false
     }
-  }, [])
+  }, [t])
 
   /** 发送验证码；联调模式下返回 devCode 供页面提示（生产环境为 null）。 */
   const sendCode = useCallback(async (phone: string, purpose: 'register' | 'login' | 'bind' = 'register') => {
     try {
       const res = await authApi.sendCode(phone, purpose)
-      toast.success(res.message || '验证码已发送')
+      toast.success(res.message || t('验证码已发送'))
       return res.devCode ?? null
     } catch (error) {
-      toast.error(toUserMessage(error, '发送验证码失败'))
+      toast.error(toUserMessage(error, t('发送验证码失败')))
       return null
     }
-  }, [])
+  }, [t])
 
   /**
    * 轮询一次微信扫码状态。
@@ -157,16 +185,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             /* 让后续请求的 401 处理兜底 */
           }
         }
-        toast.success('微信登录成功')
+        toast.success(t('微信登录成功'))
         return true
       }
       return false
     } catch (error) {
       // 二维码过期是常见情况，提示一次即可，不打断轮询外的其它 UI
-      toast.error(toUserMessage(error, '微信登录失败'))
+      toast.error(toUserMessage(error, t('微信登录失败')))
       return false
     }
-  }, [])
+  }, [t])
 
   const refreshUser = useCallback(async () => {
     try {

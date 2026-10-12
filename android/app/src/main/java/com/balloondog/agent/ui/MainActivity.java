@@ -2,10 +2,14 @@ package com.balloondog.agent.ui;
 
 import android.Manifest;
 import android.app.PendingIntent;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.net.Uri;
+import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -15,9 +19,14 @@ import android.text.InputType;
 import android.provider.Settings;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
+import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
+import android.view.LayoutInflater;
 import android.view.View;
 import android.widget.EditText;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -29,6 +38,7 @@ import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
 
 import com.balloondog.agent.R;
+import com.balloondog.agent.capability.AppUsageTracker;
 import com.balloondog.agent.capability.KioskController;
 import com.balloondog.agent.capability.LockCapability;
 import com.balloondog.agent.capability.LockController;
@@ -37,32 +47,93 @@ import com.balloondog.agent.capability.LockState;
 import com.balloondog.agent.capability.LocationReader;
 import com.balloondog.agent.capability.OwnerHardening;
 import com.balloondog.agent.capability.PasswordLockController;
+import com.balloondog.agent.capability.PermissionGranter;
 import com.balloondog.agent.capability.PhotoCapturer;
+import com.balloondog.agent.capability.ScreenCapturer;
 import com.balloondog.agent.data.AgentStore;
 import com.balloondog.agent.data.EventLog;
 import com.balloondog.agent.databinding.ActivityMainBinding;
+import com.balloondog.agent.databinding.ItemPermissionRowBinding;
 import com.balloondog.agent.model.JsonUtils;
 import com.balloondog.agent.service.AgentService;
+import com.balloondog.agent.service.DnsFilterVpnService;
 import com.balloondog.agent.service.LockWatchdogService;
-import com.balloondog.agent.service.WatchdogScheduler;
+import com.balloondog.agent.service.LongevityGuard;
+import com.google.android.material.button.MaterialButton;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
- * Agent 的主界面：配对引导 + 运行状态 + 运行日志。
+ * Agent 的主界面：任务导向的引导页。
  *
- * <p>这台设备平时由孩子使用，家长只在「刚装好」和「出问题时」才会打开它，
- * 所以界面按「先给绑定码，再给一键授权，最后给出排查用的日志」排列。
+ * <p>这台设备平时由孩子使用，孩子打开它时最常问的是「我现在该干什么」，
+ * 所以界面按待办顺序排列：先看守护在不在跑 → 没绑定就引导绑定 →
+ * 逐项列出还没开的权限（带原因和实时状态徽标）→ 应急解锁 →
+ * 排查用的诊断信息全部收进「高级 / 诊断」折叠区。
+ *
+ * <p>权限状态一律<b>现场读取</b>（{@code renderState()} 每 2 秒跑一次，
+ * 每次授权动作、{@code onResume()} 之后也会重跑），不做任何缓存，
+ * 避免出现「界面写着已开启、其实早就被系统撤销」这种家长照着折腾半天也没用的情况。
  */
 public class MainActivity extends AppCompatActivity implements EventLog.Listener {
 
     private static final int REQUEST_DEVICE_ADMIN = 0x1001;
 
+    /** 绑定码二维码的展示边长，与 activity_main.xml 里 imageDeviceCodeQr 的尺寸保持一致。 */
+    private static final int DEVICE_CODE_QR_SIZE_DP = 166;
+
+    /** 待办清单的固定项 id —— 数组下标即显示顺序。 */
+    private static final int TODO_ACCESSIBILITY = 0;
+    private static final int TODO_RUNTIME = 1;
+    private static final int TODO_OVERLAY = 2;
+    private static final int TODO_USAGE = 3;
+    private static final int TODO_BATTERY = 4;
+    private static final int TODO_CAPTURE = 5;
+    private static final int TODO_VPN = 6;
+    private static final int TODO_COUNT = 7;
+
+    /** 「使用情况访问」不是运行时权限，走 AppOps，这里给它一个名字常量。 */
+    private static final String PERMISSION_USAGE_STATS = "android.permission.PACKAGE_USAGE_STATS";
+
+    /** 清单进度只统计「必备项」——可选项不该拉低分母，让家长看着像永远做不完。 */
+    private static final int REQUIRED_TODO_COUNT = 5;
+
+    /** 徽标配色：绿=已开启、灰=未开启、琥珀=可选/启动中。 */
+    private static final int BADGE_OK = 0;
+    private static final int BADGE_OFF = 1;
+    private static final int BADGE_WARN = 2;
+
     private ActivityMainBinding binding;
     private AgentStore store;
+    /** 已画到界面上的绑定码，用来避免 uiTicker 每 2 秒重复生成同一张二维码位图。 */
+    private String renderedQrCode;
     /** 上次尝试自愈的时间，避免 onResume 被反复触发时重复启动服务。 */
     private long lastSelfHealAt;
+
+    /** 待办清单每一行的视图句柄；renderState() 只改文字与背景，不重建视图。 */
+    private final TodoRow[] todoRows = new TodoRow[TODO_COUNT];
+    /** 「一键开启权限」跨系统弹框续跑：运行时权限弹框返回后还要接着开悬浮窗与电池白名单。 */
+    private boolean oneKeyAwaitingRuntimeDialog;
+
+    /** 一行待办的视图句柄。 */
+    private static final class TodoRow {
+        final ImageView icon;
+        final TextView name;
+        final TextView reason;
+        final TextView badge;
+        final MaterialButton action;
+
+        TodoRow(ItemPermissionRowBinding row) {
+            this.icon = row.imageTodoIcon;
+            this.name = row.textTodoName;
+            this.reason = row.textTodoReason;
+            this.badge = row.textTodoBadge;
+            this.action = row.buttonTodoAction;
+        }
+    }
 
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
 
@@ -92,7 +163,16 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
                         Toast.makeText(this, "已授权 " + granted + " / " + result.size() + " 项权限",
                                 Toast.LENGTH_SHORT).show();
                         renderState();
+                        if (oneKeyAwaitingRuntimeDialog) {
+                            oneKeyAwaitingRuntimeDialog = false;
+                            continueOneKeyGrant();
+                        }
                     });
+
+    /** 开悬浮窗、使用情况访问这些「特殊权限」时跳系统设置页，回来要重新读状态。 */
+    private final ActivityResultLauncher<Intent> specialGrantLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
+                    result -> renderState());
 
     public static Intent createIntent(Context context) {
         Intent intent = new Intent(context, MainActivity.class);
@@ -144,6 +224,35 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
             EventLog.clear();
             renderLog();
         });
+
+        // 首页新增：绑定码复制、一键开启权限、高级折叠
+        binding.buttonCopyCode.setOnClickListener(v -> copyDeviceCode());
+        binding.buttonOneKeyGrant.setOnClickListener(v -> runOneKeyGrant());
+        binding.buttonAdvancedToggle.setOnClickListener(v -> toggleAdvanced());
+
+        buildTodoRows();
+    }
+
+    /**
+     * 建好待办清单的 7 行。
+     *
+     * <p>视图只建一次，之后每次 {@code renderState()} 只改文字、颜色与按钮可用性 ——
+     * 每 2 秒重建一遍整棵视图树既费电又会打断正在滚动的手指。
+     */
+    private void buildTodoRows() {
+        LinearLayout container = binding.containerTodo;
+        container.removeAllViews();
+        LayoutInflater inflater = getLayoutInflater();
+        for (int id = 0; id < TODO_COUNT; id++) {
+            ItemPermissionRowBinding row = ItemPermissionRowBinding.inflate(inflater, container, false);
+            todoRows[id] = new TodoRow(row);
+            final int todoId = id;
+            row.buttonTodoAction.setOnClickListener(v -> onTodoAction(todoId));
+            row.rowTodoBody.setOnClickListener(v -> showTodoDetail(todoId));
+            // 最后一行不画分隔线，免得卡片底部多出一条悬空的线
+            row.dividerTodo.setVisibility(id == TODO_COUNT - 1 ? View.GONE : View.VISIBLE);
+            container.addView(row.getRoot());
+        }
     }
 
     @Override
@@ -201,24 +310,48 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
     // 渲染
     // ============================================================
 
+    /**
+     * 把绑定码画成二维码，显示在绑定码文字下方，家长端「扫一扫」即可自动填入。
+     *
+     * <p>只在绑定码真的变了才重新生成：renderState() 由 uiTicker 每 2 秒调一次，
+     * 每次都重建位图纯属浪费 —— 编码加上逐像素填充，在低端机上会有肉眼可见的一下卡顿。
+     *
+     * <p>生成失败时把二维码隐藏掉，而不是留一个空白框：绑定码文字始终在，
+     * 家长照样能手输，不值得为一张画不出来的图再弹一次错误。
+     */
+    private void renderDeviceCodeQr(String code) {
+        if (code == null || code.isEmpty() || code.equals(renderedQrCode)) return;
+        renderedQrCode = code;
+
+        // dp → px：ImageView 是按 dp 定尺寸的，位图必须按像素密度放大，
+        // 否则在高密度屏上会被拉伸、码点边缘发虚，影响扫码识别率。
+        int sizePx = Math.round(DEVICE_CODE_QR_SIZE_DP * getResources().getDisplayMetrics().density);
+        Bitmap qr = DeviceCodeQr.render(code, sizePx);
+        if (qr == null) {
+            binding.imageDeviceCodeQr.setVisibility(View.GONE);
+            return;
+        }
+        binding.imageDeviceCodeQr.setImageBitmap(qr);
+        binding.imageDeviceCodeQr.setVisibility(View.VISIBLE);
+    }
+
     private void renderState() {
         boolean running = AgentService.isRunning();
         boolean bound = store.isBound();
 
+        // ---- 状态头：一句话说清「守护在不在跑」 ----
         binding.textStatus.setText(running ? R.string.status_running : R.string.status_stopped);
         binding.textStatus.setTextColor(ContextCompat.getColor(this,
                 running ? R.color.wechat_green : R.color.text_secondary));
+        binding.imageStatusIcon.setColorFilter(ContextCompat.getColor(this,
+                running ? R.color.wechat_green : R.color.text_tertiary));
         binding.buttonToggleService.setText(running ? R.string.action_stop : R.string.action_start);
 
         LockState lockState = LockState.compute(LockEnforcer.buildInputs(store, System.currentTimeMillis()));
-        String detail = (bound ? getString(R.string.status_bound) : getString(R.string.status_unbound))
-                + " · " + lockState.describe();
-        binding.textDetail.setText(detail);
+        binding.textDetail.setText(buildStatusDetail(bound, lockState));
 
-        binding.textDeviceCode.setText(store.getDeviceCode());
-        binding.textPairingHint.setText(bound
-                ? "这台设备已被家长绑定，正在接收家长端的管控指令。"
-                : getString(R.string.pairing_hint));
+        renderBindingCard(bound);
+
         binding.textServer.setText(store.getBaseUrl());
 
         long usedSeconds = store.getUsageSecondsToday();
@@ -233,9 +366,436 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         binding.textPermissionSummary.setText(buildPermissionSummary());
 
         renderProtection(lockState);
+        renderTodoList();
 
         binding.buttonGrantAdmin.setEnabled(!LockController.isAdminActive(this));
         binding.buttonQuiz.setVisibility(lockState.locked ? View.VISIBLE : View.GONE);
+    }
+
+    /** 状态头下面的一行摘要：绑定情况 + 今日用量 +（锁定中）。只留关键词，不写整句。 */
+    private String buildStatusDetail(boolean bound, LockState lockState) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(getString(bound ? R.string.status_bound : R.string.status_unbound));
+        sb.append(" · ").append(getString(R.string.status_detail_usage,
+                JsonUtils.humanizeDuration(store.getUsageSecondsToday() * 1000L)));
+        if (lockState.locked) {
+            sb.append(" · ").append(getString(R.string.status_locked_now));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 绑定卡片：未绑定 → 大字绑定码 + 二维码 + 操作步骤；已绑定 → 压成一行。
+     *
+     * <p>已绑定时刻意不显示二维码：绑定码是长期凭证，绑定之后还摆在首页最显眼的位置
+     * 没有意义，反而挡住了待办清单。
+     */
+    private void renderBindingCard(boolean bound) {
+        binding.groupUnboundGuide.setVisibility(bound ? View.GONE : View.VISIBLE);
+        binding.groupBoundInfo.setVisibility(bound ? View.VISIBLE : View.GONE);
+
+        String deviceCode = store.getDeviceCode();
+        boolean hasCode = !TextUtils.isEmpty(deviceCode);
+        binding.textDeviceCode.setText(hasCode ? deviceCode : "—");
+
+        if (!bound) {
+            renderDeviceCodeQr(deviceCode);
+            binding.textBindSubtitle.setText(R.string.binding_unbound_subtitle);
+            binding.textPairingHint.setText(R.string.binding_step_short);
+            binding.buttonCopyCode.setEnabled(hasCode);
+            return;
+        }
+
+        String name = store.getDeviceName();
+        binding.textBoundSummary.setText(TextUtils.isEmpty(name)
+                ? getString(R.string.binding_bound_title)
+                : getString(R.string.binding_bound_named, name));
+        binding.textBoundCode.setText(getString(R.string.binding_bound_device,
+                hasCode ? deviceCode : "—"));
+        binding.textBoundTip.setText(R.string.binding_bound_tip);
+    }
+
+    /** 把绑定码放进剪贴板，家长端可以直接粘贴。 */
+    private void copyDeviceCode() {
+        String code = store.getDeviceCode();
+        if (TextUtils.isEmpty(code)) {
+            Toast.makeText(this, R.string.toast_code_missing, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (manager != null) {
+            manager.setPrimaryClip(ClipData.newPlainText(
+                    getString(R.string.label_device_code), code));
+        }
+        Toast.makeText(this, getString(R.string.toast_code_copied, code), Toast.LENGTH_SHORT).show();
+    }
+
+    /** 折叠 / 展开「高级 / 诊断」。 */
+    private void toggleAdvanced() {
+        boolean show = binding.groupAdvanced.getVisibility() != View.VISIBLE;
+        binding.groupAdvanced.setVisibility(show ? View.VISIBLE : View.GONE);
+        binding.imageAdvancedArrow.setRotation(show ? 180f : 0f);
+        binding.textAdvancedState.setText(show ? R.string.action_collapse : R.string.action_expand);
+        if (show) renderState();
+    }
+
+    // ============================================================
+    // 待办清单：7 项权限，状态全部现读
+    // ============================================================
+
+    /**
+     * 无障碍开关是否已开。
+     *
+     * <p>先问 {@link LockWatchdogService#isEnabledInSettings(Context)}（权威判据）；
+     * 只有它为假时，才补读一次系统开关字符串。原因是服务重连的那几秒，
+     * {@code AccessibilityManager.getEnabledAccessibilityServiceList()} 会短暂返回空，
+     * 只按它判断会把「已开启」误报成「未开启」，还会连带把「一键开启权限」按钮点灰。
+     * 补读只做加法：真关了开关时两边都是假，不会把关闭误报成开启。
+     */
+    private boolean isAccessibilityEnabledInSettings() {
+        if (LockWatchdogService.isEnabledInSettings(this)) return true;
+        try {
+            String enabled = Settings.Secure.getString(getContentResolver(),
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            return enabled != null && enabled.contains(
+                    getPackageName() + "/" + LockWatchdogService.class.getName());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 渲染「需要开启」清单。
+     *
+     * <p>这里<b>不缓存任何一项状态</b>：无障碍问 {@link LockWatchdogService}、
+     * 运行时权限问 {@link PermissionGranter}、使用情况访问走 AppOps 查询。
+     * 所以家长刚在系统设置里开完返回、或者外部用 {@code appops} 撤销，
+     * 界面都会在下一次 {@link #renderState()} 里如实翻过来。
+     */
+    private void renderTodoList() {
+        boolean accessibilityOn = isAccessibilityEnabledInSettings();
+        boolean accessibilityConnected = LockWatchdogService.isConnected();
+
+        // 0. 无障碍：所有拦截动作的前提，置顶
+        TodoRow accessibility = todoRows[TODO_ACCESSIBILITY];
+        setTodoBasics(accessibility, R.drawable.ic_accessibility,
+                R.string.todo_name_accessibility, R.string.todo_reason_accessibility);
+        if (accessibilityOn && accessibilityConnected) {
+            setTodoBadge(accessibility, R.string.badge_on, BADGE_OK);
+        } else if (accessibilityOn) {
+            // 开关开了但服务还没连上：别急着说「已开启」，家长会以为在生效了
+            setTodoBadge(accessibility, R.string.badge_starting, BADGE_WARN);
+        } else {
+            setTodoBadge(accessibility, R.string.badge_off, BADGE_OFF);
+        }
+        setTodoAction(accessibility, accessibilityOn);
+
+        // 1. 运行时权限：合成一行显示 N/M，点开看逐项
+        List<String> required = PermissionGranter.requiredPermissions();
+        int grantedCount = required.size() - PermissionGranter.missing(this).size();
+        boolean runtimeDone = grantedCount >= required.size();
+        TodoRow runtime = todoRows[TODO_RUNTIME];
+        setTodoBasics(runtime, R.drawable.ic_key,
+                R.string.todo_name_runtime, R.string.todo_reason_runtime);
+        setTodoBadge(runtime, getString(R.string.todo_progress, grantedCount, required.size()),
+                runtimeDone ? BADGE_OK : BADGE_OFF);
+        setTodoAction(runtime, runtimeDone);
+
+        // 2. 悬浮窗
+        boolean overlayOn = Settings.canDrawOverlays(this);
+        TodoRow overlay = todoRows[TODO_OVERLAY];
+        setTodoBasics(overlay, R.drawable.ic_overlay,
+                R.string.todo_name_overlay, R.string.todo_reason_overlay);
+        setTodoBadge(overlay, overlayOn ? R.string.badge_on : R.string.badge_off,
+                overlayOn ? BADGE_OK : BADGE_OFF);
+        setTodoAction(overlay, overlayOn);
+
+        // 3. 使用情况访问
+        boolean usageOn = PermissionGranter.isSpecialGranted(this, PERMISSION_USAGE_STATS);
+        TodoRow usage = todoRows[TODO_USAGE];
+        setTodoBasics(usage, R.drawable.ic_usage,
+                R.string.todo_name_usage, R.string.todo_reason_usage);
+        setTodoBadge(usage, usageOn ? R.string.badge_on : R.string.badge_off,
+                usageOn ? BADGE_OK : BADGE_OFF);
+        setTodoAction(usage, usageOn);
+
+        // 4. 电池优化白名单：M 以下这个系统概念不存在，如实写「本机不支持」
+        boolean batterySupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M;
+        boolean batteryOn = isIgnoringBatteryOptimizations();
+        TodoRow battery = todoRows[TODO_BATTERY];
+        setTodoBasics(battery, R.drawable.ic_battery,
+                R.string.todo_name_battery, R.string.todo_reason_battery);
+        if (batterySupported) {
+            setTodoBadge(battery, batteryOn ? R.string.badge_on : R.string.badge_off,
+                    batteryOn ? BADGE_OK : BADGE_OFF);
+        } else {
+            setTodoBadge(battery, R.string.badge_unsupported, BADGE_OFF);
+        }
+        setTodoAction(battery, batteryOn || !batterySupported);
+
+        // 5. 屏幕采集（可选）：家长没开就是「可选」，不是「未开启」，别制造焦虑
+        boolean captureOn = store.isCaptureEnabled() && ScreenCapturer.hasProjection();
+        TodoRow capture = todoRows[TODO_CAPTURE];
+        setTodoBasics(capture, R.drawable.ic_screen,
+                R.string.todo_name_capture, R.string.todo_reason_capture);
+        setTodoBadge(capture, captureOn ? R.string.badge_on : R.string.badge_optional,
+                captureOn ? BADGE_OK : BADGE_WARN);
+        setTodoAction(capture, captureOn);
+
+        // 6. 网址拦截 VPN（可选）：家长配了黑名单却还没授权，那才算「未开启」
+        boolean vpnOn = DnsFilterVpnService.hasSystemConsent(this);
+        boolean vpnWanted = DnsFilterVpnService.isWanted(this);
+        TodoRow vpn = todoRows[TODO_VPN];
+        setTodoBasics(vpn, R.drawable.ic_globe, R.string.todo_name_vpn, R.string.todo_reason_vpn);
+        if (vpnOn) {
+            setTodoBadge(vpn, R.string.badge_on, BADGE_OK);
+        } else if (vpnWanted) {
+            setTodoBadge(vpn, R.string.badge_off, BADGE_OFF);
+        } else {
+            setTodoBadge(vpn, R.string.badge_optional, BADGE_WARN);
+        }
+        setTodoAction(vpn, vpnOn);
+
+        int doneRequired = (accessibilityOn ? 1 : 0) + (runtimeDone ? 1 : 0)
+                + (overlayOn ? 1 : 0) + (usageOn ? 1 : 0) + (batteryOn ? 1 : 0);
+        renderOneKeyButton(accessibilityOn, doneRequired);
+    }
+
+    /**
+     * 清单头部的进度与「一键开启权限」按钮。
+     *
+     * <p>用户明确要求：<b>无障碍是前提</b>。所以无障碍没开时按钮直接置灰，
+     * 并在旁边写清原因 —— 不置灰的话，家长点了只会看到一串「需要手动开启」，
+     * 却不知道为什么，体验比不给按钮还差。
+     */
+    private void renderOneKeyButton(boolean accessibilityOn, int doneRequired) {
+        binding.textTodoProgress.setText(getString(R.string.todo_progress,
+                doneRequired, REQUIRED_TODO_COUNT));
+        if (!accessibilityOn) {
+            binding.buttonOneKeyGrant.setEnabled(false);
+            binding.buttonOneKeyGrant.setText(R.string.action_one_key_grant);
+            binding.textOneKeyHint.setText(R.string.one_key_hint_need_accessibility);
+        } else if (doneRequired >= REQUIRED_TODO_COUNT) {
+            binding.buttonOneKeyGrant.setEnabled(false);
+            binding.buttonOneKeyGrant.setText(R.string.action_one_key_done);
+            binding.textOneKeyHint.setText(R.string.one_key_hint_all_done);
+        } else {
+            binding.buttonOneKeyGrant.setEnabled(true);
+            binding.buttonOneKeyGrant.setText(R.string.action_one_key_grant);
+            binding.textOneKeyHint.setText(R.string.one_key_hint_ready);
+        }
+    }
+
+    private void setTodoBasics(TodoRow row, int iconRes, int nameRes, int reasonRes) {
+        row.icon.setImageResource(iconRes);
+        row.name.setText(nameRes);
+        row.reason.setText(reasonRes);
+    }
+
+    private void setTodoBadge(TodoRow row, int textRes, int style) {
+        setTodoBadge(row, getString(textRes), style);
+    }
+
+    private void setTodoBadge(TodoRow row, String text, int style) {
+        int background;
+        int color;
+        switch (style) {
+            case BADGE_OK:
+                background = R.drawable.bg_badge_ok;
+                color = R.color.wechat_green_dark;
+                break;
+            case BADGE_WARN:
+                background = R.drawable.bg_badge_warn;
+                color = R.color.warning_amber;
+                break;
+            default:
+                background = R.drawable.bg_badge_off;
+                color = R.color.text_secondary;
+                break;
+        }
+        row.badge.setText(text);
+        row.badge.setBackgroundResource(background);
+        row.badge.setTextColor(ContextCompat.getColor(this, color));
+    }
+
+    /**
+     * 已开启的行：按钮变「已开启 ✓」并置灰，图标染绿。
+     *
+     * <p>置灰而不是把按钮藏起来 —— 藏起来会让人怀疑「到底有没有这一项」。
+     */
+    private void setTodoAction(TodoRow row, boolean done) {
+        row.action.setText(done ? R.string.action_granted_tick : R.string.action_open_now);
+        row.action.setEnabled(!done);
+        row.icon.setColorFilter(ContextCompat.getColor(this,
+                done ? R.color.wechat_green : R.color.text_secondary));
+    }
+
+    /** 某一行的操作按钮。 */
+    private void onTodoAction(int id) {
+        switch (id) {
+            case TODO_ACCESSIBILITY:
+                openAccessibilitySettings();
+                break;
+            case TODO_RUNTIME:
+                if (PermissionGranter.missing(this).isEmpty()) {
+                    // 全部授权过还点进来，多半是某项被系统撤了却弹不出框，只能去应用信息页
+                    PermissionGranter.openAppDetails(this);
+                } else {
+                    requestRuntimePermissions();
+                }
+                break;
+            case TODO_OVERLAY:
+                LockController.requestOverlayPermission(this);
+                break;
+            case TODO_USAGE:
+                AppUsageTracker.openSettings(this);
+                break;
+            case TODO_BATTERY:
+                requestIgnoreBatteryOptimization();
+                break;
+            case TODO_CAPTURE:
+                requestCaptureAuthorization();
+                break;
+            case TODO_VPN:
+                requestVpnConsent();
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** 拉起系统的 VPN 授权页（网址拦截用）。 */
+    private void requestVpnConsent() {
+        try {
+            Intent intent = VpnService.prepare(this);
+            if (intent == null) {
+                // 已经授权过了，系统不再需要弹框
+                Toast.makeText(this, R.string.toast_vpn_already, Toast.LENGTH_SHORT).show();
+                renderState();
+                return;
+            }
+            specialGrantLauncher.launch(intent);
+        } catch (Exception e) {
+            EventLog.warn("无法打开 VPN 授权页：" + e.getMessage());
+            Toast.makeText(this, R.string.toast_vpn_unavailable, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /**
+     * 点一行看详情：运行时权限列出逐项状态，其余项显示原因 + 当前状态。
+     *
+     * <p>状态直接复用刚刚渲染出来的徽标文字，而不是重新判一遍 ——
+     * 重新判一遍就有两处判据，早晚会出现「徽标说已开启、弹框说未开启」。
+     */
+    private void showTodoDetail(int id) {
+        TodoRow row = todoRows[id];
+        if (row == null) return;
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        boolean allDone;
+        if (id == TODO_RUNTIME) {
+            builder.setTitle(row.name.getText());
+            StringBuilder sb = new StringBuilder();
+            // 同一个中文名可能对应多条权限（精确定位 + 粗略定位），合并成一行，
+            // 免得家长看到两行一模一样的「定位：已开启」，以为界面重复渲染了。
+            Map<String, Boolean> byLabel = new LinkedHashMap<>();
+            for (String permission : PermissionGranter.requiredPermissions()) {
+                boolean granted = ContextCompat.checkSelfPermission(this, permission)
+                        == PackageManager.PERMISSION_GRANTED;
+                String label = PermissionGranter.labelOf(permission);
+                Boolean seen = byLabel.get(label);
+                byLabel.put(label, seen == null ? granted : (seen || granted));
+            }
+            int missingInDialog = 0;
+            for (Map.Entry<String, Boolean> entry : byLabel.entrySet()) {
+                if (sb.length() > 0) sb.append('\n');
+                sb.append(getString(entry.getValue() ? R.string.dialog_permission_line_on
+                        : R.string.dialog_permission_line_off, entry.getKey()));
+                if (!entry.getValue()) missingInDialog++;
+            }
+            builder.setMessage(sb.toString());
+            allDone = missingInDialog == 0;
+        } else {
+            builder.setTitle(row.name.getText());
+            builder.setMessage(row.reason.getText() + "\n\n"
+                    + getString(R.string.dialog_todo_status_line, row.badge.getText()));
+            // 这一项已经开好了：按钮本来就置灰，弹框里再摆一个「去开启」只会让人点空
+            allDone = !row.action.isEnabled();
+        }
+        if (allDone) {
+            builder.setPositiveButton(R.string.dialog_action_ok, null);
+        } else {
+            builder.setPositiveButton(R.string.action_open_now, (dialog, which) -> onTodoAction(id));
+            builder.setNegativeButton(R.string.dialog_action_later, null);
+        }
+        builder.show();
+    }
+
+    // ============================================================
+    // 一键开启权限
+    // ============================================================
+
+    /**
+     * 「一键开启权限」。
+     *
+     * <p>前提是无障碍必须先开（用户明确要求）：锁定、拦截、限时全都靠无障碍执行，
+     * 无障碍没开的时候把别的权限提前开完，只会让家长误以为已经生效。
+     *
+     * <p>顺序：设备所有者静默代授运行时权限 → 弹不出框就走系统弹框兜底 →
+     * 悬浮窗 / 使用情况访问 → 电池白名单。每一步都<b>如实</b>汇报，
+     * 拿不到的直接说「还需要手动开启 N 项」，绝不谎报成功。
+     */
+    private void runOneKeyGrant() {
+        if (!isAccessibilityEnabledInSettings()) {
+            Toast.makeText(this, R.string.toast_one_key_need_accessibility, Toast.LENGTH_SHORT).show();
+            renderState();
+            return;
+        }
+
+        boolean deviceOwner = LockController.isDeviceOwner(this);
+        int grantedByOwner = PermissionGranter.grantAsDeviceOwner(this);
+        int missingCount = PermissionGranter.missing(this).size();
+        if (missingCount > 0) {
+            // 只能靠系统弹框；等用户点完回来再继续后面的步骤
+            oneKeyAwaitingRuntimeDialog = true;
+            Toast.makeText(this, deviceOwner
+                            ? getString(R.string.toast_one_key_partial, missingCount)
+                            : getString(R.string.toast_one_key_dialog),
+                    Toast.LENGTH_LONG).show();
+            requestRuntimePermissions();
+            return;
+        }
+        if (grantedByOwner > 0) {
+            Toast.makeText(this, R.string.toast_one_key_owner, Toast.LENGTH_SHORT).show();
+        }
+        continueOneKeyGrant();
+    }
+
+    /** 一键开启的后半程：特殊权限 + 电池白名单，最后如实汇总还差几项。 */
+    private void continueOneKeyGrant() {
+        PermissionGranter.grantSpecialAsDeviceOwner(this);
+        renderState();
+
+        int manual = PermissionGranter.missing(this).size()
+                + (Settings.canDrawOverlays(this) ? 0 : 1)
+                + (PermissionGranter.isSpecialGranted(this, PERMISSION_USAGE_STATS) ? 0 : 1);
+        boolean batteryNeeded = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                && !isIgnoringBatteryOptimizations();
+
+        if (manual == 0 && !batteryNeeded) {
+            Toast.makeText(this, R.string.toast_one_key_all_done, Toast.LENGTH_SHORT).show();
+        } else if (manual == 0) {
+            Toast.makeText(this, R.string.toast_one_key_battery_last, Toast.LENGTH_SHORT).show();
+        } else {
+            // 「悬浮窗」和「使用情况访问」在多数 ROM 上系统拒绝代授，只能手动开 —— 如实说
+            Toast.makeText(this, getString(R.string.toast_one_key_partial, manual),
+                    Toast.LENGTH_LONG).show();
+        }
+
+        if (batteryNeeded) {
+            requestIgnoreBatteryOptimization();
+        }
+        renderState();
     }
 
     /**
@@ -320,11 +880,12 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         binding.buttonEnableWatchdog.setEnabled(!LockWatchdogService.isEnabledInSettings(this));
 
         StringBuilder keepAlive = new StringBuilder();
-        keepAlive.append("守护服务：").append(AgentService.isRunning() ? "运行中" : "未运行");
-        keepAlive.append('\n').append(WatchdogScheduler.describe(this));
-        keepAlive.append('\n').append(isIgnoringBatteryOptimizations()
-                ? "电池优化：已加入白名单" : "电池优化：未加入白名单（息屏后可能被冻结）");
+        // 长活状态统一由 LongevityGuard.describe 给：守护服务、电池白名单、无障碍看门狗、
+        // 受保护包（禁止强停/清数据），再加上当前所有「孩子能绕过」的缺口。
+        // 这里刻意不自己拼字符串，否则界面与设备级断言会各说各话。
+        keepAlive.append(LongevityGuard.describe(this, store));
         binding.textKeepAlive.setText(keepAlive.toString());
+        binding.buttonBattery.setEnabled(!isIgnoringBatteryOptimizations());
     }
 
     /**
@@ -365,40 +926,41 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
 
     /** 自检并恢复：把所有保活链路和锁定副作用重新对齐一次。 */
     private void selfCheckAndHeal() {
-        if (store.isHardeningEnabled()) {
-            OwnerHardening.apply(this);
-        }
-        // 设备所有者可以静默自授运行时权限（定位 / 相机 / 麦克风 / 通话记录 / 短信）。
-        // 放在自检里是因为权限随时可能被系统或孩子撤掉：撤掉后定位、拍照、录音、
-        // 通话短信上报会静默失效，而家长端只会看到「一直没有数据」。
-        // 不是设备所有者时这里返回 0，由设置页的「一键授权」走系统弹框。
-        com.balloondog.agent.capability.PermissionGranter.grantAsDeviceOwner(this);
+        // 直接交给 LongevityGuard：它做的是同一套事（加固 + 授权 + 双看门狗 + 巡检上报），
+        // 并且会把「哪一项没做到」写进日志、上报成 tamper 事件。
+        // 在这里重复实现一遍只会让自检结果与后台自愈结果不一致。
+        String summary = LongevityGuard.selfHeal(this, store, "家长手动自检");
         KioskController.prepare(this);
-        WatchdogScheduler.scheduleWatchdog(this);
         if (!AgentService.isRunning()) {
             store.setAgentEnabled(true);
             AgentService.start(this);
         }
-        EventLog.info("已执行自检：重排看门狗、重建 Kiosk 白名单、拉起守护服务");
-        Toast.makeText(this, "自检完成，已重新拉起守护与保活链路", Toast.LENGTH_LONG).show();
+        Toast.makeText(this, "自检完成：" + summary, Toast.LENGTH_LONG).show();
         renderState();
     }
 
     /**
      * 请求屏幕采集授权。
      *
-     * <p>家长在家长端只能「打开开关」，而 MediaProjection 的授权框必须在本机由人点一次。
-     * 这里主动截一张屏来触发那次授权（成功后立刻丢掉这张图，不进入采样队列）——
-     * 否则家长会看到「已开启但一直没有数据」，却不知道差在哪一步。
+     * <p>两条路径已经不一样了：无障碍服务在跑（API 30+）时，截图走
+     * {@code AccessibilityService.takeScreenshot()}，<b>完全不需要任何系统弹框</b>，
+     * 这个按钮只是试拍一张确认链路可用；只有当无障碍不可用时才会回退到 MediaProjection，
+     * 那时才必须在本机由人点一次授权框 —— 否则家长会看到「已开启但一直没有数据」，
+     * 却不知道差在哪一步。
      */
     private void requestCaptureAuthorization() {
-        Toast.makeText(this, "请在弹出的系统对话框中允许屏幕采集", Toast.LENGTH_LONG).show();
+        boolean free = com.balloondog.agent.capability.AccessibilityScreenCapture.isAvailable();
+        Toast.makeText(this, free
+                ? "优先使用无障碍免授权截图（失败才会弹系统授权框）"
+                : "请在弹出的系统对话框中允许屏幕采集", Toast.LENGTH_LONG).show();
         new Thread(() -> {
             try {
                 com.balloondog.agent.capability.ScreenCapturer
                         .captureScreenshotLowRes(this, 480, 45, 60_000L);
                 runOnUiThread(() -> {
-                    Toast.makeText(this, "屏幕采集已授权，之后会自动周期采样", Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, free
+                            ? "屏幕采集可用（无障碍免授权），之后会自动周期采样"
+                            : "屏幕采集已授权，之后会自动周期采样", Toast.LENGTH_LONG).show();
                     renderState();
                 });
             } catch (Exception e) {

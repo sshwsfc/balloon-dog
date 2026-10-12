@@ -2,10 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
 import { toast } from 'sonner'
-import { AlertTriangle, ArrowLeft, CalendarClock, Eraser, Info, Loader2, RefreshCw, Save } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, CalendarClock, Eraser, Info, Loader2, Save } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
+import { FeatureTip } from '@/components/FeatureTip'
 import type { ModeSlot } from '@/types'
+import { useTranslation } from 'react-i18next'
 
 /**
  * 列的展示顺序：周一 → 周日。
@@ -31,6 +34,7 @@ function cellKey(dayOfWeek: number, hour: number): string {
 }
 
 export function ModeSchedulePage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
 
   const [loading, setLoading] = useState(true)
@@ -48,13 +52,13 @@ export function ModeSchedulePage() {
       setSavedKeys(keys)
       setError(null)
     } catch (err) {
-      const message = toUserMessage(err, '加载模式时段失败')
+      const message = toUserMessage(err, t('加载模式时段失败'))
       setError(message)
       if (!options?.silent) toast.error(message)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     void loadData()
@@ -119,11 +123,11 @@ export function ModeSchedulePage() {
       setSavedKeys(keys)
       toast.success(
         keys.size === 0
-          ? '已清空时段规划：按约定此时全天都是学习模式'
-          : `已保存 ${keys.size} 个学习时段`,
+          ? t('已清空时段规划，此时全天为学习模式')
+          : t('已保存 {{v0}} 个学习时段', { v0: keys.size }),
       )
     } catch (err) {
-      toast.error(toUserMessage(err, '保存失败，请稍后重试'))
+      toast.error(toUserMessage(err, t('保存失败，请稍后重试')))
       console.error('保存模式时段失败：', err)
     } finally {
       setSaving(false)
@@ -135,7 +139,7 @@ export function ModeSchedulePage() {
       <div className="page-shell page-shell--center">
         <div className="text-center">
           <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#07c160]" />
-          <p className="mt-2 text-gray-500 text-sm">加载中...</p>
+          <p className="mt-2 text-gray-500 text-sm">{t('加载中...')}</p>
         </div>
       </div>
     )
@@ -147,15 +151,8 @@ export function ModeSchedulePage() {
         <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
           <ArrowLeft className="w-5 h-5" />
         </Button>
-        <h1 className="text-xl font-medium text-gray-900 flex-1">设置模式时段</h1>
-        <button
-          type="button"
-          onClick={() => void loadData({ silent: true })}
-          className="text-gray-400 p-1"
-          aria-label="刷新"
-        >
-          <RefreshCw className="w-5 h-5" />
-        </button>
+        <h1 className="text-xl font-medium text-gray-900 flex-1">{t('设置模式时段')}</h1>
+        <HeaderRefreshButton onRefresh={() => loadData({ silent: true })} />
       </div>
 
       {error && (
@@ -168,7 +165,7 @@ export function ModeSchedulePage() {
               className="text-xs text-[#07c160] flex-shrink-0"
               onClick={() => void loadData({ silent: true })}
             >
-              重试
+              {t('重试')}
             </button>
           </div>
         </div>
@@ -180,20 +177,20 @@ export function ModeSchedulePage() {
           <CardContent className="p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div>
-                <div className="text-xs text-gray-400">已选学习时段</div>
+                <div className="text-xs text-gray-400">{t('已选学习时段')}</div>
                 <div className="text-2xl font-semibold text-gray-900 mt-0.5">
                   {selected.size}
-                  <span className="text-sm font-normal text-gray-400"> / {TOTAL_CELLS} 格</span>
+                  <span className="text-sm font-normal text-gray-400"> / {TOTAL_CELLS} {t('格')}</span>
                 </div>
               </div>
               <div className="text-right space-y-1">
                 <div className="flex items-center space-x-1.5 justify-end">
                   <span className="w-3 h-3 rounded bg-[#07c160]" />
-                  <span className="text-xs text-gray-500">学习模式</span>
+                  <span className="text-xs text-gray-500">{t('学习模式')}</span>
                 </div>
                 <div className="flex items-center space-x-1.5 justify-end">
                   <span className="w-3 h-3 rounded bg-gray-200" />
-                  <span className="text-xs text-gray-500">普通模式</span>
+                  <span className="text-xs text-gray-500">{t('普通模式')}</span>
                 </div>
               </div>
             </div>
@@ -201,7 +198,7 @@ export function ModeSchedulePage() {
             <div className="flex flex-wrap gap-2">
               <Button variant="outline" size="sm" onClick={handleClear} disabled={selected.size === 0}>
                 <Eraser className="w-3.5 h-3.5 mr-1" />
-                清空
+                {t('清空')}
               </Button>
               <Button
                 variant="outline"
@@ -209,7 +206,7 @@ export function ModeSchedulePage() {
                 onClick={handleSelectAll}
                 disabled={selected.size === TOTAL_CELLS}
               >
-                全选
+                {t('全选')}
               </Button>
               <Button
                 size="sm"
@@ -222,25 +219,22 @@ export function ModeSchedulePage() {
                 ) : (
                   <Save className="w-3.5 h-3.5 mr-1" />
                 )}
-                保存当前规划
+                {t('保存当前规划')}
               </Button>
             </div>
 
             {dirty ? (
-              <p className="text-xs text-amber-600">有未保存的修改，点「保存当前规划」生效。</p>
+              <p className="text-xs text-amber-600">{t('有未保存修改，点「保存当前规划」生效。')}</p>
             ) : (
-              <p className="text-xs text-gray-400">当前改动已保存。</p>
+              <p className="text-xs text-gray-400">{t('改动已保存。')}</p>
             )}
 
             {selected.size === 0 && (
               <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-start space-x-2">
                 <AlertTriangle className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
                 <div className="text-xs text-red-700 leading-relaxed">
-                  <p className="font-medium text-sm">不设置则全天为学习模式</p>
-                  <p className="mt-0.5">
-                    一格都不选时，除白名单应用外孩子一整天都用不了任何应用。
-                    如果本意是「不限制」，请改回普通模式，而不是保存空规划。
-                  </p>
+                  <p className="font-medium text-sm">{t('一格都不选 = 全天学习模式')}</p>
+                  <p className="mt-0.5">{t('一格不选时，除白名单应用外孩子整天都用不了应用。想「不限制」请改回普通模式，别保存空规划。')}</p>
                 </div>
               </div>
             )}
@@ -251,7 +245,7 @@ export function ModeSchedulePage() {
       {/* ---------------- 7 × 24 格子 ---------------- */}
       <div className="px-3">
         <div className="mb-2 px-1">
-          <span className="text-sm font-medium text-gray-500">星期 × 小时</span>
+          <span className="text-sm font-medium text-gray-500">{t('星期 × 小时')}</span>
         </div>
         <Card className="overflow-hidden">
           <CardContent className="p-3">
@@ -275,14 +269,16 @@ export function ModeSchedulePage() {
                           type="button"
                           aria-pressed={full}
                           onClick={() => toggleDay(day.value)}
-                          title={`${day.label}：点一下整天全选 / 清空`}
+                          title={t('{{v0}}：点一下全选 / 清空整天', { v0: t(day.label) })}
                           className={`flex-1 min-w-0 py-1.5 rounded text-[11px] font-medium transition-colors ${
                             full
                               ? 'bg-green-50 text-[#07c160]'
                               : 'bg-gray-50 text-gray-500 hover:bg-gray-100'
                           }`}
                         >
-                          {day.label.slice(1)}
+                          {/* 表头只放一个字：「周一」→「一」。必须先切再查词条，
+                              否则英文界面会先取到 "Monday" 再被切掉首字母变成 "onday"。 */}
+                          {t(day.label.slice(1))}
                         </button>
                       )
                     })}
@@ -301,7 +297,7 @@ export function ModeSchedulePage() {
                             key={key}
                             type="button"
                             aria-pressed={active}
-                            aria-label={`${day.label} ${hour} 点，${active ? '学习模式' : '普通模式'}`}
+                            aria-label={t('{{v0}} {{v1}} 点，{{v2}}', { v0: t(day.label), v1: hour, v2: active ? t('学习模式') : t('普通模式') })}
                             onClick={() => toggleCell(day.value, hour)}
                             className={`h-6 min-w-0 flex-1 rounded transition-colors ${
                               active
@@ -326,13 +322,11 @@ export function ModeSchedulePage() {
           <div className="flex items-start space-x-2">
             <Info className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
             <div className="text-xs text-gray-500 leading-relaxed space-y-1">
-              <p className="font-medium text-gray-700">这些格子怎么生效</p>
-              <p>· 绿色格 = 该时段为学习模式，只允许白名单应用；灰色格 = 普通模式。</p>
-              <p>· 一次保存就是整份规划：不设置则全天为学习模式（不是「不限制」）。</p>
-              <p>
-                · 星期沿用「周日 = 0」的约定（与定时锁屏时间表一致），表格按中文习惯从周一排到周日。
-              </p>
-              <p>· 求值由孩子设备按本地时钟完成，断网也照样生效。</p>
+              <p className="font-medium text-gray-700">{t('格子怎么生效')}</p>
+              <p>{t('· 绿格 = 学习模式，只允许白名单应用；灰格 = 普通模式。')}</p>
+              <p>{t('· 保存一次即整份规划；一格不选则全天为学习模式，不是「不限制」。')}</p>
+              <p>{t('· 表格按周一到周日排列，星期沿用「周日 = 0」的约定，与定时时间表一致。')}</p>
+              <p>{t('· 由孩子设备按本地时钟求值，断网也生效。')}</p>
             </div>
           </div>
         </div>
@@ -343,7 +337,7 @@ export function ModeSchedulePage() {
           <CardContent className="p-4 flex items-center justify-between">
             <div className="flex items-center space-x-2 min-w-0">
               <CalendarClock className="w-5 h-5 text-gray-400 flex-shrink-0" />
-              <span className="text-xs text-gray-500">选好之后别忘了点保存</span>
+              <span className="text-xs text-gray-500">{t('选好后记得点保存')}</span>
             </div>
             <Button
               size="sm"
@@ -351,11 +345,13 @@ export function ModeSchedulePage() {
               onClick={() => void handleSave()}
               disabled={saving || !dirty}
             >
-              {saving ? '保存中…' : '保存当前规划'}
+              {saving ? t('保存中…') : t('保存当前规划')}
             </Button>
           </CardContent>
         </Card>
       </div>
+      <FeatureTip id="mode" text={t('按孩子设备本地时间换算：周日 = 0、周一 = 1。')} />
+
     </div>
   )
 }

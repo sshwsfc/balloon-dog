@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
 import {
   Dialog,
   DialogContent,
@@ -35,6 +36,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
+import { FeatureTip } from '@/components/FeatureTip'
 import type {
   Insight,
   InsightDetail,
@@ -52,6 +54,8 @@ import type {
   UsageSummary,
   UsageSummaryBudget,
 } from '@/types'
+import { useTranslation } from 'react-i18next'
+import { tt } from '@/i18n'
 
 /** 时间线左侧色条 / 风险徽章 */
 const RISK_META: Record<InsightRiskLevel, { label: string; stripe: string; badge: string }> = {
@@ -130,7 +134,7 @@ function formatDateTime(iso: string | null): string {
   if (!iso) return '—'
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return '—'
-  return `${date.getMonth() + 1}月${date.getDate()}日 ${padTwo(date.getHours())}:${padTwo(date.getMinutes())}`
+  return tt('{{v0}}月{{v1}}日 {{v2}}:{{v3}}', { v0: date.getMonth() + 1, v1: date.getDate(), v2: padTwo(date.getHours()), v3: padTwo(date.getMinutes()) })
 }
 
 /** 帧时间线只需要「时分秒」 */
@@ -141,18 +145,18 @@ function formatClock(iso: string): string {
 }
 
 function formatPeriod(item: Insight): string {
-  if (!item.periodFrom && !item.periodTo) return '时间段未知'
+  if (!item.periodFrom && !item.periodTo) return tt('时间段未知')
   return `${formatDateTime(item.periodFrom)} → ${formatDateTime(item.periodTo)}`
 }
 
 /** 一天内的时间范围压缩成「14:30 ~ 15:02」，跨天则退回完整日期 */
 function formatFrameRange(frames: InsightFrame[]): string {
-  if (frames.length === 0) return '本包没有帧记录'
+  if (frames.length === 0) return tt('本包没有帧记录')
   const first = frames[0]
   const last = frames[frames.length - 1]
   const firstAt = new Date(first.capturedAt)
   const lastAt = new Date(last.capturedAt)
-  if (Number.isNaN(firstAt.getTime()) || Number.isNaN(lastAt.getTime())) return '时间未知'
+  if (Number.isNaN(firstAt.getTime()) || Number.isNaN(lastAt.getTime())) return tt('时间未知')
   const sameDay =
     firstAt.getFullYear() === lastAt.getFullYear() &&
     firstAt.getMonth() === lastAt.getMonth() &&
@@ -163,7 +167,7 @@ function formatFrameRange(frames: InsightFrame[]): string {
 }
 
 function kindLabel(kind: UsageBudgetKind): string {
-  return BUDGET_KIND_META[kind]?.label ?? kind
+  return tt(BUDGET_KIND_META[kind]?.label) ?? kind
 }
 
 function uniqueApps(item: Insight): string[] {
@@ -225,6 +229,7 @@ function AlertCard({
   onMarkRead: (alert: UsageAlert) => void
   onOpenInsight: (insightId: string) => void
 }) {
+  const { t } = useTranslation()
   const severity = SEVERITY_META[alert.severity] ?? SEVERITY_META.low
   return (
     <div
@@ -232,19 +237,19 @@ function AlertCard({
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center flex-wrap gap-1.5 min-w-0">
-          <Badge className={`${severity.className} text-[10px]`}>{severity.label}</Badge>
-          <Badge className="bg-gray-100 text-gray-600 text-[10px]">{alert.typeLabel}</Badge>
-          {!alert.read && <Badge className="bg-[#07c160] text-white text-[10px]">未读</Badge>}
+          <Badge className={`${severity.className} text-[10px]`}>{t(severity.label)}</Badge>
+          <Badge className="bg-gray-100 text-gray-600 text-[10px]">{t(alert.typeLabel)}</Badge>
+          {!alert.read && <Badge className="bg-[#07c160] text-white text-[10px]">{t('未读')}</Badge>}
         </div>
         <span className="text-[11px] text-gray-400 flex-shrink-0">{formatDateTime(alert.createdAt)}</span>
       </div>
 
-      <p className="mt-1.5 text-sm font-medium text-gray-900">{alert.title}</p>
-      {alert.detail && <p className="mt-1 text-xs text-gray-600 leading-relaxed">{alert.detail}</p>}
+      <p className="mt-1.5 text-sm font-medium text-gray-900">{t(alert.title)}</p>
+      {alert.detail && <p className="mt-1 text-xs text-gray-600 leading-relaxed">{t(alert.detail)}</p>}
 
       {alert.evidence && (
         <div className="mt-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
-          <p className="text-[11px] text-gray-400 mb-0.5">AI 判定依据（原文）</p>
+          <p className="text-[11px] text-gray-400 mb-0.5">{t('AI 判定依据（原文）')}</p>
           <p className="text-xs text-gray-700 leading-relaxed break-words">{alert.evidence}</p>
         </div>
       )}
@@ -258,7 +263,7 @@ function AlertCard({
             className="text-xs text-[#07c160] flex items-center disabled:opacity-50"
           >
             <Check className="w-3.5 h-3.5 mr-0.5" />
-            标记已读
+            {t('标记已读')}
           </button>
         )}
         {alert.insightId && (
@@ -267,19 +272,18 @@ function AlertCard({
             onClick={() => onOpenInsight(alert.insightId as string)}
             className="text-xs text-gray-500 flex items-center"
           >
-            查看对应洞察
+            {t('查看对应洞察')}
           </button>
         )}
       </div>
 
-      <p className="mt-1.5 text-[11px] text-gray-400 leading-relaxed">
-        AI 判断可能有误，请结合孩子的实际情况确认，不要仅凭此提醒下结论。
-      </p>
+      <p className="mt-1.5 text-[11px] text-gray-400 leading-relaxed">{t('AI 判断可能有误，请结合实际情况确认。')}</p>
     </div>
   )
 }
 
 export function InsightsPage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
 
   const [loading, setLoading] = useState(true)
@@ -349,14 +353,14 @@ export function InsightsPage() {
       setAlertUnread(alertRes.unread ?? 0)
       setError(null)
     } catch (err) {
-      const message = toUserMessage(err, '加载 AI 洞察失败')
+      const message = toUserMessage(err, t('加载 AI 洞察失败'))
       setError(message)
       // 首次加载失败才弹 toast；mutation 之后的静默刷新失败不打扰用户
       if (!options?.silent) toast.error(message)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     void loadAll({ onlyRisky: false, alertType: '', unreadOnly: false })
@@ -374,7 +378,7 @@ export function InsightsPage() {
       toast.success(successText)
       await reload({ silent: true })
     } catch (err) {
-      toast.error(toUserMessage(err, '保存失败，请稍后重试'))
+      toast.error(toUserMessage(err, t('保存失败，请稍后重试')))
       console.error('保存截屏与 AI 设置失败：', err)
     } finally {
       setBusyKey(null)
@@ -386,12 +390,12 @@ export function InsightsPage() {
     const raw = numberDrafts[field]
     const value = Number.parseInt(raw, 10)
     if (!Number.isFinite(value) || value < rule.min || value > rule.max) {
-      toast.error(`${rule.label}需在 ${rule.min} ~ ${rule.max} ${rule.unit}之间`)
+      toast.error(t('{{v0}}需在 {{v1}} ~ {{v2}} {{v3}}之间', { v0: t(rule.label), v1: rule.min, v2: rule.max, v3: t(rule.unit) }))
       setNumberDrafts((current) => ({ ...current, [field]: String(config?.[field] ?? rule.min) }))
       return
     }
     if (value === config?.[field]) return
-    await saveConfig({ [field]: value }, `${rule.label}已设为 ${value} ${rule.unit}`, field)
+    await saveConfig({ [field]: value }, t('{{v0}}已设为 {{v1}} {{v2}}', { v0: t(rule.label), v1: value, v2: t(rule.unit) }), field)
   }
 
   // ---------------- 异常提醒 ----------------
@@ -400,10 +404,10 @@ export function InsightsPage() {
     setBusyKey(`alert-${alert.id}`)
     try {
       await api.markAlertRead(alert.id)
-      toast.success('已标记为已读')
+      toast.success(t('已标记为已读'))
       await reload({ silent: true })
     } catch (err) {
-      toast.error(toUserMessage(err, '操作失败，请稍后重试'))
+      toast.error(toUserMessage(err, t('操作失败，请稍后重试')))
       console.error('标记提醒已读失败：', err)
     } finally {
       setBusyKey(null)
@@ -414,10 +418,10 @@ export function InsightsPage() {
     setBusyKey('alert-all')
     try {
       const result = await api.markAllAlertsRead()
-      toast.success(result.updated > 0 ? `已将 ${result.updated} 条提醒标记为已读` : '没有未读提醒')
+      toast.success(result.updated > 0 ? t('已标记 {{v0}} 条为已读', { v0: result.updated }) : t('没有未读提醒'))
       await reload({ silent: true })
     } catch (err) {
-      toast.error(toUserMessage(err, '操作失败，请稍后重试'))
+      toast.error(toUserMessage(err, t('操作失败，请稍后重试')))
       console.error('全部标记已读失败：', err)
     } finally {
       setBusyKey(null)
@@ -439,7 +443,7 @@ export function InsightsPage() {
     try {
       setDetail(await api.getInsight(insightId))
     } catch (err) {
-      toast.error(toUserMessage(err, '加载洞察详情失败'))
+      toast.error(toUserMessage(err, t('加载洞察详情失败')))
       console.error('加载洞察详情失败：', err)
       setExpandedId(null)
     } finally {
@@ -456,7 +460,7 @@ export function InsightsPage() {
       .getInsight(insightId)
       .then((data) => setDetail(data))
       .catch((err: unknown) => {
-        toast.error(toUserMessage(err, '加载洞察详情失败'))
+        toast.error(toUserMessage(err, t('加载洞察详情失败')))
         setExpandedId(null)
       })
       .finally(() => setDetailLoading(false))
@@ -469,12 +473,12 @@ export function InsightsPage() {
     setBusyKey(`reanalyze-${insightId}`)
     try {
       await api.reanalyzeInsight(insightId)
-      toast.success('已重新提交分析，稍后刷新即可看到新结论')
+      toast.success(t('已重新提交分析，稍后刷新查看新结论'))
       setExpandedId(null)
       setDetail(null)
       await reload({ silent: true })
     } catch (err) {
-      toast.error(toUserMessage(err, '重新分析失败，请稍后重试'))
+      toast.error(toUserMessage(err, t('重新分析失败，请稍后重试')))
       console.error('重新分析失败：', err)
     } finally {
       setBusyKey(null)
@@ -510,12 +514,12 @@ export function InsightsPage() {
         dailyLimit: limit,
         enabled: budgetForm.enabled,
       })
-      toast.success(`${kindLabel(budgetForm.kind)}上限已保存`)
+      toast.success(t('{{v0}}上限已保存', { v0: kindLabel(budgetForm.kind) }))
       setBudgetDialogOpen(false)
       setEditingBudget(null)
       await reload({ silent: true })
     } catch (err) {
-      const message = toUserMessage(err, '保存用量上限失败')
+      const message = toUserMessage(err, t('保存用量上限失败'))
       setBudgetFormError(message)
       toast.error(message)
       console.error('保存用量上限失败：', err)
@@ -533,10 +537,10 @@ export function InsightsPage() {
         dailyLimit: budget.dailyLimit,
         enabled: !budget.enabled,
       })
-      toast.success(budget.enabled ? '已停用该上限' : '已启用该上限')
+      toast.success(budget.enabled ? t('上限已停用') : t('上限已启用'))
       await reload({ silent: true })
     } catch (err) {
-      toast.error(toUserMessage(err, '操作失败，请稍后重试'))
+      toast.error(toUserMessage(err, t('操作失败，请稍后重试')))
       console.error('切换用量上限失败：', err)
     } finally {
       setBusyKey(null)
@@ -547,11 +551,11 @@ export function InsightsPage() {
     if (!removeBudgetTarget) return
     try {
       await api.deleteUsageBudget(removeBudgetTarget.id)
-      toast.success('用量上限已删除')
+      toast.success(t('用量上限已删除'))
       setRemoveBudgetTarget(null)
       await reload({ silent: true })
     } catch (err) {
-      toast.error(toUserMessage(err, '删除失败，请稍后重试'))
+      toast.error(toUserMessage(err, t('删除失败，请稍后重试')))
       console.error('删除用量上限失败：', err)
     }
   }
@@ -563,7 +567,7 @@ export function InsightsPage() {
       <div className="page-shell page-shell--wide page-shell--center">
         <div className="text-center">
           <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#07c160]" />
-          <p className="mt-2 text-gray-500 text-sm">加载中...</p>
+          <p className="mt-2 text-gray-500 text-sm">{t('加载中...')}</p>
         </div>
       </div>
     )
@@ -576,7 +580,7 @@ export function InsightsPage() {
           <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
             <ArrowLeft className="w-5 h-5" />
           </Button>
-          <h1 className="text-xl font-medium text-gray-900 flex-1">AI 洞察</h1>
+          <h1 className="text-xl font-medium text-gray-900 flex-1">{t('AI 洞察')}</h1>
         </div>
         <div className="px-6 py-20 text-center">
           <Sparkles className="w-12 h-12 text-gray-300 mx-auto mb-3" />
@@ -588,7 +592,7 @@ export function InsightsPage() {
               void reload()
             }}
           >
-            重新加载
+            {t('重新加载')}
           </Button>
         </div>
       </div>
@@ -614,15 +618,8 @@ export function InsightsPage() {
         <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
           <ArrowLeft className="w-5 h-5" />
         </Button>
-        <h1 className="text-xl font-medium text-gray-900 flex-1">AI 洞察</h1>
-        <button
-          type="button"
-          onClick={() => void reload({ silent: true })}
-          className="text-gray-400 p-1"
-          aria-label="刷新"
-        >
-          <RefreshCw className="w-5 h-5" />
-        </button>
+        <h1 className="text-xl font-medium text-gray-900 flex-1">{t('AI 洞察')}</h1>
+        <HeaderRefreshButton onRefresh={() => reload({ silent: true })} />
       </div>
 
       {/* 刷新失败但还留着上一次成功的数据：给条提示，不把整页换成错误页 */}
@@ -631,14 +628,14 @@ export function InsightsPage() {
           <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 flex items-start space-x-2">
             <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
             <p className="text-xs text-amber-700 flex-1">
-              最新数据读取失败：{error}（下方仍是上一次成功加载的内容）
+              {t('最新数据读取失败：')}{error}{t('（下方是上次加载的数据）')}
             </p>
             <button
               type="button"
               className="text-xs text-[#07c160] flex-shrink-0"
               onClick={() => void reload({ silent: true })}
             >
-              重试
+              {t('重试')}
             </button>
           </div>
         </div>
@@ -663,15 +660,13 @@ export function InsightsPage() {
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-base font-medium">
-                {isAi ? 'AI 分析已启用' : '当前不是 AI 分析'}
+                {isAi ? t('AI 分析已启用') : t('当前不是 AI 分析')}
               </p>
               <p className="text-xs opacity-95 mt-1 leading-relaxed">
-                {config?.analysisNote || '后端未返回分析说明'}
+                {config?.analysisNote ? t(config.analysisNote) : t('后端未返回分析说明')}
               </p>
               {!isAi && (
-                <p className="text-xs opacity-95 mt-1 leading-relaxed">
-                  下面的结论来自启发式推断，不是 AI 看图得出的，请谨慎参考。
-                </p>
+                <p className="text-xs opacity-95 mt-1 leading-relaxed">{t('以下结论来自启发式推断，不是 AI 看图得出的，仅供参考。')}</p>
               )}
             </div>
           </div>
@@ -683,23 +678,23 @@ export function InsightsPage() {
               <div>
                 <div className="flex items-center justify-center space-x-1 text-gray-400">
                   <Gamepad2 className="w-3.5 h-3.5" />
-                  <span className="text-[11px]">今日游戏</span>
+                  <span className="text-[11px]">{t('今日游戏')}</span>
                 </div>
                 <p className="mt-1 text-xl font-medium text-gray-900">{gameUsed}</p>
-                <p className="text-[11px] text-gray-400">局</p>
+                <p className="text-[11px] text-gray-400">{t('局')}</p>
               </div>
               <div className="border-x border-gray-100">
                 <div className="flex items-center justify-center space-x-1 text-gray-400">
                   <Film className="w-3.5 h-3.5" />
-                  <span className="text-[11px]">今日动画</span>
+                  <span className="text-[11px]">{t('今日动画')}</span>
                 </div>
                 <p className="mt-1 text-xl font-medium text-gray-900">{videoUsed}</p>
-                <p className="text-[11px] text-gray-400">集</p>
+                <p className="text-[11px] text-gray-400">{t('集')}</p>
               </div>
               <div>
                 <div className="flex items-center justify-center space-x-1 text-gray-400">
                   <Shield className="w-3.5 h-3.5" />
-                  <span className="text-[11px]">剩余额度</span>
+                  <span className="text-[11px]">{t('剩余额度')}</span>
                 </div>
                 {tightest ? (
                   <>
@@ -711,13 +706,13 @@ export function InsightsPage() {
                       {tightest.remaining}
                     </p>
                     <p className="text-[11px] text-gray-400 truncate px-1">
-                      最少的一项（{kindLabel(tightest.kind)}）
+                      {t('最少的一项（')}{kindLabel(tightest.kind)}）
                     </p>
                   </>
                 ) : (
                   <>
                     <p className="mt-1 text-xl font-medium text-gray-300">—</p>
-                    <p className="text-[11px] text-gray-400">未启用上限</p>
+                    <p className="text-[11px] text-gray-400">{t('未启用上限')}</p>
                   </>
                 )}
               </div>
@@ -727,20 +722,20 @@ export function InsightsPage() {
               <div className="flex items-center space-x-1.5">
                 <Bell className={`w-4 h-4 ${unread > 0 ? 'text-red-500' : 'text-gray-400'}`} />
                 <span className="text-xs text-gray-600">
-                  {unread > 0 ? `${unread} 条未读提醒` : '没有未读提醒'}
+                  {unread > 0 ? t('{{v0}} 条未读提醒', { v0: unread }) : t('没有未读提醒')}
                 </span>
               </div>
               <div className="flex items-center space-x-1.5">
                 <Sparkles className="w-4 h-4 text-gray-400" />
                 <span className="text-xs text-gray-600">
-                  {isAi ? `AI 可用${config?.aiAvailable ? '' : '（未配置）'}` : ANALYSIS_MODE_LABEL[analysisMode]}
+                  {isAi ? t('AI 可用{{v0}}', { v0: config?.aiAvailable ? '' : t('（未配置）') }) : t(ANALYSIS_MODE_LABEL[analysisMode])}
                 </span>
               </div>
             </div>
 
             {usage?.dayKey && (
               <p className="mt-2 text-[11px] text-gray-400">
-                用量统计日期：{usage.dayKey}（按服务器日期计算）
+                {t('用量统计日期：')}{usage.dayKey}{t('（按服务器日期计算）')}
               </p>
             )}
           </CardContent>
@@ -750,7 +745,7 @@ export function InsightsPage() {
       {/* ---------------- 异常提醒 ---------------- */}
       <div className="px-3">
         <div className="mb-2 px-1 flex items-center justify-between">
-          <span className="text-sm font-medium text-gray-500">异常提醒</span>
+          <span className="text-sm font-medium text-gray-500">{t('异常提醒')}</span>
           {unread > 0 && (
             <button
               type="button"
@@ -758,7 +753,7 @@ export function InsightsPage() {
               onClick={() => void handleMarkAllRead()}
               className="text-xs text-[#07c160] disabled:opacity-50"
             >
-              全部标记已读
+              {t('全部标记已读')}
             </button>
           )}
         </div>
@@ -774,7 +769,7 @@ export function InsightsPage() {
               alertType === '' ? 'bg-[#07c160] text-white' : 'bg-white text-gray-600'
             }`}
           >
-            全部类型
+            {t('全部类型')}
           </button>
           {ALERT_TYPE_OPTIONS.map((option) => (
             <button
@@ -788,7 +783,7 @@ export function InsightsPage() {
                 alertType === option.value ? 'bg-[#07c160] text-white' : 'bg-white text-gray-600'
               }`}
             >
-              {option.label}
+              {t(option.label)}
             </button>
           ))}
           <button
@@ -802,7 +797,7 @@ export function InsightsPage() {
               unreadOnly ? 'bg-[#07c160] text-white' : 'bg-white text-gray-600'
             }`}
           >
-            只看未读
+            {t('只看未读')}
           </button>
         </div>
 
@@ -811,12 +806,9 @@ export function InsightsPage() {
             <CardContent className="p-8 text-center">
               <Bell className="w-10 h-10 text-gray-300 mx-auto mb-2" />
               <p className="text-sm text-gray-700 font-medium">
-                {alertType || unreadOnly ? '当前筛选下没有提醒' : '还没有异常提醒'}
+                {alertType || unreadOnly ? t('当前筛选下没有提醒') : t('还没有异常提醒')}
               </p>
-              <p className="text-xs text-gray-500 mt-1.5 leading-relaxed">
-                开启截屏与 AI 分析后，识别到的不适龄内容、疑似诈骗、游戏沉迷等情况会在这里提醒；
-                每条都会附上 AI 的判定依据，你可以据此判断是否误报。
-              </p>
+              <p className="text-xs text-gray-500 mt-1.5 leading-relaxed">{t('开启截屏与 AI 分析后，识别到的不适龄内容、疑似诈骗、游戏沉迷等会在这里提醒，并附 AI 判定依据，方便判断是否误报。')}</p>
             </CardContent>
           ) : (
             sortedAlerts.map((alert, index) => (
@@ -835,7 +827,7 @@ export function InsightsPage() {
 
         {sortedAlerts.length > 0 && (
           <p className="mt-2 px-1 text-[11px] text-gray-400 leading-relaxed">
-            提醒按紧急程度排序（高危在前）。所有结论都是模型推断，遇到疑问请先和孩子沟通确认。
+            {t('提醒按紧急程度排序（高危在前）。结论均为模型推断，有疑问请先和孩子沟通。')}
           </p>
         )}
       </div>
@@ -843,7 +835,7 @@ export function InsightsPage() {
       {/* ---------------- 截屏与 AI 设置 ---------------- */}
       <div className="px-3 mt-3">
         <div className="mb-2 px-1">
-          <span className="text-sm font-medium text-gray-500">截屏与 AI 设置</span>
+          <span className="text-sm font-medium text-gray-500">{t('截屏与 AI 设置')}</span>
         </div>
 
         <Card className="overflow-hidden">
@@ -861,52 +853,57 @@ export function InsightsPage() {
               )}
             </div>
             <div className="flex-1 min-w-0 ml-3">
-              <div className="font-medium text-gray-900 text-sm">开启截屏采集</div>
+              <div className="font-medium text-gray-900 text-sm">{t('开启截屏采集')}</div>
               <div className="text-xs text-gray-400 mt-0.5">
-                {config?.captureEnabled ? '已开启，设备会周期性上传屏幕画面' : '默认关闭，开启前请阅读下方隐私说明'}
+                {config?.captureEnabled ? t('已开启，设备会周期性上传屏幕画面') : t('默认关闭，开启前请阅读下方隐私说明')}
               </div>
             </div>
             <Toggle
               checked={config?.captureEnabled ?? false}
               disabled={busyKey === 'captureEnabled' || !config}
-              label="截屏采集开关"
+              label={t('截屏采集开关')}
               onChange={() => {
                 if (!config) return
                 void saveConfig(
                   { captureEnabled: !config.captureEnabled },
-                  !config.captureEnabled ? '截屏采集已开启' : '截屏采集已关闭',
+                  !config.captureEnabled ? t('截屏采集已开启') : t('截屏采集已关闭'),
                   'captureEnabled',
                 )
               }}
             />
           </div>
 
-          {config?.captureEnabled && (
+          {config && (
+            /* 手动截图**不**要求「屏幕洞察」开关，所以这里刻意只判 config 是否加载完，
+               不判 captureEnabled：截图是「按一次看一次」，和这一页的周期采集 + AI 分析不是
+               同一件事，后端也已撤掉门禁。能不能截到由孩子端的无障碍服务决定，截不到时
+               下发结果里会带设备回报的真实原因。 */
+            
             <div className="mx-4 mb-3 flex items-center justify-between gap-3 border-t border-gray-50 pt-3">
-              <div className="text-xs text-gray-400 leading-relaxed">
-                想立刻看一眼当前画面？可以单独下发一次手动截图，结果在「媒体」页可查看。
+                <div className="text-xs text-gray-400 leading-relaxed">
+                  {t('想立刻看当前画面？点右侧下发一次截图，结果在「媒体」页。')}
+                </div>
+                <button
+                  type="button"
+                  disabled={busyKey === 'manualShot'}
+                  onClick={() => {
+                    void (async () => {
+                      setBusyKey('manualShot')
+                      try {
+                        await api.screenshot()
+                        toast.success(t('截图指令已下发，稍后到「媒体」页查看'))
+                      } catch (err: unknown) {
+                        toast.error(toUserMessage(err, t('截图指令下发失败')))
+                      } finally {
+                        setBusyKey(null)
+                      }
+                    })()
+                  }}
+                  className="flex-shrink-0 text-sm text-[#07c160] font-medium px-3 py-1.5 rounded-lg bg-green-50 active:bg-green-100 disabled:opacity-50"
+                >
+                  {t('立即截图')}
+                </button>
               </div>
-              <button
-                type="button"
-                disabled={busyKey === 'manualShot'}
-                onClick={() => {
-                  void (async () => {
-                    setBusyKey('manualShot')
-                    try {
-                      await api.screenshot()
-                      toast.success('截图指令已下发，稍等片刻到「媒体」页查看')
-                    } catch (err: unknown) {
-                      toast.error(toUserMessage(err, '截图指令下发失败'))
-                    } finally {
-                      setBusyKey(null)
-                    }
-                  })()
-                }}
-                className="flex-shrink-0 text-sm text-[#07c160] font-medium px-3 py-1.5 rounded-lg bg-green-50 active:bg-green-100 disabled:opacity-50"
-              >
-                立即截图
-              </button>
-            </div>
           )}
 
           {config?.captureEnabled && (
@@ -914,19 +911,13 @@ export function InsightsPage() {
               <div className="flex items-start space-x-2">
                 <AlertTriangle className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
                 <div className="text-xs text-red-700 leading-relaxed space-y-1">
-                  <p className="font-medium text-sm">开启后请知悉以下事实</p>
-                  <p>
-                    · 孩子设备的屏幕画面会被<b>周期性采集</b>（当前每 {config.captureIntervalSeconds} 秒一张，
-                    每 {config.framesPerBatch} 张打成一个包）。
+                  <p className="font-medium text-sm">{t('开启后请注意：')}</p>
+                  <p>{t('· 孩子设备的屏幕画面会被')}<b>{t('周期性采集')}</b>{t('（当前每')} {config.captureIntervalSeconds}{t('秒一张， 每')}{config.framesPerBatch} {t('张打成一个包）。')}
                   </p>
-                  <p>
-                    · 截图会<b>发送至 AI 服务进行分析</b>，用于识别内容、统计游戏局数与动画集数，并据此生成异常提醒。
+                  <p>{t('· 截图会')}<b>{t('发送至 AI 服务进行分析')}</b>{t('，用于识别内容、统计局数与集数并生成提醒。')}
                   </p>
-                  <p>
-                    · 截图按<b>留档 {config.retentionDays} 天</b>自动删除；家长端本页<b>不展示截图原图</b>
-                    （儿童隐私约定），只能看到帧时间线（时间 + 应用名）。
-                  </p>
-                  <p>· 请仅在确有必要时开启，并事先告知孩子。</p>
+                  <p>{t('· 截图按')}<b>{t('留档')} {config.retentionDays} {t('天')}</b>{t('后自动删除，家长端')}<b>{t('不展示截图原图')}</b>{t('（儿童隐私约定），只能看到帧时间线（时间 + 应用名）。')}</p>
+                  <p>{t('· 确有需要时再开启，并事先告知孩子。')}</p>
                 </div>
               </div>
             </div>
@@ -941,9 +932,9 @@ export function InsightsPage() {
               return (
                 <div key={field} className="flex items-center space-x-2">
                   <div className="flex-1 min-w-0">
-                    <span className="text-sm text-gray-700">{rule.label}</span>
+                    <span className="text-sm text-gray-700">{t(rule.label)}</span>
                     <span className="text-[11px] text-gray-400 ml-1.5">
-                      {rule.min} ~ {rule.max} {rule.unit}
+                      {rule.min} ~ {rule.max} {t(rule.unit)}
                     </span>
                   </div>
                   <input
@@ -956,10 +947,10 @@ export function InsightsPage() {
                     }
                     onBlur={() => void handleNumberBlur(field)}
                     disabled={busyKey === field}
-                    aria-label={rule.label}
+                    aria-label={t(rule.label)}
                     className="w-20 border border-gray-300 rounded-lg px-3 py-2 text-sm text-right focus:outline-none focus:border-[#07c160] disabled:bg-gray-50"
                   />
-                  <span className="text-sm text-gray-500 w-6">{rule.unit}</span>
+                  <span className="text-sm text-gray-500 w-6">{t(rule.unit)}</span>
                 </div>
               )
             })}
@@ -970,20 +961,20 @@ export function InsightsPage() {
           {/* AI 分析开关与采样数 */}
           <div className="flex items-center py-3 px-4">
             <div className="flex-1 min-w-0">
-              <div className="font-medium text-gray-900 text-sm">开启 AI 分析</div>
+              <div className="font-medium text-gray-900 text-sm">{t('开启 AI 分析')}</div>
               <div className="text-xs text-gray-400 mt-0.5">
-                {isAi ? '已配置视觉模型，会对截图做真实分析' : '模型未就绪，开启后仍只会做启发式推断'}
+                {isAi ? t('已配置视觉模型，会对截图做真实分析') : t('模型未就绪，开启后仍只会做启发式推断')}
               </div>
             </div>
             <Toggle
               checked={config?.analyzeEnabled ?? false}
               disabled={busyKey === 'analyzeEnabled' || !config}
-              label="AI 分析开关"
+              label={t('AI 分析开关')}
               onChange={() => {
                 if (!config) return
                 void saveConfig(
                   { analyzeEnabled: !config.analyzeEnabled },
-                  !config.analyzeEnabled ? 'AI 分析已开启' : 'AI 分析已关闭',
+                  !config.analyzeEnabled ? t('AI 分析已开启') : t('AI 分析已关闭'),
                   'analyzeEnabled',
                 )
               }}
@@ -995,22 +986,22 @@ export function InsightsPage() {
           {/* 用屏幕内容出题 */}
           <div className="flex items-center py-3 px-4">
             <div className="flex-1 min-w-0">
-              <div className="font-medium text-gray-900 text-sm">用屏幕内容出题</div>
+              <div className="font-medium text-gray-900 text-sm">{t('用屏幕内容出题')}</div>
               <div className="text-xs text-gray-400 mt-0.5">
                 {config?.quizFromScreen
-                  ? '答题解锁会使用屏幕里出现的内容出题'
-                  : '答题解锁只从题库取题'}
+                  ? t('答题解锁会用屏幕内容出题')
+                  : t('答题解锁只从题库取题')}
               </div>
             </div>
             <Toggle
               checked={config?.quizFromScreen ?? false}
               disabled={busyKey === 'quizFromScreen' || !config}
-              label="用屏幕内容出题开关"
+              label={t('用屏幕内容出题开关')}
               onChange={() => {
                 if (!config) return
                 void saveConfig(
                   { quizFromScreen: !config.quizFromScreen },
-                  !config.quizFromScreen ? '已开启屏幕出题' : '已关闭屏幕出题',
+                  !config.quizFromScreen ? t('已开启屏幕出题') : t('已关闭屏幕出题'),
                   'quizFromScreen',
                 )
               }}
@@ -1021,24 +1012,24 @@ export function InsightsPage() {
 
           {/* 5 类提醒开关 */}
           <div className="px-4 py-3">
-            <p className="text-xs text-gray-400 mb-1">异常提醒类型</p>
+            <p className="text-xs text-gray-400 mb-1">{t('异常提醒类型')}</p>
             {ALERT_SWITCHES.map((item, index) => (
               <div key={String(item.key)}>
                 <div className="flex items-center py-2.5">
                   <div className="flex-1 min-w-0">
-                    <span className="text-sm text-gray-800">{item.label}</span>
-                    <p className="text-[11px] text-gray-400 mt-0.5">{item.desc}</p>
+                    <span className="text-sm text-gray-800">{t(item.label)}</span>
+                    <p className="text-[11px] text-gray-400 mt-0.5">{t(item.desc)}</p>
                   </div>
                   <Toggle
                     checked={Boolean(config?.[item.key])}
                     disabled={busyKey === String(item.key) || !config}
-                    label={`${item.label}提醒开关`}
+                    label={t('{{v0}}提醒开关', { v0: t(item.label) })}
                     onChange={() => {
                       if (!config) return
                       const current = Boolean(config[item.key])
                       void saveConfig(
                         { [item.key]: !current },
-                        `${item.label}提醒${current ? '已关闭' : '已开启'}`,
+                        t('{{v0}}提醒{{v1}}', { v0: t(item.label), v1: current ? t('已关闭') : t('已开启') }),
                         String(item.key),
                       )
                     }}
@@ -1054,10 +1045,7 @@ export function InsightsPage() {
           <div className="bg-white rounded-lg p-3 border border-gray-100">
             <div className="flex items-start space-x-2">
               <Info className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
-              <p className="text-xs text-gray-500 leading-relaxed">
-                这些开关都作用在孩子设备上，改动会立即保存并重新读取；设备下次上报时生效。
-                截屏与 AI 分析都是敏感能力，关闭截屏后不会再产生新的洞察批次。
-              </p>
+              <p className="text-xs text-gray-500 leading-relaxed">{t('这些开关都作用在孩子端，改动立即保存；设备下次上报时生效。关闭截屏后不再产生新的洞察批次。')}</p>
             </div>
           </div>
         </div>
@@ -1066,7 +1054,7 @@ export function InsightsPage() {
       {/* ---------------- 用量上限 ---------------- */}
       <div className="px-3 mt-3">
         <div className="mb-2 px-1">
-          <span className="text-sm font-medium text-gray-500">用量上限</span>
+          <span className="text-sm font-medium text-gray-500">{t('用量上限')}</span>
         </div>
 
         <Card className="overflow-hidden">
@@ -1081,8 +1069,8 @@ export function InsightsPage() {
                     <KindIcon className="w-5 h-5 text-gray-500" />
                   </div>
                   <div className="flex-1 min-w-0 ml-3">
-                    <div className="font-medium text-gray-900 text-sm">{meta.label}</div>
-                    <div className="text-xs text-gray-400 mt-0.5">{meta.desc}</div>
+                    <div className="font-medium text-gray-900 text-sm">{t(meta.label)}</div>
+                    <div className="text-xs text-gray-400 mt-0.5">{t(meta.desc)}</div>
                   </div>
                   <button
                     type="button"
@@ -1090,13 +1078,13 @@ export function InsightsPage() {
                     className="text-xs text-[#07c160] flex items-center flex-shrink-0"
                   >
                     <Plus className="w-3.5 h-3.5 mr-0.5" />
-                    设置
+                    {t('设置')}
                   </button>
                 </div>
 
                 {rows.length === 0 ? (
                   <p className="px-4 pb-3 text-xs text-gray-400">
-                    还没有设置{meta.label}上限，孩子今天可以无限{kind === 'game_round' ? '玩' : '看'}。
+                    {t('还没有设置')}{t(meta.label)}{t('上限，今天可无限')}{kind === 'game_round' ? t('玩') : t('看')}。
                   </p>
                 ) : (
                   rows.map((budget) => {
@@ -1104,26 +1092,26 @@ export function InsightsPage() {
                     const usedToday = summary?.usedToday ?? budget.usedToday
                     const exceeded = summary?.exceeded ?? usedToday >= budget.dailyLimit
                     // 同一类型可能同时存在「全部应用」和「指定应用」两条，无障碍标签要能区分
-                    const scope = budget.appName || '全部应用'
+                    const scope = budget.appName || t('全部应用')
                     return (
                       <div key={budget.id} className="flex items-center px-4 py-2.5">
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center flex-wrap gap-1.5">
                             <span className="text-sm text-gray-900">{scope}</span>
                             {!budget.enabled && (
-                              <Badge className="bg-gray-100 text-gray-500 text-[10px]">已停用</Badge>
+                              <Badge className="bg-gray-100 text-gray-500 text-[10px]">{t('已停用')}</Badge>
                             )}
                             {budget.enabled && exceeded && (
-                              <Badge className="bg-red-100 text-red-700 text-[10px]">已达上限</Badge>
+                              <Badge className="bg-red-100 text-red-700 text-[10px]">{t('已达上限')}</Badge>
                             )}
                           </div>
                           <p className="text-[11px] text-gray-400 mt-0.5">
-                            今日已用 {usedToday} {meta.unit} / 上限 {budget.dailyLimit} {meta.unit}
-                            {budget.enabled && summary ? `（剩余 ${summary.remaining}）` : ''}
+                            {t('今日已用')} {usedToday} {t(meta.unit)}{t('/ 上限')}{budget.dailyLimit} {t(meta.unit)}
+                            {budget.enabled && summary ? t('（剩余 {{v0}}）', { v0: summary.remaining }) : ''}
                           </p>
                           {budget.enabled && exceeded && (
                             <p className="text-[11px] text-red-600 mt-0.5">
-                              已达上限，后端会自动下发锁屏指令
+                              {t('已达上限，将自动下发锁屏指令')}
                             </p>
                           )}
                         </div>
@@ -1131,14 +1119,14 @@ export function InsightsPage() {
                         <Toggle
                           checked={budget.enabled}
                           disabled={busyKey === `budget-${budget.id}`}
-                          label={`${meta.label}上限开关（${scope}）`}
+                          label={t('{{v0}}上限开关（{{v1}}）', { v0: t(meta.label), v1: scope })}
                           onChange={() => void handleToggleBudget(budget)}
                         />
                         <button
                           type="button"
                           onClick={() => openBudgetDialog(kind, budget)}
                           className="text-gray-300 hover:text-[#07c160] p-1.5 ml-1"
-                          aria-label={`编辑${meta.label}上限（${scope}）`}
+                          aria-label={t('编辑{{v0}}上限（{{v1}}）', { v0: t(meta.label), v1: scope })}
                         >
                           <Pencil className="w-4 h-4" />
                         </button>
@@ -1146,7 +1134,7 @@ export function InsightsPage() {
                           type="button"
                           onClick={() => setRemoveBudgetTarget(budget)}
                           className="text-gray-300 hover:text-red-500 p-1.5"
-                          aria-label={`删除${meta.label}上限（${scope}）`}
+                          aria-label={t('删除{{v0}}上限（{{v1}}）', { v0: t(meta.label), v1: scope })}
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -1163,15 +1151,13 @@ export function InsightsPage() {
           })}
         </Card>
 
-        <p className="mt-2 px-1 text-[11px] text-gray-400 leading-relaxed">
-          局数与集数由 AI / 启发式分析从屏幕内容里统计，可能有误差；达到上限后后端会自动下发锁屏指令。
-        </p>
+        <p className="mt-2 px-1 text-[11px] text-gray-400 leading-relaxed">{t('局数与集数由 AI / 启发式分析统计，可能有误差；达到上限会自动下发锁屏指令。')}</p>
       </div>
 
       {/* ---------------- 洞察时间线 ---------------- */}
       <div className="px-3 mt-3">
         <div className="mb-2 px-1 flex items-center justify-between">
-          <span className="text-sm font-medium text-gray-500">洞察时间线</span>
+          <span className="text-sm font-medium text-gray-500">{t('洞察时间线')}</span>
           <button
             type="button"
             onClick={() => {
@@ -1183,7 +1169,7 @@ export function InsightsPage() {
               onlyRisky ? 'bg-[#07c160] text-white' : 'text-[#07c160]'
             }`}
           >
-            只看中高风险
+            {t('只看中高风险')}
           </button>
         </div>
 
@@ -1192,16 +1178,14 @@ export function InsightsPage() {
             <CardContent className="p-8 text-center">
               <ImageOff className="w-10 h-10 text-gray-300 mx-auto mb-2" />
               <p className="text-sm text-gray-700 font-medium">
-                {onlyRisky ? '没有中高风险的洞察记录' : '还没有洞察记录'}
+                {onlyRisky ? t('没有中高风险的洞察记录') : t('还没有洞察记录')}
               </p>
               <p className="text-xs text-gray-500 mt-1.5 leading-relaxed">
                 {config?.captureEnabled
-                  ? '截屏采集已开启。孩子在设备上使用一段时间、设备上传截屏包并完成分析后，这里会出现一条条按批次记录的洞察结论。'
-                  : '截屏采集当前是关闭的。开启后，设备会周期性上传屏幕画面用于分析，结论会按批次出现在这里。'}
+                  ? t('截屏采集已开启。设备上传截屏包并完成分析后，这里会按批次出现洞察结论。')
+                  : t('截屏采集已关闭。开启后设备会周期性上传屏幕画面，分析结论按批次出现在这里。')}
               </p>
-              <p className="text-[11px] text-gray-400 mt-2 leading-relaxed">
-                本页只展示分析结论与帧时间线（时间 + 应用名），不提供截图原图查看。
-              </p>
+              <p className="text-[11px] text-gray-400 mt-2 leading-relaxed">{t('本页只展示分析结论与帧时间线（时间 + 应用名），不提供截图原图。')}</p>
             </CardContent>
           </Card>
         ) : (
@@ -1223,20 +1207,20 @@ export function InsightsPage() {
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center flex-wrap gap-1.5 min-w-0">
-                        <Badge className={`${risk.badge} text-[10px]`}>{risk.label}</Badge>
+                        <Badge className={`${risk.badge} text-[10px]`}>{t(risk.label)}</Badge>
                         {item.isAi ? (
-                          <Badge className="bg-green-100 text-green-700 text-[10px]">AI 分析</Badge>
+                          <Badge className="bg-green-100 text-green-700 text-[10px]">{t('AI 分析')}</Badge>
                         ) : (
-                          <Badge className="bg-gray-100 text-gray-500 text-[10px]">启发式推断</Badge>
+                          <Badge className="bg-gray-100 text-gray-500 text-[10px]">{t('启发式推断')}</Badge>
                         )}
                         {item.completedRounds > 0 && (
                           <Badge className="bg-indigo-100 text-indigo-700 text-[10px]">
-                            完成 {item.completedRounds} 局
+                            {t('完成')} {item.completedRounds} {t('局')}
                           </Badge>
                         )}
                         {item.completedEpisodes > 0 && (
                           <Badge className="bg-cyan-100 text-cyan-700 text-[10px]">
-                            看完 {item.completedEpisodes} 集
+                            {t('看完')} {item.completedEpisodes} {t('集')}
                           </Badge>
                         )}
                       </div>
@@ -1251,10 +1235,10 @@ export function InsightsPage() {
                       <Clock className="w-3 h-3 mr-1 flex-shrink-0" />
                       {formatPeriod(item)}
                       <span className="mx-1">·</span>
-                      {item.frameCount} 帧
+                      {item.frameCount} {t('帧')}
                     </p>
 
-                    <p className="mt-2 text-sm text-gray-800 leading-relaxed">{item.summary}</p>
+                    <p className="mt-2 text-sm text-gray-800 leading-relaxed">{t(item.summary)}</p>
 
                     {apps.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1.5">
@@ -1272,12 +1256,12 @@ export function InsightsPage() {
                       {detailLoading && (
                         <div className="py-6 text-center">
                           <Loader2 className="w-5 h-5 text-[#07c160] animate-spin mx-auto" />
-                          <p className="mt-1.5 text-xs text-gray-500">加载详情中...</p>
+                          <p className="mt-1.5 text-xs text-gray-500">{t('加载详情中...')}</p>
                         </div>
                       )}
 
                       {!detailLoading && !detail && (
-                        <p className="text-xs text-gray-500 text-center py-4">详情加载失败，请收起后重试</p>
+                        <p className="text-xs text-gray-500 text-center py-4">{t('详情加载失败，请收起后重试')}</p>
                       )}
 
                       {!detailLoading && detail && (
@@ -1285,13 +1269,13 @@ export function InsightsPage() {
                           {/* 帧时间线 */}
                           <div className="bg-white rounded-lg border border-gray-100 p-3">
                             <div className="flex items-center justify-between">
-                              <span className="text-xs font-medium text-gray-700">帧时间线</span>
+                              <span className="text-xs font-medium text-gray-700">{t('帧时间线')}</span>
                               <span className="text-[11px] text-gray-400">
                                 {formatFrameRange(detail.frames)}
                               </span>
                             </div>
                             {detail.frames.length === 0 ? (
-                              <p className="mt-2 text-[11px] text-gray-400">本包没有帧记录</p>
+                              <p className="mt-2 text-[11px] text-gray-400">{t('本包没有帧记录')}</p>
                             ) : (
                               <div className="mt-2 max-h-64 overflow-y-auto space-y-1.5">
                                 {detail.frames.map((frame) => (
@@ -1301,43 +1285,41 @@ export function InsightsPage() {
                                       {formatClock(frame.capturedAt)}
                                     </span>
                                     <span className="text-gray-800 truncate">
-                                      {frame.appLabel || frame.packageName || '未知应用'}
+                                      {frame.appLabel || frame.packageName || t('未知应用')}
                                     </span>
                                   </div>
                                 ))}
                               </div>
                             )}
-                            <p className="mt-2 text-[11px] text-gray-400 leading-relaxed">
-                              出于儿童隐私约定，后端不返回截图原图地址，这里只有「时间 + 应用名」。
-                            </p>
+                            <p className="mt-2 text-[11px] text-gray-400 leading-relaxed">{t('出于儿童隐私约定，后端不返回截图原图，这里只有「时间 + 应用名」。')}</p>
                           </div>
 
                           {/* 游戏明细 */}
                           {detail.games.length > 0 && (
                             <div className="bg-white rounded-lg border border-gray-100 p-3">
-                              <span className="text-xs font-medium text-gray-700">游戏识别</span>
+                              <span className="text-xs font-medium text-gray-700">{t('游戏识别')}</span>
                               <div className="mt-2 space-y-2">
                                 {detail.games.map((game, index) => (
                                   <div key={`${game.name}-${index}`} className="text-xs">
                                     <div className="flex items-center flex-wrap gap-1.5">
                                       <span className="text-gray-900 font-medium">
-                                        {game.name || '未知游戏'}
+                                        {game.name || t('未知游戏')}
                                       </span>
                                       <Badge className="bg-gray-100 text-gray-600 text-[10px]">
                                         {game.scene}
                                       </Badge>
                                       {game.roundCompleted && (
                                         <Badge className="bg-indigo-100 text-indigo-700 text-[10px]">
-                                          已完成一局
+                                          {t('已完成一局')}
                                         </Badge>
                                       )}
                                       <span className="text-gray-400">
-                                        置信度 {(game.confidence * 100).toFixed(0)}%
+                                        {t('置信度')} {(game.confidence * 100).toFixed(0)}%
                                       </span>
                                     </div>
                                     {game.evidence && (
                                       <p className="mt-1 text-gray-600 leading-relaxed break-words">
-                                        依据：{game.evidence}
+                                        {t('依据：')}{game.evidence}
                                       </p>
                                     )}
                                   </div>
@@ -1349,26 +1331,26 @@ export function InsightsPage() {
                           {/* 视频明细 */}
                           {detail.videos.length > 0 && (
                             <div className="bg-white rounded-lg border border-gray-100 p-3">
-                              <span className="text-xs font-medium text-gray-700">动画 / 视频识别</span>
+                              <span className="text-xs font-medium text-gray-700">{t('动画 / 视频识别')}</span>
                               <div className="mt-2 space-y-2">
                                 {detail.videos.map((video, index) => (
                                   <div key={`${video.name}-${index}`} className="text-xs">
                                     <div className="flex items-center flex-wrap gap-1.5">
                                       <span className="text-gray-900 font-medium">
-                                        {video.name || '未知视频'}
+                                        {video.name || t('未知视频')}
                                       </span>
                                       {video.episodeCompleted && (
                                         <Badge className="bg-cyan-100 text-cyan-700 text-[10px]">
-                                          已看完一集
+                                          {t('已看完一集')}
                                         </Badge>
                                       )}
                                       <span className="text-gray-400">
-                                        置信度 {(video.confidence * 100).toFixed(0)}%
+                                        {t('置信度')} {(video.confidence * 100).toFixed(0)}%
                                       </span>
                                     </div>
                                     {video.evidence && (
                                       <p className="mt-1 text-gray-600 leading-relaxed break-words">
-                                        依据：{video.evidence}
+                                        {t('依据：')}{video.evidence}
                                       </p>
                                     )}
                                   </div>
@@ -1380,7 +1362,7 @@ export function InsightsPage() {
                           {/* 用量片段 */}
                           {detail.episodes.length > 0 && (
                             <div className="bg-white rounded-lg border border-gray-100 p-3">
-                              <span className="text-xs font-medium text-gray-700">用量统计依据</span>
+                              <span className="text-xs font-medium text-gray-700">{t('用量统计依据')}</span>
                               <div className="mt-2 space-y-2">
                                 {detail.episodes.map((episode: UsageEpisode) => (
                                   <div key={episode.id} className="text-xs">
@@ -1389,16 +1371,16 @@ export function InsightsPage() {
                                         {episode.kindLabel}
                                       </span>
                                       <Badge className="bg-gray-100 text-gray-600 text-[10px]">
-                                        {episode.appName || '全部应用'}
+                                        {episode.appName || t('全部应用')}
                                       </Badge>
                                       <span className="text-gray-500">+{episode.count}</span>
                                       <span className="text-gray-400">
-                                        置信度 {(episode.confidence * 100).toFixed(0)}%
+                                        {t('置信度')} {(episode.confidence * 100).toFixed(0)}%
                                       </span>
                                     </div>
                                     {episode.evidence && (
                                       <p className="mt-1 text-gray-600 leading-relaxed break-words">
-                                        依据：{episode.evidence}
+                                        {t('依据：')}{episode.evidence}
                                       </p>
                                     )}
                                   </div>
@@ -1412,7 +1394,7 @@ export function InsightsPage() {
                             <div className="bg-white rounded-lg border border-gray-100 p-3 space-y-2">
                               {detail.keywords.length > 0 && (
                                 <div>
-                                  <span className="text-xs font-medium text-gray-700">关键词</span>
+                                  <span className="text-xs font-medium text-gray-700">{t('关键词')}</span>
                                   <div className="mt-1.5 flex flex-wrap gap-1.5">
                                     {detail.keywords.map((keyword) => (
                                       <Badge key={keyword} className="bg-gray-100 text-gray-600 text-[10px]">
@@ -1424,7 +1406,7 @@ export function InsightsPage() {
                               )}
                               {detail.topics.length > 0 && (
                                 <div>
-                                  <span className="text-xs font-medium text-gray-700">相关知识点</span>
+                                  <span className="text-xs font-medium text-gray-700">{t('相关知识点')}</span>
                                   <div className="mt-1.5 space-y-1">
                                     {detail.topics.map((topic) => (
                                       <p key={`${topic.subject}-${topic.term}`} className="text-xs text-gray-600">
@@ -1441,7 +1423,7 @@ export function InsightsPage() {
                           {/* 本批次关联的提醒 */}
                           {detail.alerts.length > 0 && (
                             <div className="bg-white rounded-lg border border-gray-100 overflow-hidden">
-                              <p className="text-xs font-medium text-gray-700 px-3 pt-3">本批次触发的提醒</p>
+                              <p className="text-xs font-medium text-gray-700 px-3 pt-3">{t('本批次触发的提醒')}</p>
                               {sortAlerts(detail.alerts).map((alert, index) => (
                                 <div key={alert.id}>
                                   <AlertCard
@@ -1461,10 +1443,10 @@ export function InsightsPage() {
                           {/* 模型信息 + 原始输出 */}
                           <div className="bg-white rounded-lg border border-gray-100 p-3">
                             <p className="text-[11px] text-gray-400 leading-relaxed">
-                              分析来源：{detail.provider || '未知'}
+                              {t('分析来源：')}{detail.provider || t('未知')}
                               {detail.model ? ` / ${detail.model}` : ''}
                               {' · '}
-                              批次 {detail.batchId}
+                              {t('批次')} {detail.batchId}
                             </p>
                             <button
                               type="button"
@@ -1476,11 +1458,11 @@ export function InsightsPage() {
                               ) : (
                                 <ChevronDown className="w-3.5 h-3.5 mr-0.5" />
                               )}
-                              {rawOpen ? '收起原始输出' : '查看原始 AI 输出（排查用）'}
+                              {rawOpen ? t('收起原始输出') : t('查看原始 AI 输出（排查用）')}
                             </button>
                             {rawOpen && (
                               <pre className="mt-2 max-h-64 overflow-auto bg-gray-900 text-gray-100 text-[11px] rounded-lg p-3 whitespace-pre-wrap break-words">
-                                {detail.rawJson || '（后端没有保存原始输出）'}
+                                {detail.rawJson || t('（后端没有保存原始输出）')}
                               </pre>
                             )}
                           </div>
@@ -1488,7 +1470,7 @@ export function InsightsPage() {
                           {/* 重新分析 */}
                           <div className="flex items-center justify-between bg-white rounded-lg border border-gray-100 p-3">
                             <p className="text-[11px] text-gray-500 leading-relaxed flex-1 mr-2">
-                              换了模型或觉得结论不准，可以重新分析这一批截屏；旧结论会被清除后重跑。
+                              {t('换模型或结论不准时，可重新分析这批截屏，旧结论会被清除后重跑。')}
                             </p>
                             <Button
                               variant="outline"
@@ -1502,14 +1484,11 @@ export function InsightsPage() {
                               ) : (
                                 <RefreshCw className="w-3.5 h-3.5 mr-1" />
                               )}
-                              重新分析
+                              {t('重新分析')}
                             </Button>
                           </div>
 
-                          <p className="text-[11px] text-gray-400 leading-relaxed">
-                            AI 判断可能有误，请结合实际：以上结论由模型从屏幕画面推断，
-                            可能把正常的浏览、学习误判为风险行为。
-                          </p>
+                          <p className="text-[11px] text-gray-400 leading-relaxed">{t('AI 判断可能有误：结论由模型从屏幕画面推断，可能把正常浏览、学习误判为风险。')}</p>
                         </div>
                       )}
                     </div>
@@ -1521,10 +1500,7 @@ export function InsightsPage() {
         )}
 
         {items.length > 0 && (
-          <p className="mt-2 px-1 text-[11px] text-gray-400 leading-relaxed">
-            每条 = 一个截屏批次（{config?.framesPerBatch ?? 10} 张一包，约每 {config?.captureIntervalSeconds ?? 30} 秒一张）。
-            点开可看帧时间线、识别明细与原始输出。
-          </p>
+          <p className="mt-2 px-1 text-[11px] text-gray-400 leading-relaxed">{t('每条 = 一个截屏批次（')}{config?.framesPerBatch ?? 10} {t('张一包，约每')} {config?.captureIntervalSeconds ?? 30}{t('秒一张）。点开可看帧时间线、识别明细与原始输出。')}</p>
         )}
       </div>
 
@@ -1533,13 +1509,13 @@ export function InsightsPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {editingBudget ? `编辑${kindLabel(budgetForm.kind)}上限` : `设置${kindLabel(budgetForm.kind)}上限`}
+              {editingBudget ? t('编辑{{v0}}上限', { v0: kindLabel(budgetForm.kind) }) : t('设置{{v0}}上限', { v0: kindLabel(budgetForm.kind) })}
             </DialogTitle>
           </DialogHeader>
 
           <div className="space-y-4">
             <div>
-              <label className="text-sm text-gray-600 block mb-1.5">限制类型</label>
+              <label className="text-sm text-gray-600 block mb-1.5">{t('限制类型')}</label>
               <div className="grid grid-cols-2 gap-2">
                 {(Object.keys(BUDGET_KIND_META) as UsageBudgetKind[]).map((kind) => (
                   <button
@@ -1551,31 +1527,29 @@ export function InsightsPage() {
                       budgetForm.kind === kind ? 'border-[#07c160] bg-green-50' : 'border-gray-200 hover:bg-gray-50'
                     }`}
                   >
-                    <span className="text-sm font-medium text-gray-900">{BUDGET_KIND_META[kind].label}</span>
+                    <span className="text-sm font-medium text-gray-900">{t(BUDGET_KIND_META[kind].label)}</span>
                     <span className="block text-[11px] text-gray-500 mt-0.5">
-                      {BUDGET_KIND_META[kind].desc}
+                      {t(BUDGET_KIND_META[kind].desc)}
                     </span>
                   </button>
                 ))}
               </div>
               {editingBudget && (
                 <p className="mt-1 text-[11px] text-gray-400">
-                  编辑已有上限时不能改类型与应用，避免在同一天重复计数。
+                  {t('编辑时不能改类型与应用，避免同一天重复计数。')}
                 </p>
               )}
             </div>
 
             <div>
-              <label className="text-sm text-gray-600 block mb-1.5" htmlFor="budget-app-name">
-                应用（留空 = 全部应用）
-              </label>
+              <label className="text-sm text-gray-600 block mb-1.5" htmlFor="budget-app-name">{t('应用（留空 = 全部应用）')}</label>
               <input
                 id="budget-app-name"
                 type="text"
                 value={budgetForm.appName}
                 disabled={Boolean(editingBudget)}
                 onChange={(e) => setBudgetForm((current) => ({ ...current, appName: e.target.value }))}
-                placeholder="例如 王者荣耀，留空表示不限应用"
+                placeholder={t('例如 王者荣耀，留空 = 不限应用')}
                 maxLength={50}
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#07c160] disabled:bg-gray-50 disabled:text-gray-500"
               />
@@ -1583,7 +1557,7 @@ export function InsightsPage() {
 
             <div>
               <label className="text-sm text-gray-600 block mb-1.5" htmlFor="budget-daily-limit">
-                每日上限
+                {t('每日上限')}
               </label>
               <div className="flex items-center space-x-2">
                 <input
@@ -1596,8 +1570,7 @@ export function InsightsPage() {
                   className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#07c160]"
                 />
                 <span className="text-sm text-gray-500">
-                  {BUDGET_KIND_META[budgetForm.kind].unit} / 天
-                </span>
+                  {t(BUDGET_KIND_META[budgetForm.kind].unit)}{t('/ 天')}</span>
               </div>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {[1, 2, 3, 5, 10].map((preset) => (
@@ -1608,7 +1581,7 @@ export function InsightsPage() {
                     onClick={() => setBudgetForm((current) => ({ ...current, dailyLimit: String(preset) }))}
                     className={budgetForm.dailyLimit === String(preset) ? 'border-[#07c160] text-[#07c160]' : ''}
                   >
-                    {preset} {BUDGET_KIND_META[budgetForm.kind].unit}
+                    {preset} {t(BUDGET_KIND_META[budgetForm.kind].unit)}
                   </Button>
                 ))}
               </div>
@@ -1616,14 +1589,14 @@ export function InsightsPage() {
 
             <div className="flex items-center py-1">
               <div className="flex-1 min-w-0">
-                <span className="text-sm text-gray-800">启用该上限</span>
+                <span className="text-sm text-gray-800">{t('启用上限')}</span>
                 <p className="text-[11px] text-gray-400 mt-0.5">
-                  启用后达到上限会自动下发锁屏指令
+                  {t('启用后达到上限将自动下发锁屏指令')}
                 </p>
               </div>
               <Toggle
                 checked={budgetForm.enabled}
-                label="启用该上限"
+                label={t('启用上限')}
                 onChange={() => setBudgetForm((current) => ({ ...current, enabled: !current.enabled }))}
               />
             </div>
@@ -1638,14 +1611,14 @@ export function InsightsPage() {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setBudgetDialogOpen(false)} disabled={submittingBudget}>
-              取消
+              {t('取消')}
             </Button>
             <Button
               className="bg-[#07c160] hover:bg-[#06a050]"
               onClick={() => void handleSubmitBudget()}
               disabled={submittingBudget}
             >
-              {submittingBudget ? '保存中…' : '保存'}
+              {submittingBudget ? t('保存中…') : t('保存')}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1658,23 +1631,23 @@ export function InsightsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>删除用量上限</DialogTitle>
+            <DialogTitle>{t('删除用量上限')}</DialogTitle>
           </DialogHeader>
           <p className="text-gray-600">
-            确定要删除「{removeBudgetTarget ? kindLabel(removeBudgetTarget.kind) : ''}
-            {removeBudgetTarget?.appName ? ` · ${removeBudgetTarget.appName}` : ' · 全部应用'}」这条上限吗？
-            删除后不再限制，也不再自动锁屏。
-          </p>
+            {t('确定要删除「')}{removeBudgetTarget ? kindLabel(removeBudgetTarget.kind) : ''}
+            {removeBudgetTarget?.appName ? ` · ${removeBudgetTarget.appName}` : t(' · 全部应用')}{t('」这条上限吗？删除后不再限制、不再自动锁屏。')}</p>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRemoveBudgetTarget(null)}>
-              取消
+              {t('取消')}
             </Button>
             <Button className="bg-red-500 hover:bg-red-600 text-white" onClick={() => void handleRemoveBudget()}>
-              删除
+              {t('删除')}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <FeatureTip id="insights" text={t('截图按留档天数自动删除；家长端只能看到「时间 + 应用名」的帧时间线，看不到原图。')} />
+
     </div>
   )
 }

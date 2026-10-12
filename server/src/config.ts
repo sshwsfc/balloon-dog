@@ -17,8 +17,14 @@ const schema = z.object({
   ADMIN_TOKEN_TTL: z.string().default('12h'),
 
   // ---- 跨域与前端地址 ----
-  CORS_ORIGIN: z.string().default('http://localhost:5173'),
-  CLIENT_URL: z.string().default('http://localhost:5173'),
+  // 家长端有两个端口（见 vite.config.ts）：对外站点 2727（vite preview）、本机开发 5173
+  // （vite dev，被占用时 Vite 会自动 +1）。CORS 两个都放行；CLIENT_URL（登录回跳）用对外的那个。
+  CORS_ORIGIN: z
+    .string()
+    .default(
+      'http://localhost:2727,http://127.0.0.1:2727,http://localhost:5173,http://127.0.0.1:5173',
+    ),
+  CLIENT_URL: z.string().default('http://localhost:2727'),
 
   // ---- 限流 ----
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),

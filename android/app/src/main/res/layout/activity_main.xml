@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  孩子端首页：任务导向的引导页。
+  从上到下只有 5 块：状态头 → 绑定家长 → 需要开启 → 应急与修复 → 高级/诊断。
+  原来满屏的诊断文本全部收进「高级 / 诊断」折叠区（默认收起），功能一个没删。
+-->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/surface_bg"
@@ -12,391 +17,215 @@
         android:orientation="vertical"
         android:padding="12dp">
 
-        <!-- ============ 运行状态 ============ -->
+        <!-- ============ 1. 状态头 ============ -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
-            android:padding="16dp">
+            android:padding="14dp">
 
             <TextView
+                android:id="@+id/section_status"
+                style="@style/CardTitle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/section_status"
-                style="@style/CardTitle" />
+                android:text="@string/section_status" />
 
-            <TextView
-                android:id="@+id/textStatus"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:textSize="20sp"
-                android:textStyle="bold"
-                android:textColor="@color/wechat_green"
-                tools:text="守护运行中" />
+                android:layout_marginTop="6dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <ImageView
+                    android:id="@+id/imageStatusIcon"
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:contentDescription="@null"
+                    android:src="@drawable/ic_shield" />
+
+                <TextView
+                    android:id="@+id/textStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="@string/status_stopped"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="19sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
 
             <TextView
                 android:id="@+id/textDetail"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:textSize="13sp"
+                android:layout_marginTop="4dp"
                 android:textColor="@color/text_secondary"
-                tools:text="已绑定 · 电量 80% · wifi" />
-        </LinearLayout>
-
-        <!-- ============ 配对信息 ============ -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="16dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/section_pairing"
-                style="@style/CardTitle" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:background="@drawable/bg_device_code"
-                android:gravity="center"
-                android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/label_device_code"
-                    style="@style/RowLabel" />
-
-                <TextView
-                    android:id="@+id/textDeviceCode"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:letterSpacing="0.25"
-                    android:textColor="@color/wechat_green_dark"
-                    android:textSize="34sp"
-                    android:textStyle="bold"
-                    tools:text="AB3D7K9M" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/textPairingHint"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:lineSpacingExtra="3dp"
-                android:text="@string/pairing_hint"
-                android:textColor="@color/text_secondary"
-                android:textSize="13sp" />
-
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:layout_marginTop="14dp"
-                android:background="@color/divider" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="@string/label_server"
-                    style="@style/RowLabel" />
-
-                <TextView
-                    android:id="@+id/textServer"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="2"
-                    style="@style/RowValue"
-                    tools:text="http://10.0.2.2:4000/api" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:orientation="horizontal">
-
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="@string/label_today_usage"
-                    style="@style/RowLabel" />
-
-                <TextView
-                    android:id="@+id/textUsage"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="2"
-                    style="@style/RowValue"
-                    tools:text="0分钟 / 上限 120分钟" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- ============ 权限与能力 ============ -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="16dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/section_permissions"
-                style="@style/CardTitle" />
-
-            <TextView
-                android:id="@+id/textLockCapability"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:lineSpacingExtra="2dp"
-                android:textColor="@color/text_primary"
-                android:textSize="13sp"
-                tools:text="设备管理器（可真正锁屏）" />
-
-            <TextView
-                android:id="@+id/textPermissionSummary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:lineSpacingExtra="4dp"
-                android:textColor="@color/text_secondary"
-                android:textSize="13sp"
-                tools:text="相机：已授予\n麦克风：未授予" />
-        </LinearLayout>
-
-        <!-- ============ 操作 ============ -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="16dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/section_actions"
-                style="@style/CardTitle" />
+                android:textSize="12sp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonToggleService"
                 style="@style/ButtonPrimary"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="@string/action_start" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonRefresh"
-                style="@style/ButtonSecondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_refresh" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonGrantAdmin"
-                style="@style/ButtonSecondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_grant_admin" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonGrantRuntime"
-                style="@style/ButtonSecondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_grant_runtime" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonGrantOverlay"
-                style="@style/ButtonSecondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_grant_overlay" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonBattery"
-                style="@style/ButtonSecondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_battery" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonQuiz"
-                style="@style/ButtonSecondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_quiz"
-                android:visibility="gone" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonSettings"
-                style="@style/ButtonSecondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_settings" />
-        </LinearLayout>
-
-        <!-- ============ 防护与保活 ============ -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="16dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/section_protection"
-                style="@style/CardTitle" />
-
-            <TextView
-                android:id="@+id/textStrengthDetail"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="40dp"
                 android:layout_marginTop="10dp"
-                android:lineSpacingExtra="3dp"
-                android:textColor="@color/text_primary"
-                android:textSize="13sp"
-                tools:text="锁屏强度：强（Lock Task 钉住锁定页）" />
-
-            <TextView
-                android:id="@+id/textHardening"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:lineSpacingExtra="3dp"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp"
-                tools:text="禁止卸载：未生效" />
-
-            <TextView
-                android:id="@+id/textEmergency"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp"
-                tools:text="应急解锁密码：未设置" />
-
-            <TextView
-                android:id="@+id/textWatchdog"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:lineSpacingExtra="3dp"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp"
-                tools:text="无障碍看门狗：未开启" />
-
-            <TextView
-                android:id="@+id/textKeepAlive"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:lineSpacingExtra="3dp"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp"
-                tools:text="看门狗已排定" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonSetEmergency"
-                style="@style/ButtonPrimary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
-                android:text="@string/action_set_emergency" />
-
-            <TextView
-                android:id="@+id/textScreenCapture"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:lineSpacingExtra="3dp"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp"
-                tools:text="截屏分析：家长未开启" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonCaptureAuth"
-                style="@style/ButtonSecondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_grant_capture" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonEnableWatchdog"
-                style="@style/ButtonPrimary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_enable_watchdog" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonWatchdogGuide"
-                style="@style/ButtonSecondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_watchdog_guide" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonHeal"
-                style="@style/ButtonSecondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_heal" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonOwnerGuide"
-                style="@style/ButtonSecondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/action_owner_guide" />
+                android:text="@string/action_start" />
         </LinearLayout>
 
-        <!-- ============ 运行日志 ============ -->
+        <!-- ============ 2. 绑定家长 ============ -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="10dp"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
-            android:padding="16dp">
+            android:padding="14dp">
+
+            <!-- 未绑定：完整引导 -->
+            <LinearLayout
+                android:id="@+id/groupUnboundGuide"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <ImageView
+                        android:layout_width="22dp"
+                        android:layout_height="22dp"
+                        android:contentDescription="@null"
+                        android:src="@drawable/ic_link"
+                        app:tint="@color/wechat_green" />
+
+                    <TextView
+                        android:id="@+id/textBindTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="6dp"
+                        android:text="@string/binding_unbound_title"
+                        android:textColor="@color/text_primary"
+                        android:textSize="17sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/textBindSubtitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="@string/binding_unbound_subtitle"
+                    android:textColor="@color/wechat_green_dark"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/textDeviceCode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_device_code"
+                    android:gravity="center"
+                    android:letterSpacing="0.25"
+                    android:paddingTop="12dp"
+                    android:paddingBottom="12dp"
+                    android:textColor="@color/wechat_green_dark"
+                    android:textSize="32sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/textPairingHint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/binding_step_short"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp" />
+
+                <ImageView
+                    android:id="@+id/imageDeviceCodeQr"
+                    android:layout_width="166dp"
+                    android:layout_height="166dp"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_device_code"
+                    android:contentDescription="@string/pairing_qr_desc"
+                    android:padding="8dp"
+                    android:scaleType="fitCenter"
+                    android:visibility="gone" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonCopyCode"
+                    style="@style/ButtonPrimary"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/action_copy_code" />
+            </LinearLayout>
+
+            <!-- 已绑定：收成一行 -->
+            <LinearLayout
+                android:id="@+id/groupBoundInfo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <ImageView
+                        android:layout_width="22dp"
+                        android:layout_height="22dp"
+                        android:contentDescription="@null"
+                        android:src="@drawable/ic_check_circle"
+                        app:tint="@color/wechat_green" />
+
+                    <TextView
+                        android:id="@+id/textBoundSummary"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="6dp"
+                        android:text="@string/binding_bound_title"
+                        android:textColor="@color/text_primary"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/textBoundCode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/textBoundTip"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="@string/binding_bound_tip"
+                    android:textColor="@color/text_tertiary"
+                    android:textSize="11sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ============ 3. 需要开启（核心待办清单） ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="14dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -404,35 +233,393 @@
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:contentDescription="@null"
+                    android:src="@drawable/ic_bolt"
+                    app:tint="@color/wechat_green" />
+
                 <TextView
+                    android:id="@+id/section_todo"
+                    style="@style/CardTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:text="@string/section_todo" />
+
+                <TextView
+                    android:id="@+id/textTodoProgress"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="@string/section_log"
-                    style="@style/CardTitle" />
+                    android:gravity="end"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonOneKeyGrant"
+                style="@style/ButtonPrimary"
+                android:layout_width="match_parent"
+                android:layout_height="42dp"
+                android:layout_marginTop="10dp"
+                android:text="@string/action_one_key_grant" />
+
+            <TextView
+                android:id="@+id/textOneKeyHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/one_key_hint_need_accessibility"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="8dp"
+                android:background="@color/divider" />
+
+            <LinearLayout
+                android:id="@+id/containerTodo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical" />
+        </LinearLayout>
+
+        <!-- ============ 4. 应急与修复 ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="14dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:contentDescription="@null"
+                    android:src="@drawable/ic_lock"
+                    app:tint="@color/wechat_green" />
 
                 <TextView
-                    android:id="@+id/buttonClearLog"
+                    android:id="@+id/section_emergency"
+                    style="@style/CardTitle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:padding="4dp"
-                    android:text="@string/action_clear_log"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="13sp" />
+                    android:layout_marginStart="6dp"
+                    android:text="@string/section_emergency" />
             </LinearLayout>
 
             <TextView
-                android:id="@+id/textLog"
+                android:id="@+id/textEmergency"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:fontFamily="monospace"
-                android:lineSpacingExtra="4dp"
-                android:textColor="@color/log_info"
-                android:textIsSelectable="true"
-                android:textSize="11sp"
-                tools:text="12:03:41  设备码 AB3D7K9M，后端 http://10.0.2.2:4000/api" />
+                android:layout_marginTop="6dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonSetEmergency"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_set_emergency" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonHeal"
+                style="@style/ButtonSecondary"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_heal" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/buttonQuiz"
+                style="@style/ButtonPrimary"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_quiz"
+                android:visibility="gone" />
         </LinearLayout>
 
+        <!-- ============ 5. 高级 / 诊断（默认收起） ============ -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:layout_marginBottom="12dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="14dp">
+
+            <LinearLayout
+                android:id="@+id/buttonAdvancedToggle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="?android:attr/selectableItemBackground"
+                android:gravity="center_vertical"
+                android:minHeight="44dp"
+                android:orientation="horizontal">
+
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:contentDescription="@null"
+                    android:src="@drawable/ic_tune"
+                    app:tint="@color/text_secondary" />
+
+                <TextView
+                    style="@style/CardTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:text="@string/section_advanced" />
+
+                <TextView
+                    android:id="@+id/textAdvancedState"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/action_expand"
+                    android:textColor="@color/text_tertiary"
+                    android:textSize="12sp" />
+
+                <ImageView
+                    android:id="@+id/imageAdvancedArrow"
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:contentDescription="@null"
+                    android:src="@drawable/ic_expand_more" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/groupAdvanced"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <!-- 5.1 权限与能力（逐项诊断） -->
+                <TextView
+                    android:id="@+id/section_permissions"
+                    style="@style/CardTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/section_permissions" />
+
+                <TextView
+                    android:id="@+id/textLockCapability"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/textPermissionSummary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonGrantRuntime"
+                    style="@style/ButtonSecondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/action_grant_runtime" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonGrantOverlay"
+                    style="@style/ButtonSecondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/action_grant_overlay" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonBattery"
+                    style="@style/ButtonSecondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/action_battery" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonGrantAdmin"
+                    style="@style/ButtonSecondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/action_grant_admin" />
+
+                <!-- 5.2 锁屏强度与加固明细 -->
+                <TextView
+                    android:id="@+id/section_protection"
+                    style="@style/CardTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:text="@string/section_protection" />
+
+                <TextView
+                    android:id="@+id/textStrengthDetail"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/textHardening"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <!-- 5.3 看门狗与保活 -->
+                <TextView
+                    android:id="@+id/textWatchdog"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonEnableWatchdog"
+                    style="@style/ButtonPrimary"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/action_enable_watchdog" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonWatchdogGuide"
+                    style="@style/ButtonSecondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/action_watchdog_guide" />
+
+                <TextView
+                    android:id="@+id/textKeepAlive"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <!-- 5.4 屏幕行为洞察 -->
+                <TextView
+                    android:id="@+id/textScreenCapture"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonCaptureAuth"
+                    style="@style/ButtonSecondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/action_grant_capture" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonOwnerGuide"
+                    style="@style/ButtonSecondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/action_owner_guide" />
+
+                <!-- 5.5 服务器与用量 -->
+                <TextView
+                    android:id="@+id/textServer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:textColor="@color/text_tertiary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/textUsage"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <!-- 5.6 运行日志 -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/section_log"
+                        style="@style/CardTitle"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/section_log" />
+
+                    <TextView
+                        android:id="@+id/buttonClearLog"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="?android:attr/selectableItemBackground"
+                        android:padding="6dp"
+                        android:text="@string/action_clear_log"
+                        android:textColor="@color/wechat_green_dark"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/textLog"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:fontFamily="monospace"
+                    android:textColor="@color/log_info"
+                    android:textIsSelectable="true"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonRefresh"
+                    style="@style/ButtonSecondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/action_refresh" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonSettings"
+                    style="@style/ButtonSecondary"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/action_settings" />
+            </LinearLayout>
+        </LinearLayout>
     </LinearLayout>
 </ScrollView>

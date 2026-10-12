@@ -1,9 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   设备管理器策略声明。
-  这里刻意只申请「强制锁屏」一项 —— 权限要得越少，家长越愿意授权，
-  而远程拍照/录音/定位这些能力本来就走运行时权限，不需要设备管理器。
+
+  刻意只申请下面三项、且都真的在用 —— 权限要得越少，家长越愿意授权：
+    · force-lock                → LockController 的 lockNow()，把「界面上显示已锁定」变成屏幕真的锁上；
+    · disable-keyguard-features → LockController.java:131 的 setKeyguardDisabled(admin, false)，
+                                  锁定期间关掉锁屏上的相机/通知下拉等豁免入口；
+    · watch-login               → AgentAdminReceiver.onPasswordFailed()，记录系统锁屏密码输错次数
+                                  （家长端后续可扩展成「密码错误次数」告警）。
+
+  远程拍照 / 录音 / 定位这些能力本来就走运行时权限，不在这里要。
   若要把应用设为 Device Owner 以获得更强管控，同样用这份声明即可。
+  （注意：本文件的策略集合改成「只留 force-lock」之前，请先确认上面两处代码调用
+   已经不再需要 —— 删掉策略会让对应的 API 调用直接抛 SecurityException。）
 -->
 <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-policies>

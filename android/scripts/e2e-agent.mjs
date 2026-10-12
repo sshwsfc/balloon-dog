@@ -427,8 +427,12 @@ function fmtMinute(minute) {
 
 /** 读取媒体原始字节（用后端返回的短时效签名 URL） */
 async function fetchMediaBytes(relativeUrl) {
+  // 服务端配了 PUBLIC_BASE_URL 时会签发绝对地址（server/.env 里就是这么配的），
+  // 没配时是 /api/media/... 这样的相对路径 —— 两种都要能取。
+  // 直接拼接会把 absolute 变成 http://localhost:4000https://... 整个套件当场中断。
   const origin = API_BASE.replace(/\/api$/, '')
-  const res = await fetch(origin + relativeUrl)
+  const target = /^https?:\/\//i.test(relativeUrl) ? relativeUrl : origin + relativeUrl
+  const res = await fetch(target)
   const buffer = Buffer.from(await res.arrayBuffer())
   return { status: res.status, contentType: res.headers.get('content-type'), bytes: buffer }
 }
@@ -827,7 +831,7 @@ async function main() {
       `录音文件可下载且非空（${audioBytes.bytes.length} 字节，${audioBytes.contentType}）`)
   }
 
-  step('14. 屏幕截图（MediaProjection，需点掉系统授权框）')
+  step('14. 屏幕截图（无障碍免授权优先，无需人工点击）')
   await apiOrThrow('PUT', `/features?deviceId=${deviceId}`, {
     token,
     body: { feature: 'screenMonitor', enabled: true },
@@ -844,7 +848,15 @@ async function main() {
       }
     },
   })
-  check(consentTapped, '弹出了屏幕共享授权框（MediaProjection 需要用户确认）')
+  // 这里断言的是「没有卡在等授权」，而不是「必须弹出授权框」。
+  //
+  // 截图默认走无障碍 takeScreenshot（API 30+，免授权、零人工点击），只有无障碍不可用时
+  // 才回退 MediaProjection。旧版本断言「一定弹出了授权框」，那本身就是被修掉的缺陷
+  // —— 继续断言它，等于把 bug 当成契约锁死，还会让免授权路径永远拿不到绿灯。
+  const shotLogs = agentLog()
+  check(!/等待屏幕共享授权超时/.test(shotLogs),
+    '截图没有卡在等屏幕共享授权（免授权路径，或系统已自动放行）',
+    shotLogs.split('\n').filter((l) => /屏幕共享|无障碍接口截屏/.test(l)).slice(-2).join(' | '))
   check(shot.command?.status === 'succeeded', `截图指令成功（status=${shot.command?.status}）`,
     shot.command?.error || '')
   const shotMediaId = shot.command?.result?.mediaId
@@ -943,9 +955,22 @@ async function main() {
     await tapByText('立即自检并恢复守护')
     await sleep(4000)
 
-    const uninstallBlocked = shell('dumpsys device_policy').includes('mUninstallBlocked')
-      || agentLog().includes('最强防护已启用')
-    check(uninstallBlocked, '已启用最强防护（禁卸载 / 禁强行停止 / 禁恢复出厂 / 禁安全模式）')
+    // 断言设备自己查出来的结果，而不是去 grep 系统 dump 里的字段名。
+    //
+    // 原写法恒假，两个分支都坏掉了：
+    //   ① Android 13 的 `dumpsys device_policy` 根本不打印 `mUninstallBlocked`
+    //      （只有 `dumpsys user` 里那条 no_uninstall_apps 用户限制）；
+    //   ② 兜底串「最强防护已启用」早已改名，现在这条链路只在解除时打「最强防护已解除」。
+    // 于是一个**真的生效**的防护被报成失败。现在改成读 OwnerHardening 自检时逐项打出的
+    // `气球狗加固[uninstall_blocked] applied=true ...`，那是 dpm.isUninstallBlocked() 的实时返回值。
+    const hardeningLogs = agentLog()
+    const hardeningItems = hardeningLogs.split('\n')
+      .filter((l) => /\[(uninstall_blocked|no_apps_control|device_owner)\] applied=/.test(l))
+      .slice(-3).join(' | ')
+    check(/\[uninstall_blocked\] applied=true/.test(hardeningLogs)
+      && /\[no_apps_control\] applied=true/.test(hardeningLogs),
+      '已启用最强防护（禁卸载 / 禁强行停止 / 禁恢复出厂 / 禁安全模式）',
+      hardeningItems || '没抓到气球狗加固[...]逐项日志')
 
     // 关键行为断言：设备所有者状态下 am force-stop 杀不掉本应用
     const beforePid = (adb('shell', 'pidof', PKG).out || '').trim()

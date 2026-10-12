@@ -25,6 +25,8 @@
     <string name="label_today_usage">今日已用</string>
 
     <string name="pairing_hint">请在家长端的「设备管理 → 绑定设备」里输入上面的绑定码完成配对。</string>
+    <string name="pairing_qr_hint">也可以用家长端扫一扫下面的二维码，自动填入绑定码。</string>
+    <string name="pairing_qr_desc">绑定码二维码，内容与上方绑定码相同</string>
 
     <string name="action_start">启动守护</string>
     <string name="action_stop">停止守护</string>
@@ -109,4 +111,76 @@
 「网址拦截」需要系统 VPN 授权，授权后由本机在 DNS 解析层拦截家长设置的网址。它只覆盖 DNS：直接填 IP 的访问、DoH/DoT 加密 DNS、以及已经缓存的域名仍可绕过。
 
 桌面图标被家长隐藏后，本机不再有任何入口，只能通过家长端远程恢复，或用 adb 重新启用 MainActivityLauncher 组件。</string>
+
+    <!-- 首页：绑定引导（未绑定） -->
+    <string name="binding_unbound_title">还没绑定家长</string>
+    <string name="binding_unbound_subtitle">家长端 → 设备管理 → 绑定设备</string>
+    <string name="binding_step_short">在家长端输入绑定码，或直接扫码</string>
+    <string name="action_copy_code">复制绑定码</string>
+    <string name="toast_code_copied">绑定码已复制：%1$s</string>
+    <string name="toast_code_missing">还没有绑定码，请稍后重试</string>
+
+    <!-- 首页：绑定引导（已绑定） -->
+    <string name="binding_bound_title">已绑定家长</string>
+    <string name="binding_bound_named">已绑定家长：%1$s</string>
+    <string name="binding_bound_device">绑定码 %1$s</string>
+    <string name="binding_bound_tip">正在接收家长端指令</string>
+
+    <!-- 首页：待办清单 -->
+    <string name="section_todo">需要开启</string>
+    <string name="section_emergency">应急与修复</string>
+    <string name="section_advanced">高级 / 诊断</string>
+    <string name="todo_progress">%1$d/%2$d 已开启</string>
+
+    <string name="badge_on">已开启</string>
+    <string name="badge_off">未开启</string>
+    <string name="badge_starting">启动中</string>
+    <string name="badge_optional">可选</string>
+    <string name="badge_unsupported">本机不支持</string>
+
+    <string name="action_open_now">去开启</string>
+    <string name="action_granted_tick">已开启 ✓</string>
+
+    <string name="todo_name_accessibility">无障碍服务</string>
+    <string name="todo_reason_accessibility">锁定与拦截靠它执行</string>
+    <string name="todo_name_runtime">定位/相机/录音等</string>
+    <string name="todo_reason_runtime">定位、拍照录音、短信上报</string>
+    <string name="todo_name_overlay">悬浮窗</string>
+    <string name="todo_reason_overlay">锁定页要能盖在最上层</string>
+    <string name="todo_name_usage">使用情况访问</string>
+    <string name="todo_reason_usage">统计每天各应用用了多久</string>
+    <string name="todo_name_battery">电池优化白名单</string>
+    <string name="todo_reason_battery">不让系统在后台杀掉它</string>
+    <string name="todo_name_capture">屏幕采集</string>
+    <string name="todo_reason_capture">家长要看屏幕时用，可选</string>
+    <string name="todo_name_vpn">网址拦截</string>
+    <string name="todo_reason_vpn">按家长设置拦网址，可选</string>
+
+    <string name="one_key_hint_need_accessibility">请先开启无障碍</string>
+    <string name="one_key_hint_ready">无障碍已开，可一键开启其余权限</string>
+    <string name="one_key_hint_all_done">权限都已开启，无需操作</string>
+    <string name="action_one_key_grant">一键开启权限</string>
+    <string name="action_one_key_done">权限已全部开启</string>
+    <string name="toast_one_key_need_accessibility">请先开启无障碍服务</string>
+    <string name="toast_one_key_owner">已由设备所有者静默开启</string>
+    <string name="toast_one_key_dialog">其余权限请在系统弹窗里点「允许」</string>
+    <string name="toast_one_key_battery_last">权限已开启，最后确认电池白名单</string>
+    <string name="toast_one_key_partial">还需要手动开启 %1$d 项</string>
+    <string name="toast_one_key_all_done">权限已全部开启</string>
+
+    <string name="dialog_todo_detail_title">%1$s</string>
+    <string name="dialog_todo_status_line">当前状态：%1$s</string>
+    <string name="dialog_permission_line_on">%1$s：已开启</string>
+    <string name="dialog_permission_line_off">%1$s：未开启</string>
+    <string name="dialog_action_later">稍后</string>
+    <string name="dialog_action_ok">知道了</string>
+    <string name="action_expand">展开</string>
+    <string name="action_collapse">收起</string>
+    <string name="toast_vpn_already">网址拦截已授权</string>
+    <string name="toast_vpn_unavailable">本机无法打开 VPN 授权页</string>
+
+    <!-- 首页：状态头一句话 -->
+    <string name="status_detail_unbound">未绑定家长</string>
+    <string name="status_locked_now">锁定中</string>
+    <string name="status_detail_usage">今日已用 %1$s</string>
 </resources>

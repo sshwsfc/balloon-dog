@@ -785,6 +785,8 @@ export type DeviceEventType =
   | 'eye_rest'
   | 'plugin_blocked'
   | 'app_blocked'
+  /** 管控被改动 / 被绕过：加固项失效、无障碍看门狗被关、VPN 授权被撤… */
+  | 'tamper'
 
 export interface DeviceEvent {
   id: string

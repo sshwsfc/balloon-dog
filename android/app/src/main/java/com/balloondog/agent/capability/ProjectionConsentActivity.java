@@ -38,6 +38,20 @@ public class ProjectionConsentActivity extends Activity {
     private static volatile int pendingResultCode = Activity.RESULT_CANCELED;
     private static volatile Intent pendingData;
 
+    /**
+     * 锁定期间拒绝申请截图授权。
+     *
+     * <p>单独成一个类型（而不是只靠 message）是因为上层 {@code ScreenCapturer} 会按
+     * AppOps 状态改写失败原因：如果这里只抛普通 {@link CapabilityException}，
+     * 「设备被锁」就会被误报成「屏幕共享被系统禁止」—— 实测踩过这个坑，
+     * 报错会把人往完全错误的方向带。
+     */
+    static class LockedException extends CapabilityException {
+        LockedException(String message) {
+            super(message);
+        }
+    }
+
     /** 由 {@link ScreenCapturer} 调用：拉起授权页并等待结果。 */
     static boolean await(Context context, long timeoutMs) throws CapabilityException {
         CountDownLatch latch = new CountDownLatch(1);
@@ -53,7 +67,7 @@ public class ProjectionConsentActivity extends Activity {
             LockState state = LockState.compute(
                     LockEnforcer.buildInputs(store, System.currentTimeMillis()));
             if (state.locked) {
-                throw new CapabilityException("设备当前处于锁定状态，不申请截图授权");
+                throw new LockedException("设备当前处于锁定状态，不申请截图授权");
             }
         } catch (CapabilityException e) {
             throw e;
@@ -74,15 +88,19 @@ public class ProjectionConsentActivity extends Activity {
 
         try {
             if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
-                throw new CapabilityException("等待屏幕共享授权超时，请在设备上点击「立即开始」");
+                // 措辞刻意区分两条路径：能走到这里说明免授权的无障碍截图也已经失败，
+                // 排障时才不会误以为「无障碍没生效」和「没人点授权框」是同一件事
+                throw new CapabilityException(
+                        "屏幕共享未授权，且无障碍截图不可用（请在设备上点击「立即开始」，"
+                                + "或在系统设置里开启「气球狗守护」的无障碍服务）");
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new CapabilityException("屏幕共享授权被中断");
+            throw new CapabilityException("屏幕共享授权被中断（无障碍截图也不可用）");
         }
 
         if (pendingResultCode != Activity.RESULT_OK || pendingData == null) {
-            throw new CapabilityException("屏幕共享授权被拒绝，无法截图或录屏");
+            throw new CapabilityException("屏幕共享授权被拒绝，且无障碍截图不可用，无法截图或录屏");
         }
         return true;
     }

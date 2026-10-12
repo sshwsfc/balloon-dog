@@ -8,7 +8,12 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "i18n:coverage": "node scripts/i18n-coverage.mjs",
+    "i18n:wrap": "node scripts/i18n.mjs --wrap",
+    "i18n:wrap-consts": "node scripts/i18n.mjs --wrap-consts",
+    "i18n:keys": "node scripts/i18n.mjs --keys",
     "preview": "vite preview",
+    "preview:all": "npm run build && concurrently -n server,web -c green,cyan \"npm run server:dev\" \"npm run preview\"",
     "server:install": "npm --prefix server install",
     "server:dev": "npm --prefix server run dev",
     "server:build": "npm --prefix server run build",
@@ -35,7 +40,9 @@
     "server:e2e:ai": "node server/scripts/e2e-ai-analysis.mjs",
     "server:e2e:mode": "node server/scripts/e2e-mode.mjs",
     "android:e2e:mode": "node android/scripts/e2e-mode.mjs",
-    "e2e:responsive": "node scripts/browser-e2e.mjs --only=responsive"
+    "e2e:responsive": "node scripts/browser-e2e.mjs --only=responsive",
+    "e2e:ux": "node scripts/browser-e2e.mjs --only=ux",
+    "android:copy-apk": "node -e \"require('fs').copyFileSync('android/app/build/outputs/apk/release/app-release.apk','public/download/balloon-dog-agent.apk')\""
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
@@ -43,9 +50,12 @@
     "@radix-ui/react-slot": "^1.2.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "i18next": "^26.4.2",
     "lucide-react": "^0.562.0",
+    "qrcode.react": "^4.2.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-i18next": "^17.0.16",
     "react-router-dom": "^7.12.0",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.4.0"

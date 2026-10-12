@@ -4,21 +4,13 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ToggleSwitch } from '@/components/ToggleSwitch'
+import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
 import { toast } from 'sonner'
-import {
-  AlertTriangle,
-  ArrowLeft,
-  Clock,
-  Eye,
-  Info,
-  Loader2,
-  Moon,
-  RefreshCw,
-  Save,
-  Sun,
-} from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Clock, Eye, Info, Loader2, Moon, Save, Sun } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
+import { FeatureTip } from '@/components/FeatureTip'
 import type { EyeCareConfig, EyeCareConfigPatch } from '@/types'
+import { useTranslation } from 'react-i18next'
 
 const HOUR_OPTIONS = Array.from({ length: 24 }, (_, hour) => hour)
 
@@ -37,6 +29,7 @@ function formatHour(hour: number): string {
 }
 
 export function EyeCarePage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
 
   const [loading, setLoading] = useState(true)
@@ -63,13 +56,13 @@ export function EyeCarePage() {
       setBrightnessDraft(String(data.config.maxBrightnessPercent))
       setError(null)
     } catch (err) {
-      const message = toUserMessage(err, '加载护眼设置失败')
+      const message = toUserMessage(err, t('加载护眼设置失败'))
       setError(message)
       if (!options?.silent) toast.error(message)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     void loadData()
@@ -89,7 +82,7 @@ export function EyeCarePage() {
       syncDrafts(result.config)
       toast.success(successText)
     } catch (err) {
-      toast.error(toUserMessage(err, '保存失败，请稍后重试'))
+      toast.error(toUserMessage(err, t('保存失败，请稍后重试')))
       console.error('保存护眼设置失败：', err)
       await loadData({ silent: true })
     } finally {
@@ -101,7 +94,7 @@ export function EyeCarePage() {
     if (!config) return
     await save(
       { enabled: !config.enabled },
-      config.enabled ? '护眼设置已关闭' : '护眼设置已开启',
+      config.enabled ? t('护眼设置已关闭') : t('护眼设置已开启'),
       'enabled',
     )
   }
@@ -111,14 +104,14 @@ export function EyeCarePage() {
     const rule = NUMBER_RULES[field]
     const value = Number.parseInt(draft, 10)
     if (!Number.isFinite(value) || value < rule.min || value > rule.max) {
-      toast.error(`${rule.label}需在 ${rule.min} ~ ${rule.max} ${rule.unit}之间`)
+      toast.error(t('{{v0}}需在 {{v1}} ~ {{v2}} {{v3}}之间', { v0: t(rule.label), v1: rule.min, v2: rule.max, v3: t(rule.unit) }))
       syncDrafts(config)
       return
     }
     if (value === config[field]) return
     const patch: EyeCareConfigPatch =
       field === 'continuousMinutes' ? { continuousMinutes: value } : { restMinutes: value }
-    await save(patch, `${rule.label}已设为 ${value} ${rule.unit}`, field)
+    await save(patch, t('{{v0}}已设为 {{v1}} {{v2}}', { v0: t(rule.label), v1: value, v2: t(rule.unit) }), field)
   }
 
   /**
@@ -132,7 +125,7 @@ export function EyeCarePage() {
     const nextStart = which === 'start' ? value : config.nightStartHour
     const nextEnd = which === 'end' ? value : config.nightEndHour
     if (nextStart === nextEnd && config.nightLockEnabled) {
-      toast.error('起止小时相同表示不启用夜间时段，请先关闭「夜间锁屏」')
+      toast.error(t('起止小时相同 = 不启用夜间时段，请先关闭「夜间锁屏」'))
       return
     }
     if (nextStart === config.nightStartHour && nextEnd === config.nightEndHour) return
@@ -151,8 +144,8 @@ export function EyeCarePage() {
         nightLockEnabled: config.nightLockEnabled,
       },
       nextStart === nextEnd
-        ? '夜间时段已清空（起止小时相同表示不启用）'
-        : `夜间护眼时段已设为 ${formatHour(nextStart)} → ${formatHour(nextEnd)}`,
+        ? t('夜间时段已清空（起止相同 = 不启用）')
+        : t('夜间护眼时段已设为 {{v0}} → {{v1}}', { v0: formatHour(nextStart), v1: formatHour(nextEnd) }),
       which === 'start' ? 'nightStart' : 'nightEnd',
     )
   }
@@ -160,12 +153,12 @@ export function EyeCarePage() {
   const handleToggleNightLock = async () => {
     if (!config) return
     if (!config.nightLockEnabled && !config.nightEnabled) {
-      toast.error('夜间时段未启用（起止小时相同），请先设置夜间护眼时段')
+      toast.error(t('夜间时段未启用（起止相同），请先设置夜间护眼时段'))
       return
     }
     await save(
       { nightLockEnabled: !config.nightLockEnabled },
-      config.nightLockEnabled ? '已关闭夜间锁屏' : '已开启夜间锁屏：夜间时段将直接锁屏',
+      config.nightLockEnabled ? t('已关闭夜间锁屏') : t('已开启夜间锁屏：夜间时段直接锁屏'),
       'nightLock',
     )
   }
@@ -173,14 +166,14 @@ export function EyeCarePage() {
   const commitBrightness = async (value: number) => {
     if (!config) return
     if (value !== 0 && (value < 10 || value > 100)) {
-      toast.error('亮度上限需为 0（不限制）或 10 ~ 100')
+      toast.error(t('亮度上限需为 0（不限制）或 10 ~ 100'))
       syncDrafts(config)
       return
     }
     if (value === config.maxBrightnessPercent) return
     await save(
       { maxBrightnessPercent: value },
-      value === 0 ? '已取消亮度上限' : `屏幕亮度上限已设为 ${value}%`,
+      value === 0 ? t('已取消亮度上限') : t('屏幕亮度上限已设为 {{v0}}%', { v0: value }),
       'brightness',
     )
   }
@@ -200,7 +193,7 @@ export function EyeCarePage() {
       <div className="page-shell page-shell--center">
         <div className="text-center">
           <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#07c160]" />
-          <p className="mt-2 text-gray-500 text-sm">加载中...</p>
+          <p className="mt-2 text-gray-500 text-sm">{t('加载中...')}</p>
         </div>
       </div>
     )
@@ -213,7 +206,7 @@ export function EyeCarePage() {
           <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
             <ArrowLeft className="w-5 h-5" />
           </Button>
-          <h1 className="text-xl font-medium text-gray-900 flex-1">护眼设置</h1>
+          <h1 className="text-xl font-medium text-gray-900 flex-1">{t('护眼设置')}</h1>
         </div>
         <div className="px-6 py-20 text-center">
           <Eye className="w-12 h-12 text-gray-300 mx-auto mb-3" />
@@ -225,7 +218,7 @@ export function EyeCarePage() {
               void loadData()
             }}
           >
-            重新加载
+            {t('重新加载')}
           </Button>
         </div>
       </div>
@@ -240,15 +233,8 @@ export function EyeCarePage() {
         <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
           <ArrowLeft className="w-5 h-5" />
         </Button>
-        <h1 className="text-xl font-medium text-gray-900 flex-1">护眼设置</h1>
-        <button
-          type="button"
-          onClick={() => void loadData({ silent: true })}
-          className="text-gray-400 p-1"
-          aria-label="刷新"
-        >
-          <RefreshCw className="w-5 h-5" />
-        </button>
+        <h1 className="text-xl font-medium text-gray-900 flex-1">{t('护眼设置')}</h1>
+        <HeaderRefreshButton onRefresh={() => loadData({ silent: true })} />
       </div>
 
       {error && (
@@ -261,7 +247,7 @@ export function EyeCarePage() {
               className="text-xs text-[#07c160] flex-shrink-0"
               onClick={() => void loadData({ silent: true })}
             >
-              重试
+              {t('重试')}
             </button>
           </div>
         </div>
@@ -281,20 +267,20 @@ export function EyeCarePage() {
               </div>
               <div className="flex-1 min-w-0 ml-3">
                 <div className="flex items-center space-x-2">
-                  <span className="font-medium text-gray-900">护眼设置</span>
+                  <span className="font-medium text-gray-900">{t('护眼设置')}</span>
                   <Badge className={config.enabled ? 'bg-[#07c160] text-white' : 'bg-gray-300 text-white'}>
-                    {config.enabled ? '已开启' : '已关闭'}
+                    {config.enabled ? t('已开启') : t('已关闭')}
                   </Badge>
                 </div>
                 <div className="text-xs text-gray-400 mt-0.5">
-                  {config.enabled ? '按下面的规则在孩子设备上生效' : '关闭后所有护眼规则都不生效'}
+                  {config.enabled ? t('按下面规则在孩子设备上生效') : t('关闭后所有护眼规则不生效')}
                 </div>
               </div>
               <ToggleSwitch
                 checked={config.enabled}
                 busy={busy === 'enabled'}
                 disabled={busy === 'enabled'}
-                label="护眼设置总开关"
+                label={t('护眼设置总开关')}
                 onChange={() => void handleToggleEnabled()}
               />
             </div>
@@ -305,13 +291,13 @@ export function EyeCarePage() {
       {/* ---------------- 连续用眼与强制休息 ---------------- */}
       <div className="px-3">
         <div className="mb-2 px-1">
-          <span className="text-sm font-medium text-gray-500">连续用眼提醒</span>
+          <span className="text-sm font-medium text-gray-500">{t('连续用眼提醒')}</span>
         </div>
         <Card className="overflow-hidden">
           <CardContent className="p-4 space-y-4">
             <div className="flex items-center space-x-2">
               <Clock className="w-4 h-4 text-gray-500 flex-shrink-0" />
-              <span className="text-sm text-gray-700 flex-1">连续用眼提醒</span>
+              <span className="text-sm text-gray-700 flex-1">{t('连续用眼提醒')}</span>
               <input
                 type="number"
                 min={NUMBER_RULES.continuousMinutes.min}
@@ -322,12 +308,12 @@ export function EyeCarePage() {
                 disabled={busy === 'continuousMinutes'}
                 className="w-20 border border-gray-300 rounded-lg px-3 py-2 text-sm text-right focus:outline-none focus:border-[#07c160] disabled:bg-gray-50"
               />
-              <span className="text-sm text-gray-500">分钟</span>
+              <span className="text-sm text-gray-500">{t('分钟')}</span>
             </div>
 
             <div className="flex items-center space-x-2">
               <Moon className="w-4 h-4 text-gray-500 flex-shrink-0" />
-              <span className="text-sm text-gray-700 flex-1">强制休息时长</span>
+              <span className="text-sm text-gray-700 flex-1">{t('强制休息时长')}</span>
               <input
                 type="number"
                 min={NUMBER_RULES.restMinutes.min}
@@ -338,14 +324,12 @@ export function EyeCarePage() {
                 disabled={busy === 'restMinutes'}
                 className="w-20 border border-gray-300 rounded-lg px-3 py-2 text-sm text-right focus:outline-none focus:border-[#07c160] disabled:bg-gray-50"
               />
-              <span className="text-sm text-gray-500">分钟</span>
+              <span className="text-sm text-gray-500">{t('分钟')}</span>
             </div>
 
             <p className="text-xs text-gray-400 leading-relaxed">
-              连续用眼达到 {config.continuousMinutes} 分钟后，设备会强制休息 {config.restMinutes} 分钟。
-              <b className="text-gray-600">休息期间是真的锁屏</b>，休息结束自动解锁 ——
-              这是设备端无障碍服务执行的，不是弹一个提醒而已。
-            </p>
+              {t('连续用眼达到')} {config.continuousMinutes} {t('分钟后，设备会强制休息')} {config.restMinutes} {t('分钟。')}
+              <b className="text-gray-600">{t('休息期间是真的锁屏')}</b>{t('，休息结束后自动解锁，由设备端无障碍服务执行。')}</p>
           </CardContent>
         </Card>
       </div>
@@ -353,12 +337,12 @@ export function EyeCarePage() {
       {/* ---------------- 夜间护眼 ---------------- */}
       <div className="px-3 mt-3">
         <div className="mb-2 px-1">
-          <span className="text-sm font-medium text-gray-500">夜间护眼时段</span>
+          <span className="text-sm font-medium text-gray-500">{t('夜间护眼时段')}</span>
         </div>
         <Card className="overflow-hidden">
           <CardContent className="p-4 space-y-4">
             <div className="flex items-center space-x-2">
-              <span className="text-sm text-gray-700 w-16 flex-shrink-0">开始</span>
+              <span className="text-sm text-gray-700 w-16 flex-shrink-0">{t('开始')}</span>
               <select
                 value={config.nightStartHour}
                 onChange={(e) => void handleHourChange('start', Number(e.target.value))}
@@ -372,7 +356,7 @@ export function EyeCarePage() {
                 ))}
               </select>
               <span className="text-sm text-gray-400">→</span>
-              <span className="text-sm text-gray-700 w-16 flex-shrink-0 text-right">结束</span>
+              <span className="text-sm text-gray-700 w-16 flex-shrink-0 text-right">{t('结束')}</span>
               <select
                 value={config.nightEndHour}
                 onChange={(e) => void handleHourChange('end', Number(e.target.value))}
@@ -389,18 +373,18 @@ export function EyeCarePage() {
 
             <div className="flex items-center">
               <div className="flex-1 min-w-0">
-                <div className="text-sm text-gray-900">夜间锁屏</div>
+                <div className="text-sm text-gray-900">{t('夜间锁屏')}</div>
                 <div className="text-xs text-gray-400 mt-0.5">
                   {config.nightEnabled
-                    ? '开启后，夜间时段内设备会直接锁屏'
-                    : '夜间时段未启用（起止小时相同），无法开启'}
+                    ? t('开启后夜间时段内直接锁屏')
+                    : t('夜间时段未启用（起止相同），无法开启')}
                 </div>
               </div>
               <ToggleSwitch
                 checked={config.nightLockEnabled}
                 busy={busy === 'nightLock'}
                 disabled={busy === 'nightLock'}
-                label="夜间锁屏开关"
+                label={t('夜间锁屏开关')}
                 onChange={() => void handleToggleNightLock()}
               />
             </div>
@@ -408,18 +392,15 @@ export function EyeCarePage() {
             <div className="flex items-center flex-wrap gap-2">
               <Badge className={config.nightEnabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}>
                 {config.nightEnabled
-                  ? `夜间时段 ${formatHour(config.nightStartHour)} → ${formatHour(config.nightEndHour)}`
-                  : '夜间时段未启用'}
+                  ? t('夜间时段 {{v0}} → {{v1}}', { v0: formatHour(config.nightStartHour), v1: formatHour(config.nightEndHour) })
+                  : t('夜间时段未启用')}
               </Badge>
               {config.nightLockEnabled && (
-                <Badge className="bg-red-100 text-red-700">夜间将锁屏</Badge>
+                <Badge className="bg-red-100 text-red-700">{t('夜间将锁屏')}</Badge>
               )}
             </div>
 
-            <p className="text-xs text-gray-400 leading-relaxed">
-              起止小时相同（例如都设为 00）表示不启用夜间时段；此时无法开启夜间锁屏 ——
-              否则家长会以为孩子夜里被锁住了，其实没有。
-            </p>
+            <p className="text-xs text-gray-400 leading-relaxed">{t('起止小时相同（例如都设为 00）表示不启用夜间时段，此时无法开启夜间锁屏，避免误以为夜里已锁屏。')}</p>
           </CardContent>
         </Card>
       </div>
@@ -427,7 +408,7 @@ export function EyeCarePage() {
       {/* ---------------- 屏幕亮度上限 ---------------- */}
       <div className="px-3 mt-3">
         <div className="mb-2 px-1">
-          <span className="text-sm font-medium text-gray-500">屏幕亮度上限</span>
+          <span className="text-sm font-medium text-gray-500">{t('屏幕亮度上限')}</span>
         </div>
         <Card className="overflow-hidden">
           <CardContent className="p-4 space-y-4">
@@ -435,8 +416,8 @@ export function EyeCarePage() {
               <Sun className="w-4 h-4 text-gray-500 flex-shrink-0" />
               <span className="text-sm text-gray-700 flex-1">
                 {config.maxBrightnessPercent === 0
-                  ? '不限制亮度'
-                  : `上限 ${config.maxBrightnessPercent}%`}
+                  ? t('不限制亮度')
+                  : t('上限 {{v0}}%', { v0: config.maxBrightnessPercent })}
               </span>
               {busy === 'brightness' && <Loader2 className="w-4 h-4 animate-spin text-[#07c160]" />}
             </div>
@@ -464,7 +445,7 @@ export function EyeCarePage() {
                     config.maxBrightnessPercent === value ? 'border-[#07c160] text-[#07c160]' : ''
                   }
                 >
-                  {value === 0 ? '不限制' : `${value}%`}
+                  {value === 0 ? t('不限制') : `${value}%`}
                 </Button>
               ))}
               <Button
@@ -474,7 +455,7 @@ export function EyeCarePage() {
                 onClick={() => void handleBrightnessCommitFromDraft()}
               >
                 <Save className="w-3.5 h-3.5 mr-1" />
-                保存亮度
+                {t('保存亮度')}
               </Button>
             </div>
 
@@ -482,9 +463,7 @@ export function EyeCarePage() {
               <div className="flex items-start space-x-2">
                 <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
                 <p className="text-xs text-amber-700 leading-relaxed">
-                  亮度上限需要孩子设备端的<b>「修改系统设置」或设备所有者权限</b>才能真正生效。
-                  没有授权时这条设置只是记录下来，不会改变屏幕亮度。可选 10 ~ 100，0 表示不限制。
-                </p>
+                  {t('亮度上限需要孩子端')}<b>{t('「修改系统设置」或设备所有者权限')}</b>{t('才能真正生效。没有授权时只记录设置，不改变屏幕亮度。可选 10 ~ 100，0 表示不限制。')}</p>
               </div>
             </div>
           </CardContent>
@@ -497,17 +476,16 @@ export function EyeCarePage() {
           <div className="flex items-start space-x-2">
             <Info className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
             <div className="text-xs text-gray-500 leading-relaxed space-y-1">
-              <p className="font-medium text-gray-700">护眼设置的边界</p>
-              <p>· 强制休息是<b>真的锁屏</b>，休息结束后自动解锁；由设备端无障碍服务执行。</p>
-              <p>· 亮度上限依赖设备端权限，未授权时不会生效。</p>
-              <p>
-                · 暂不支持「距离 / 姿势提醒」：那需要前置摄像头持续取帧做人脸与距离推断，
-                隐私代价与误报率都很高，所以不放一个假的开关。
-              </p>
+              <p className="font-medium text-gray-700">{t('护眼设置的边界')}</p>
+              <p>{t('· 强制休息是')}<b>{t('真的锁屏')}</b>{t('，休息结束后自动解锁；由设备端无障碍服务执行。')}</p>
+              <p>{t('· 亮度上限依赖设备端权限，未授权时不会生效。')}</p>
+              <p>{t('· 暂不支持「距离 / 姿势提醒」：需要前置摄像头持续取帧推断，隐私代价和误报率都高，所以不放假的开关。')}</p>
             </div>
           </div>
         </div>
       </div>
+      <FeatureTip id="eyeCare" text={t('强制休息是真锁屏：休息结束前孩子无法自行解锁，休息时长别设太长。')} />
+
     </div>
   )
 }

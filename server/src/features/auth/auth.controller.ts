@@ -6,6 +6,7 @@ import {
   smsLoginSchema,
   wechatStateSchema,
   wechatDevScanSchema,
+  wechatJsapiSignatureSchema,
   updateProfileSchema,
   changePasswordSchema,
   bindPhoneSchema,
@@ -74,6 +75,12 @@ export async function wechatState(req: Request, res: Response) {
 export async function wechatAuthorizeUrl(req: Request, res: Response) {
   const redirectAfter = typeof req.query.redirect === 'string' ? req.query.redirect : '';
   res.json(authService.wechatAuthorizeUrl(redirectAfter));
+}
+
+/** GET /api/auth/wechat/jsapi-signature —— 网页 JS-SDK 的 config 签名（扫一扫用）。 */
+export async function wechatJsapiSignature(req: Request, res: Response) {
+  const { url } = wechatJsapiSignatureSchema.parse(req.query);
+  res.json(await authService.wechatJsapiSignature(url));
 }
 
 /** POST /api/auth/wechat/dev-scan —— 本地联调模拟扫码。 */

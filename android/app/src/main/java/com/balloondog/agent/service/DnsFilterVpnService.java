@@ -58,15 +58,27 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li><b>直连 IP</b>：黑名单是域名，应用直接连 IP 就不经过 DNS；</li>
  *   <li><b>DoH / DoT</b>：浏览器自带的加密 DNS（443/853 端口）不走 53 端口；</li>
  *   <li><b>DNS 缓存</b>：命中前已经解析过的域名，本地缓存还能用一阵；</li>
- *   <li><b>关掉 VPN</b>：孩子可以在系统设置里停掉这个 VPN（除非有设备所有者配合）。</li>
+ *   <li><b>关掉 VPN</b>：孩子可以在系统设置里停掉这个 VPN。设备所有者身份下用
+ *       {@link #applyAlwaysOn} 把它设成「永久 VPN」+ {@code DISALLOW_CONFIG_VPN}
+ *       （实测：{@code am start -a android.settings.VPN_SETTINGS} 被
+ *       「Blocked by your IT admin」挡在门外）。<b>但「下拉快捷开关的 VPN 磁贴能否断开」
+ *       在本项目唯一的验证环境（Android 13 模拟器）上测不出来</b> ——
+ *       该模拟器的 {@code sysui_qs_tiles} 里没有 VPN 磁贴，手动加 {@code vpn} 并重启
+ *       SystemUI 也没出现；所以那条路径按「未验证 / 只能检测 + 上报」对待，
+ *       不写成已堵死。</li>
  * </ol>
  * 这些绕过在 android/README.md「已知边界」里同样写明。
  *
- * <h3>验证状态</h3>
- * <b>本服务从未在真实设备上跑过</b>（本项目当前磁盘不足，模拟器起不来）。
- * 其中的纯逻辑（域名匹配、DNS 报文解析与 NXDOMAIN 构造）有 JVM 交叉测试覆盖，
- * 但「tun 是否真的收到包、上游应答是否真的回得去」只有真机能验证。
- * 代码与文档都按「未验证」对待，不写成「已生效」。
+ * <h3>验证状态（2026-10 更新）</h3>
+ * 已在 Android 13 模拟器（emulator-5554，设备所有者）上真实跑过：家长开启「网址拦截」
+ * 并加一条黑名单后 41 秒日志出现 {@code 已把本应用设为永久 VPN…} 与
+ * {@code 网址拦截已启动：上游 DNS …}，{@code settings get secure always_on_vpn_app}
+ * 变成本包名、{@code dumpsys device_policy} 里 {@code mAlwaysOnVpnPackage=com.balloondog.agent}
+ * （{@code mAlwaysOnVpnLockdown=false}，{@code applyAlwaysOn} 刻意不开 lockdown，
+ * 理由见 android/README.md §7.3）；家长关掉后 10 秒 {@code always_on_vpn_app=null}。
+ * 纯逻辑（域名匹配、DNS 报文解析与 NXDOMAIN 构造）另有 JVM 交叉测试覆盖。
+ * <b>仍未验证</b>：真实网络下「tun 收到的包与上游应答」的端到端链路、
+ * 以及快捷开关 VPN 磁贴（见上）。
  */
 public class DnsFilterVpnService extends VpnService {
 
@@ -85,6 +97,15 @@ public class DnsFilterVpnService extends VpnService {
 
     /** 同一个域名最多每 60 秒记一条拦截日志，避免刷屏。 */
     private static final long BLOCK_LOG_INTERVAL_MS = 60_000L;
+
+    /**
+     * 「永久 VPN」在系统设置里的 key。
+     *
+     * <p>Android 33 的公开 SDK 里没有对应的 {@code Settings.Secure} 字段
+     * （这两个 key 不在公有 SDK 中，只能写字面量），所以在这里集中定义一次。
+     */
+    private static final String KEY_ALWAYS_ON_VPN_APP = "always_on_vpn_app";
+    private static final String KEY_ALWAYS_ON_VPN_LOCKDOWN = "always_on_vpn_lockdown";
 
     /** 黑名单缓存时长：读一次配置够用一阵，不必每个包都解析字符串。 */
     private static final long BLOCKLIST_CACHE_MS = 5_000L;
@@ -141,6 +162,83 @@ public class DnsFilterVpnService extends VpnService {
         }
     }
 
+    /**
+     * 家长的配置当前是否要求开启网址拦截：开关打开<b>且</b>黑名单非空。
+     *
+     * <p>三处必须用同一个判据：{@code AgentService.syncWebBlockService()}、
+     * 本类的 {@link #onStartCommand} 守卫（永久 VPN 会让系统在开机时直接拉起本服务）、
+     * 以及 {@link #applyAlwaysOn}。否则会出现「隧道停了但永久 VPN 还绑着」这种半开状态。
+     */
+    public static boolean isWanted(Context context) {
+        AgentStore store = new AgentStore(context);
+        return store.isWebBlockEnabled()
+                && !DomainBlocker.parseList(store.getBlockedUrls()).isEmpty();
+    }
+
+    /** 系统里「永久 VPN」当前绑定的是不是本应用（供界面与自检读取真实状态）。 */
+    public static boolean isAlwaysOn(Context context) {
+        try {
+            String bound = android.provider.Settings.Secure.getString(
+                    context.getContentResolver(), KEY_ALWAYS_ON_VPN_APP);
+            return context.getPackageName().equals(bound);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 系统里「永久 VPN」是否开了「阻止未走 VPN 的连接」（lockdown）。 */
+    public static boolean isLockdown(Context context) {
+        try {
+            return android.provider.Settings.Secure.getInt(
+                    context.getContentResolver(), KEY_ALWAYS_ON_VPN_LOCKDOWN, 0) == 1;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 把本应用设成「永久 VPN」（设备所有者专属）；家长关掉网址拦截时再解除。
+     *
+     * <h3>为什么必须做这一步</h3>
+     * 不设永久 VPN 时，孩子只要从下拉快捷开关点一下「断开 VPN」，网址拦截立刻失效 ——
+     * {@code DISALLOW_CONFIG_VPN} 挡的是「设置 → 网络 → VPN」页面，<b>挡不住快捷开关</b>。
+     * 设成永久 VPN 后系统会一直维持这条 VPN，快捷开关上的断开变灰。
+     *
+     * <h3>为什么 {@code lockdownEnabled} 传 false</h3>
+     * lockdown 的语义是「VPN 没起来就断掉整台设备的网络」。本服务<b>刻意只路由
+     * 10.111.222.1/32</b>（只接管 DNS，不做用户态转发，见类注释），所以 lockdown 生效时
+     * 除 DNS 以外的流量都会被系统丢弃 —— 设备会变成「只有域名解析、没有连接」。
+     * 这个后果在模拟器上实测过（见 README §2.5.1），因此这里坚持传 false，
+     * 并如实写明残留：<b>快捷开关堵住了，但「设置里换一个 VPN 应用 / 取消永久 VPN」
+     * 这个入口只被 DISALLOW_CONFIG_VPN 挡住，没有第二层。</b>
+     */
+    public static void applyAlwaysOn(Context context) {
+        android.app.admin.DevicePolicyManager dpm = (android.app.admin.DevicePolicyManager)
+                context.getSystemService(Context.DEVICE_POLICY_SERVICE);
+        if (dpm == null || !dpm.isDeviceOwnerApp(context.getPackageName())) return;
+
+        boolean wanted = isWanted(context);
+        String target = wanted ? context.getPackageName() : null;
+        try {
+            String current = android.provider.Settings.Secure.getString(
+                    context.getContentResolver(), KEY_ALWAYS_ON_VPN_APP);
+            if (java.util.Objects.equals(current, target)) return;
+        } catch (Exception ignored) {
+            // 读不到当前值就照常施加，施加本身是幂等的
+        }
+        try {
+            dpm.setAlwaysOnVpnPackage(
+                    com.balloondog.agent.capability.LockController.adminComponent(context),
+                    target, false);
+            EventLog.success(wanted
+                    ? "已把本应用设为永久 VPN：孩子无法再从快捷开关断开网址拦截"
+                    : "已解除永久 VPN（家长关闭了网址拦截）");
+        } catch (Exception e) {
+            EventLog.warn("设置永久 VPN 失败：" + e.getMessage()
+                    + "（孩子仍可从快捷开关断开网址拦截）");
+        }
+    }
+
     @Override
     public int onStartCommand(@Nullable Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
@@ -152,6 +250,16 @@ public class DnsFilterVpnService extends VpnService {
         }
 
         if (running && tunnel != null) return Service.START_NOT_STICKY;
+
+        // 设成永久 VPN 后，系统会在开机时直接拉起本服务（intent 可能为 null），
+        // 所以这里必须自己再确认一次「家长现在还开着网址拦截吗」，否则家长关掉功能后
+        // 系统仍会替我们建隧道。
+        if (!isWanted(this)) {
+            EventLog.info("网址拦截未启用（家长未开启该功能），系统拉起后不建立隧道");
+            applyAlwaysOn(this);
+            stopSelf();
+            return Service.START_NOT_STICKY;
+        }
 
         if (VpnService.prepare(this) != null) {
             // 服务里没法弹系统授权框（必须由 Activity 用 startActivityForResult 发起），

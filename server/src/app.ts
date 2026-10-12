@@ -83,7 +83,14 @@ export function createApp(): Express {
     next();
   });
 
-  // 全局限流
+  /*
+   * 全局限流，按 IP 计数。
+   *
+   * 跑 `npm run e2e:responsive` 前记得把 RATE_LIMIT_MAX 调大：那个套件是
+   * 5 档视口 × 17 路由的整页重载，峰值 300+ 请求/分钟，正好压在默认配额上。
+   * 一旦被限流，前端拿不到 /api/user/info 就退化成未登录、弹回 /login，
+   * e2e 于是报成「页面上找不到「设备」」这种看不出真因的假失败。
+   */
   app.use(
     rateLimit({
       windowMs: 60_000,

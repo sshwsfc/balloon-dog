@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
+import { formatDateTime, locale } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
 import { toast } from 'sonner'
-import { ArrowLeft, Camera, Download, Mic, RefreshCw, Trash2, Video } from 'lucide-react'
+import { ArrowLeft, Camera, Download, Mic, Trash2, Video } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
+import { FeatureTip } from '@/components/FeatureTip'
 import type { MediaAsset, MediaKind } from '@/types'
+import { useTranslation } from 'react-i18next'
 
 const KIND_LABEL: Record<MediaKind, string> = {
   photo: '照片',
@@ -36,6 +40,7 @@ function formatSize(bytes: number): string {
  * 因此可以直接放进 src；签名过期后刷新页面即可重新签发。
  */
 export function MediaPage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const [media, setMedia] = useState<MediaAsset[]>([])
   const [loading, setLoading] = useState(true)
@@ -50,11 +55,11 @@ export function MediaPage() {
       setMedia(res.media ?? [])
       setError(null)
     } catch (err) {
-      setError(toUserMessage(err, '加载媒体文件失败'))
+      setError(toUserMessage(err, t('加载媒体文件失败')))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     void load()
@@ -64,12 +69,12 @@ export function MediaPage() {
     if (!removeTarget) return
     try {
       await api.deleteMedia(removeTarget.id)
-      toast.success('已删除')
+      toast.success(t('已删除'))
       setRemoveTarget(null)
       setPreview(null)
       await load()
     } catch (err) {
-      toast.error(toUserMessage(err, '删除失败'))
+      toast.error(toUserMessage(err, t('删除失败')))
     }
   }
 
@@ -81,15 +86,8 @@ export function MediaPage() {
         <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
           <ArrowLeft className="w-5 h-5" />
         </Button>
-        <h1 className="text-xl font-medium text-gray-900 flex-1">设备照片</h1>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => void load()}
-          aria-label="刷新"
-        >
-          <RefreshCw className="w-5 h-5 text-gray-400" />
-        </Button>
+        <h1 className="text-xl font-medium text-gray-900 flex-1">{t('设备照片')}</h1>
+        <HeaderRefreshButton onRefresh={() => load()} />
       </div>
 
       <div className="px-3 pt-3 flex gap-2 overflow-x-auto">
@@ -102,7 +100,7 @@ export function MediaPage() {
               filter === f.key ? 'bg-[#07c160] text-white' : 'bg-white text-gray-600'
             }`}
           >
-            {f.label}
+            {t(f.label)}
           </button>
         ))}
       </div>
@@ -110,7 +108,7 @@ export function MediaPage() {
       {loading && (
         <div className="py-16 text-center">
           <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#07c160]" />
-          <p className="mt-2 text-gray-500 text-sm">加载中...</p>
+          <p className="mt-2 text-gray-500 text-sm">{t('加载中...')}</p>
         </div>
       )}
 
@@ -124,7 +122,7 @@ export function MediaPage() {
               void load()
             }}
           >
-            重新加载
+            {t('重新加载')}
           </Button>
         </div>
       )}
@@ -136,10 +134,10 @@ export function MediaPage() {
               <CardContent className="p-10 text-center">
                 <Camera className="w-12 h-12 text-gray-300 mx-auto mb-3" />
                 <p className="text-gray-700 font-medium">
-                  {filter ? `还没有${KIND_LABEL[filter as MediaKind]}` : '还没有任何媒体文件'}
+                  {filter ? t('还没有{{v0}}', { v0: t(KIND_LABEL[filter as MediaKind]) }) : t('还没有任何媒体文件')}
                 </p>
                 <p className="text-sm text-gray-500 mt-2">
-                  在首页开启「远程拍照」并点击该功能，孩子设备回传后就会出现在这里。
+                  {t('在首页开启「远程拍照」并点击，孩子端回传后就会出现在这里。')}
                 </p>
               </CardContent>
             </Card>
@@ -156,7 +154,7 @@ export function MediaPage() {
                       {item.mimeType.startsWith('image/') ? (
                         <img
                           src={item.url}
-                          alt={KIND_LABEL[item.kind]}
+                          alt={t(KIND_LABEL[item.kind])}
                           className="w-full h-full object-cover"
                           loading="lazy"
                         />
@@ -170,9 +168,9 @@ export function MediaPage() {
                   <CardContent className="p-2.5">
                     <div className="flex items-center justify-between">
                       <div className="min-w-0">
-                        <p className="text-xs font-medium text-gray-900">{KIND_LABEL[item.kind]}</p>
+                        <p className="text-xs font-medium text-gray-900">{t(KIND_LABEL[item.kind])}</p>
                         <p className="text-[11px] text-gray-400">
-                          {new Date(item.createdAt).toLocaleString('zh-CN', {
+                          {new Date(item.createdAt).toLocaleString(locale(), {
                             month: '2-digit',
                             day: '2-digit',
                             hour: '2-digit',
@@ -186,7 +184,7 @@ export function MediaPage() {
                         type="button"
                         onClick={() => setRemoveTarget(item)}
                         className="text-gray-300 hover:text-red-500 p-1"
-                        aria-label="删除"
+                        aria-label={t('删除')}
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -203,13 +201,13 @@ export function MediaPage() {
       <Dialog open={Boolean(preview)} onOpenChange={(open) => !open && setPreview(null)}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{preview ? KIND_LABEL[preview.kind] : ''}</DialogTitle>
+            <DialogTitle>{preview ? t(KIND_LABEL[preview.kind]) : ''}</DialogTitle>
           </DialogHeader>
           {preview && (
             <div className="space-y-3">
               <div className="bg-gray-100 rounded-lg overflow-hidden flex items-center justify-center max-h-[60vh]">
                 {preview.mimeType.startsWith('image/') ? (
-                  <img src={preview.url} alt={KIND_LABEL[preview.kind]} className="max-h-[60vh] w-auto" />
+                  <img src={preview.url} alt={t(KIND_LABEL[preview.kind])} className="max-h-[60vh] w-auto" />
                 ) : preview.mimeType.startsWith('video/') ? (
                   <video src={preview.url} controls className="max-h-[60vh] w-full" />
                 ) : (
@@ -217,22 +215,22 @@ export function MediaPage() {
                 )}
               </div>
               <p className="text-xs text-gray-500">
-                采集于 {new Date(preview.createdAt).toLocaleString('zh-CN')} · {formatSize(preview.sizeBytes)}
+                {t('采集于')} {formatDateTime(preview.createdAt)} · {formatSize(preview.sizeBytes)}
               </p>
               <p className="text-[11px] text-gray-400">
-                访问链接带短时效签名，过期后刷新页面会自动重新签发。
+                {t('链接带短时效签名，过期后刷新页面会自动重新签发。')}
               </p>
             </div>
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setPreview(null)}>
-              关闭
+              {t('关闭')}
             </Button>
             {preview && (
               <a href={preview.url} download className="inline-flex">
                 <Button variant="outline">
                   <Download className="w-4 h-4 mr-1" />
-                  下载
+                  {t('下载')}
                 </Button>
               </a>
             )}
@@ -244,21 +242,23 @@ export function MediaPage() {
       <Dialog open={Boolean(removeTarget)} onOpenChange={(open) => !open && setRemoveTarget(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>删除媒体文件</DialogTitle>
+            <DialogTitle>{t('删除媒体文件')}</DialogTitle>
           </DialogHeader>
           <p className="text-gray-600">
-            确定要删除这条{KIND_LABEL[(removeTarget?.kind ?? 'photo') as MediaKind]}吗？删除后无法恢复。
+            {t('确定要删除这条')}{t(KIND_LABEL[(removeTarget?.kind ?? 'photo') as MediaKind])}{t('吗？删除后无法恢复。')}
           </p>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRemoveTarget(null)}>
-              取消
+              {t('取消')}
             </Button>
             <Button className="bg-red-500 hover:bg-red-600 text-white" onClick={() => void handleRemove()}>
-              删除
+              {t('删除')}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <FeatureTip id="media" text={t('文件存在服务器上，受孩子端上报和保留策略限制；删除后不可恢复。')} />
+
     </div>
   )
 }

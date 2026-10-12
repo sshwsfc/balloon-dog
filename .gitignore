@@ -23,6 +23,10 @@ dist-ssr
 *.sln
 *.sw?
 
+# 家长端 / 孩子端共用的对外访问基址（VITE_SERVER_URL）。只忽略仓库根目录这一个，
+# 模板见 .env.example；换机器/换域名时各人自己填，不进仓库。
+/.env
+
 # 后端
 server/uploads/
 server/.env
@@ -33,4 +37,9 @@ server/dist/
 android/scripts/crosstest/.work/
 android/.android-home/
 android/.gradle-home/
+# 也有在仓库根目录跑 gradle 的（GRADLE_USER_HOME=.gradle-home），一并忽略
+.gradle-home/
 android/app/build/
+
+# 孩子端安装包：构建产物，不进仓库（用 npm run android:copy-apk 刷新）
+public/download/*.apk

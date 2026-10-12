@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
+import { compareByLocale } from '@/lib/format'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -19,7 +20,6 @@ import {
   Camera,
   CornerUpLeft,
   Home,
-  Info,
   Loader2,
   MonitorSmartphone,
   RefreshCw,
@@ -28,7 +28,10 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
+import { FeatureGate } from '@/components/FeatureGate'
+import { FeatureTip } from '@/components/FeatureTip'
 import type { CommandDispatchResult, DeviceApp, RemoteAction } from '@/types'
+import { useTranslation } from 'react-i18next'
 
 interface RemoteActionMeta {
   action: RemoteAction
@@ -46,6 +49,7 @@ const GLOBAL_ACTIONS: RemoteActionMeta[] = [
 ]
 
 export function RemoteHelpPage() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const [busy, setBusy] = useState<string | null>(null)
   const [appsOpen, setAppsOpen] = useState(false)
@@ -58,21 +62,21 @@ export function RemoteHelpPage() {
   /** 指令结果一律照实说：noop / warning 都由后端给出，不能一律报成功 */
   const reportResult = useCallback((result: CommandDispatchResult, successText: string) => {
     if (result.noop) {
-      toast.info('设备已处于该状态，无需操作')
+      toast.info(t('设备已处于该状态，无需操作'))
     } else if (result.warning) {
       toast.warning(result.warning)
     } else {
       toast.success(successText)
     }
-  }, [])
+  }, [t])
 
   const handleAction = async (action: RemoteAction, label: string) => {
     setBusy(action)
     try {
       const result = await api.remoteAction(action)
-      reportResult(result, `已下发「${label}」指令`)
+      reportResult(result, t('已下发「{{v0}}」指令', { v0: label }))
     } catch (error: unknown) {
-      toast.error(toUserMessage(error, `下发「${label}」失败`))
+      toast.error(toUserMessage(error, t('下发「{{v0}}」失败', { v0: label })))
     } finally {
       setBusy(null)
     }
@@ -84,7 +88,7 @@ export function RemoteHelpPage() {
       const result = await api.screenshot()
       reportResult(result, '已下发截图指令，稍后可到「媒体」里查看')
     } catch (error: unknown) {
-      toast.error(toUserMessage(error, '下发截图指令失败'))
+      toast.error(toUserMessage(error, t('下发截图指令失败')))
     } finally {
       setBusy(null)
     }
@@ -97,13 +101,13 @@ export function RemoteHelpPage() {
       const res = await api.getDeviceApps()
       setApps(res.apps ?? [])
     } catch (error: unknown) {
-      const message = toUserMessage(error, '加载设备应用列表失败')
+      const message = toUserMessage(error, t('加载设备应用列表失败'))
       setAppsError(message)
       toast.error(message)
     } finally {
       setAppsLoading(false)
     }
-  }, [])
+  }, [t])
 
   // 每次打开弹窗都重新拉一次：应用清单是设备上报的，可能已经变了
   useEffect(() => {
@@ -121,17 +125,17 @@ export function RemoteHelpPage() {
           app.appName.toLowerCase().includes(keyword) || app.packageName.toLowerCase().includes(keyword)
         )
       })
-      .sort((a, b) => a.appName.localeCompare(b.appName, 'zh-CN'))
+      .sort((a, b) => compareByLocale(a.appName, b.appName))
   }, [apps, appQuery])
 
   const handleOpenApp = async (app: DeviceApp) => {
     setBusy(`open_app:${app.packageName}`)
     try {
       const result = await api.remoteAction('open_app', app.packageName)
-      reportResult(result, `已下发「打开 ${app.appName}」指令`)
+      reportResult(result, t('已下发「打开 {{v0}}」指令', { v0: app.appName }))
       setAppsOpen(false)
     } catch (error: unknown) {
-      toast.error(toUserMessage(error, `下发「打开 ${app.appName}」失败`))
+      toast.error(toUserMessage(error, t('下发「打开 {{v0}}」失败', { v0: app.appName })))
     } finally {
       setBusy(null)
     }
@@ -144,7 +148,7 @@ export function RemoteHelpPage() {
       reportResult(result, '已通知设备重新上报应用列表，稍后刷新即可看到')
       await loadApps()
     } catch (error: unknown) {
-      toast.error(toUserMessage(error, '通知设备刷新应用列表失败'))
+      toast.error(toUserMessage(error, t('通知设备刷新应用列表失败')))
     } finally {
       setRefreshingApps(false)
     }
@@ -156,132 +160,114 @@ export function RemoteHelpPage() {
         <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
           <ArrowLeft className="w-5 h-5" />
         </Button>
-        <h1 className="text-xl font-medium text-gray-900 flex-1">远程协助</h1>
+        <h1 className="text-xl font-medium text-gray-900 flex-1">{t('远程协助')}</h1>
       </div>
 
-      {/* ---------------- 先把「这是什么」讲清楚 ---------------- */}
-      <div className="px-3 pt-3">
-        <div className="flex items-start space-x-2 bg-sky-50 border border-sky-200 rounded-lg p-3">
-          <Info className="w-4 h-4 text-sky-600 mt-0.5 flex-shrink-0" />
-          <div className="text-xs text-sky-900 leading-relaxed space-y-1">
-            <p className="font-medium text-sm">这是「远程操作 + 取屏」，不是实时投屏</p>
-            <p>
-              <b>不是实时投屏：</b>你看到的是「截取当前画面」按需抓的一张图，不是连续的视频流，
-              也没有声音，画面不会自动更新。
-            </p>
-            <p>
-              <b>不是远程控制：</b>你只能让孩子设备执行返回、回桌面、最近任务、拉通知栏和打开指定应用
-              这几个系统动作，<b>不能点击屏幕上的任意位置</b>，也不能输入文字。
-            </p>
-            <p>
-              这些动作依赖孩子设备上的无障碍服务，并且需要设备在线。无障碍服务被关掉时设备会直接失败并回报，
-              不会假装执行成功。
-            </p>
-          </div>
-        </div>
-      </div>
+      {/* 开关没开就在原地开启，别让家长点一下 → 报错 → 自己回首页找开关 */}
+      <FeatureGate
+        feature="remoteHelp"
+        title={t('远程协助还没开启')}
+        hint={t('开启后才能下发返回、回桌面这类系统动作，需要孩子端在线。')}
+      >
+        {/* ---------------- 远程操作 ---------------- */}
+        <div className="px-3 pt-3">
+          <Card>
+            <CardContent className="p-4">
+              <div className="flex items-center space-x-2 mb-1">
+                <MonitorSmartphone className="w-5 h-5 text-[#07c160]" />
+                <h2 className="font-medium text-gray-900">{t('远程操作')}</h2>
+              </div>
+              <p className="text-xs text-gray-500 mb-3 leading-relaxed">
+                {t('点击按钮下发指令，孩子端执行后生效。只能触发系统动作，不能点击屏幕或输入文字。')}
+              </p>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {GLOBAL_ACTIONS.map((item) => (
+                  <button
+                    key={item.action}
+                    type="button"
+                    disabled={busy !== null}
+                    onClick={() => void handleAction(item.action, t(item.label))}
+                    className="flex flex-col items-center justify-center py-3 rounded-lg border border-gray-200 bg-white active:bg-gray-50 disabled:opacity-50"
+                  >
+                    {busy === item.action ? (
+                      <Loader2 className="w-5 h-5 text-[#07c160] animate-spin" />
+                    ) : (
+                      <item.icon className="w-5 h-5 text-gray-600" />
+                    )}
+                    <span className="text-xs text-gray-800 mt-1.5">{t(item.label)}</span>
+                    <span className="text-[10px] text-gray-400 mt-0.5 px-1 text-center leading-tight">
+                      {t(item.desc)}
+                    </span>
+                  </button>
+                ))}
+              </div>
 
-      {/* ---------------- 远程操作 ---------------- */}
-      <div className="px-3 pt-3">
-        <Card>
-          <CardContent className="p-4">
-            <div className="flex items-center space-x-2 mb-1">
-              <MonitorSmartphone className="w-5 h-5 text-[#07c160]" />
-              <h2 className="font-medium text-gray-900">远程操作</h2>
-            </div>
-            <p className="text-xs text-gray-500 mb-3 leading-relaxed">
-              点一下就把指令发给孩子的设备，设备执行后立即生效。
-            </p>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              {GLOBAL_ACTIONS.map((item) => (
-                <button
-                  key={item.action}
-                  type="button"
-                  disabled={busy !== null}
-                  onClick={() => void handleAction(item.action, item.label)}
-                  className="flex flex-col items-center justify-center py-3 rounded-lg border border-gray-200 bg-white active:bg-gray-50 disabled:opacity-50"
-                >
-                  {busy === item.action ? (
-                    <Loader2 className="w-5 h-5 text-[#07c160] animate-spin" />
-                  ) : (
-                    <item.icon className="w-5 h-5 text-gray-600" />
-                  )}
-                  <span className="text-xs text-gray-800 mt-1.5">{item.label}</span>
-                  <span className="text-[10px] text-gray-400 mt-0.5 px-1 text-center leading-tight">
-                    {item.desc}
+              {/* 打开应用：不能猜包名，必须让家长从设备上报的清单里选 */}
+              <button
+                type="button"
+                disabled={busy !== null}
+                onClick={() => setAppsOpen(true)}
+                className="mt-2 w-full flex items-center space-x-3 p-3 rounded-lg border border-gray-200 bg-white active:bg-gray-50 disabled:opacity-50"
+              >
+                <AppWindow className="w-5 h-5 text-gray-600 flex-shrink-0" />
+                <span className="flex-1 text-left">
+                  <span className="block text-sm text-gray-800">{t('打开应用')}</span>
+                  <span className="block text-[10px] text-gray-400 mt-0.5">
+                    {t('从孩子端已安装的应用里选一个打开')}
                   </span>
-                </button>
-              ))}
-            </div>
-
-            {/* 打开应用：不能猜包名，必须让家长从设备上报的清单里选 */}
-            <button
-              type="button"
-              disabled={busy !== null}
-              onClick={() => setAppsOpen(true)}
-              className="mt-2 w-full flex items-center space-x-3 p-3 rounded-lg border border-gray-200 bg-white active:bg-gray-50 disabled:opacity-50"
-            >
-              <AppWindow className="w-5 h-5 text-gray-600 flex-shrink-0" />
-              <span className="flex-1 text-left">
-                <span className="block text-sm text-gray-800">打开应用</span>
-                <span className="block text-[10px] text-gray-400 mt-0.5">
-                  从孩子设备已安装的应用里选一个，在它上面打开
                 </span>
-              </span>
-              <span className="text-xs text-[#07c160]">选择</span>
-            </button>
-          </CardContent>
-        </Card>
-      </div>
+                <span className="text-xs text-[#07c160]">{t('选择')}</span>
+              </button>
+            </CardContent>
+          </Card>
+        </div>
 
-      {/* ---------------- 取屏 ---------------- */}
-      <div className="px-3 pt-3">
-        <Card>
-          <CardContent className="p-4">
-            <div className="flex items-center space-x-2 mb-1">
-              <Camera className="w-5 h-5 text-[#07c160]" />
-              <h2 className="font-medium text-gray-900">看看现在是什么画面</h2>
-            </div>
-            <p className="text-xs text-gray-500 mb-3 leading-relaxed">
-              抓取一张孩子设备当前的屏幕截图。这是一张静止的图，不是持续的画面，
-              避免频繁点击 —— 每次都会占用设备一次截屏动作。
-            </p>
-            <Button
-              variant="outline"
-              className="w-full bg-white"
-              disabled={busy !== null}
-              onClick={() => void handleScreenshot()}
-            >
-              {busy === 'screenshot' ? (
-                <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  正在下发…
-                </>
-              ) : (
-                '截取当前画面'
-              )}
-            </Button>
-            <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
-              截图会保存到「媒体」里，和定时截屏、远程拍照放在一起。
-            </p>
-          </CardContent>
-        </Card>
-      </div>
+        {/* ---------------- 取屏 ---------------- */}
+        {/* 取屏不再要求「屏幕洞察」这个开关：后端已经撤掉了截图的门禁（FEATURE_DEFS 里
+            没有「截图」这一项，截图与「周期截屏 + AI 分析」是两件事）。能不能截到由孩子端的
+            无障碍服务决定，截不到时下发结果里会带设备回报的真实原因。 */}
+        <div className="px-3 pt-3">
+          <Card>
+            <CardContent className="p-4">
+              <div className="flex items-center space-x-2 mb-1">
+                <Camera className="w-5 h-5 text-[#07c160]" />
+                <h2 className="font-medium text-gray-900">{t('看看现在是什么画面')}</h2>
+              </div>
+              <p className="text-xs text-gray-500 mb-3 leading-relaxed">{t('抓一张当前画面。静止图片，不会自动更新，别频繁点。')}</p>
+              <Button
+                variant="outline"
+                className="w-full bg-white"
+                disabled={busy !== null}
+                onClick={() => void handleScreenshot()}
+              >
+                {busy === 'screenshot' ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    {t('正在下发…')}
+                  </>
+                ) : (
+                  t('截取当前画面')
+                )}
+              </Button>
+              <p className="text-[10px] text-gray-400 mt-2 leading-relaxed">
+                {t('截图存到「媒体」里，和定时截屏、远程拍照放在一起。')}
+              </p>
+            </CardContent>
+          </Card>
+        </div>
 
-      <div className="px-3 mt-4">
-        <p className="text-[10px] text-gray-400 leading-relaxed px-1">
-          提示：远程操作需要孩子设备端 Agent 在线、且无障碍服务处于开启状态。
-          设备离线时指令会排队，设备上线后执行。
-        </p>
-      </div>
+        <div className="px-3 mt-4">
+          <p className="text-[10px] text-gray-400 leading-relaxed px-1">{t('需要孩子端在线；离线时指令会排队，上线后执行。')}</p>
+        </div>
+      </FeatureGate>
 
       {/* ---------------- 选择应用 ---------------- */}
       <Dialog open={appsOpen} onOpenChange={setAppsOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>打开应用</DialogTitle>
+            <DialogTitle>{t('打开应用')}</DialogTitle>
             <DialogDescription>
-              下面是孩子设备上报的、可以打开的应用。找不到想要的应用时，可以让设备重新上报。
+              {t('下面是孩子设备上报的、可以打开的应用。找不到想要的应用时，可以让设备重新上报。')}
             </DialogDescription>
           </DialogHeader>
 
@@ -292,7 +278,7 @@ export function RemoteHelpPage() {
                 type="text"
                 value={appQuery}
                 onChange={(e) => setAppQuery(e.target.value)}
-                placeholder="搜索应用名或包名"
+                placeholder={t('搜索应用名或包名')}
                 className="w-full border border-gray-300 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:border-[#07c160]"
               />
             </div>
@@ -301,7 +287,7 @@ export function RemoteHelpPage() {
               size="icon"
               onClick={() => void handleRefreshApps()}
               disabled={refreshingApps}
-              aria-label="让设备重新上报应用列表"
+              aria-label={t('让设备重新上报应用列表')}
             >
               <RefreshCw className={`w-4 h-4 text-gray-400 ${refreshingApps ? 'animate-spin' : ''}`} />
             </Button>
@@ -310,25 +296,25 @@ export function RemoteHelpPage() {
           {appsLoading ? (
             <div className="py-10 text-center">
               <Loader2 className="w-6 h-6 text-[#07c160] animate-spin mx-auto" />
-              <p className="text-xs text-gray-500 mt-2">正在读取设备应用列表...</p>
+              <p className="text-xs text-gray-500 mt-2">{t('正在读取设备应用列表...')}</p>
             </div>
           ) : appsError ? (
             <div className="py-10 text-center">
               <p className="text-sm text-gray-600">{appsError}</p>
               <Button variant="outline" className="mt-3 bg-white" onClick={() => void loadApps()}>
-                重新加载
+                {t('重新加载')}
               </Button>
             </div>
           ) : filteredApps.length === 0 ? (
             <div className="py-8 text-center">
               <AppWindow className="w-8 h-8 text-gray-300 mx-auto mb-2" />
               <p className="text-sm text-gray-600">
-                {apps.length === 0 ? '设备还没有上报应用列表' : '没有匹配的应用'}
+                {apps.length === 0 ? t('设备还没有上报应用列表') : t('没有匹配的应用')}
               </p>
               <p className="text-xs text-gray-400 mt-1 leading-relaxed px-2">
                 {apps.length === 0
-                  ? '设备端 Agent 需要在线并上报过应用清单。点右上角刷新可以通知设备重新上报。'
-                  : '换个关键词试试。'}
+                  ? t('设备端 Agent 需要在线并上报过应用清单。点右上角刷新可以通知设备重新上报。')
+                  : t('换个关键词试试。')}
               </p>
             </div>
           ) : (
@@ -347,7 +333,7 @@ export function RemoteHelpPage() {
                     <span className="block text-[10px] text-gray-400 truncate">{app.packageName}</span>
                   </span>
                   {app.isSystem && (
-                    <Badge className="bg-gray-200 text-gray-600 flex-shrink-0">系统</Badge>
+                    <Badge className="bg-gray-200 text-gray-600 flex-shrink-0">{t('系统')}</Badge>
                   )}
                   {busy === `open_app:${app.packageName}` && (
                     <Loader2 className="w-4 h-4 text-[#07c160] animate-spin flex-shrink-0" />
@@ -359,11 +345,13 @@ export function RemoteHelpPage() {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setAppsOpen(false)}>
-              取消
+              {t('取消')}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <FeatureTip id="remoteHelp" text={t('只能下发返回、回桌面这类系统动作，不能点击屏幕或输入文字。')} />
+
     </div>
   )
 }

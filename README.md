@@ -31,13 +31,22 @@ npm run db:up           # docker 起 PostgreSQL（端口 5433）
 npm run db:migrate      # 建表
 npm run db:seed         # 演示数据
 
-# 3) 同时启动前后端
-npm run dev:all
+# 3) 配对外访问基址（决定安装包二维码指向哪、孩子端装完连哪个后端）
+cp .env.example .env    # 本机开发可留空，走下面的 localhost 即默认值
+
+# 4) 构建产物 + 同时启动预览服务器与后端
+npm run preview:all
 ```
 
-- 家长端：http://localhost:5173 （`/api` 自动代理到后端 4000）
-- 管理后台：http://localhost:5173/admin
+- 家长端：http://localhost:2727 （`/api` 自动代理到后端 4000）
+- 管理后台：http://localhost:2727/admin
 - 后端：http://localhost:4000
+
+> **对外访问（含反向代理的域名）一律走 `npm run preview`（2727）**。它跑的是 `dist/` 静态产物，
+> 首屏比 dev server 快得多（dev 要按需转换每个模块还挂着 HMR websocket，走公网代理会明显变慢）。
+>
+> 本机开发用 `npm run dev`，端口走 Vite 默认的 5173（带 HMR，被占用时自动 +1），不对外。
+> `preview` 的 2727 配了 `strictPort`，被占用时直接报错而不会悄悄换端口。
 
 | 入口 | 演示账号 |
 | --- | --- |
@@ -48,9 +57,43 @@ npm run dev:all
 也可以分开跑：
 
 ```bash
-npm run server:dev      # 只起后端
-npm run dev             # 只起前端
+npm run server:dev      # 只起后端（4000）
+npm run preview         # 只起对外站点（2727，需先 npm run build）
+npm run dev             # 本机开发服务器（5173，带 HMR）
 ```
+
+### 对外访问基址（`VITE_SERVER_URL`）
+
+仓库根目录的 `.env`（模板 `.env.example`）里只有一个变量：
+
+```bash
+VITE_SERVER_URL=https://ballondog.hd.takin.cc
+```
+
+它是**家长端页面、后端 `/api`、孩子端安装包下载**共同挂在的那个域名，由反向代理统一入口。
+这一个值决定三件事，必须一致，所以只配一处：
+
+1. 新手引导第一步那个**安装包二维码**的内容（必须是孩子手机能直接打开的公网地址）；
+2. 家长端页面上的**手动下载链接**与**微信登录回跳地址**；
+3. **孩子端 APK 内置的后端地址** —— `android/app/build.gradle` 读同一个变量烘焙进
+   `release` 包，这样 `npm run android:copy-apk` 发布的包装到孩子手机上直接就连线上。
+
+留空则回落到「当前页面的 origin」，只适合本机开发：那时孩子手机扫不开二维码，
+引导页会显示一条琥珀色警告说明。
+
+反向代理需要满足三点：
+
+| 路径 | 转发到 | 说明 |
+| --- | --- | --- |
+| `/api/*` | 后端 4000 | 前端一律写相对路径 `/api/...`，由代理转发 |
+| 其余（含 `/download/*.apk`） | `vite preview` 2727 | **安装包必须由前端这一侧提供**，转发到后端会 404 |
+
+⚠️ 反代**不要**指向 `npm run dev`（5173）：dev server 首屏明显更慢，而且必须转发 WebSocket
+`Upgrade` 头（否则热更新连不上）。对外统一用 2727 的 `vite preview`。
+
+Vite 会校验请求的 `Host` 头，`vite.config.ts` 已经把 `VITE_SERVER_URL` 的主机名加进
+`allowedHosts`；换域名时改 `.env` 即可，不用动配置。后端那边记得同步
+`server/.env` 的 `PUBLIC_BASE_URL` / `CLIENT_URL` / `CORS_ORIGIN`（见 `server/README.md`）。
 
 ---
 
@@ -58,18 +101,18 @@ npm run dev             # 只起前端
 
 | 命令 | 说明 |
 | --- | --- |
-| `npm run dev` | 启动 Vite 开发服务器 |
+| `npm run dev` | 启动 Vite 开发服务器（5173，带 HMR） |
 | `npm run build` | TypeScript 类型检查 + 生产构建 |
 | `npm run lint` | ESLint 检查前端 |
-| `npm run preview` | 预览生产构建 |
+| `npm run preview` | 起对外站点（2727，跑 `dist/` 产物，反向代理指这里） |
 | `npm run server:dev` | 启动后端（tsx watch） |
 | `npm run server:build` | 编译后端到 `server/dist` |
 | `npm run server:typecheck` | 后端类型检查 |
-| `npm run server:smoke` | **后端端到端冒烟测试（158 项断言）** |
+| `npm run server:smoke` | **后端端到端冒烟测试（160 项断言）** |
 | `npm run db:clean` | 清理冒烟测试留下的临时账号与设备（先预演） |
 | `npm run e2e` | **浏览器端到端测试**（家长端 + 管理后台，CDP 驱动无头 Chrome） |
 | `npm run e2e:parent` / `e2e:admin` | 只跑其中一套 |
-| `npm run e2e:responsive` | **响应式视口矩阵**（5 档视口 × 14 个页面：无横向溢出、内容限宽居中、标题栏铺满、导航形态正确，见 [`docs/RESPONSIVE.md`](docs/RESPONSIVE.md)） |
+| `npm run e2e:responsive` | **响应式视口矩阵**（5 档视口 × 17 个页面：无横向溢出、内容限宽居中、标题栏铺满、导航形态正确，见 [`docs/RESPONSIVE.md`](docs/RESPONSIVE.md)） |
 | `npm run android:build` | 构建孩子设备端 Agent 的调试 APK（见 [`android/README.md`](android/README.md)） |
 | `npm run android:release` | 构建 Agent 的发布 APK |
 | `npm run android:e2e` | **Agent 端到端联调**（真机/模拟器 + 真实后端：协议闭环、拍照/录音/截图、Kiosk 锁定、倒计时悬浮窗、作息时间表、最高强度档、保活） |
@@ -82,7 +125,8 @@ npm run dev             # 只起前端
 | `npm run db:up` / `db:down` | 起停 PostgreSQL 容器 |
 | `npm run db:migrate` | 执行 Prisma 迁移 |
 | `npm run db:seed` | 灌入演示数据（幂等） |
-| `npm run dev:all` | 前后端一起起 |
+| `npm run dev:all` | 开发服务器 + 后端一起起（5173 + 4000） |
+| `npm run preview:all` | 构建后起对外站点 + 后端（2727 + 4000） |
 
 后端专属命令（需 `cd server`）：`npm run lint`、`npm run prisma:studio`、
 `npm run agent:example`（模拟一台孩子设备）。
@@ -99,7 +143,7 @@ balloon-dog/
 │  ├─ pages/                 # 首页 / 位置 / 个人中心 / 设备管理 / 答题 / 媒体 / 登录
 │  ├─ contexts/AuthContext.tsx
 │  ├─ services/api.ts        # 接口层（错误透传、401 统一处理、令牌管理）
-│  ├─ components/            # BottomNav、ErrorBoundary、shadcn/ui
+│  ├─ components/            # BottomNav、BrandLogo（品牌标识，与孩子端图标同源）、ErrorBoundary、shadcn/ui
 │  └─ types/index.ts         # 与后端契约一一对应的类型
 ├─ src/admin/                # 管理后台（独立 SPA，代码不进家长端产物包）
 │  ├─ pages/                 # 看板 / 家长账号 / 设备 / 指令 / 题库 / 答题 / 验证码 / 管理员 / 日志 / 设置
@@ -113,6 +157,7 @@ balloon-dog/
 ├─ android/                  # 孩子设备端 Agent（Java + XML，见 android/README.md）
 │  ├─ app/src/main/java/     # net / capability / service / ui / data / model
 │  └─ scripts/e2e-agent.mjs  # Agent 端到端联调（真机或模拟器 + 真实后端）
+├─ public/                   # logo.svg / apple-touch-icon.png / download/（孩子端安装包）
 ├─ server/docker-compose.yml
 └─ vite.config.ts            # 双入口构建 + /api 代理 + /admin history fallback
 ```
@@ -175,7 +220,7 @@ balloon-dog/
 | 13 | **`LocationPage` 100% 硬编码**，`db.locations` 是无人读写的死数据 | 真实位置接口 + 安全区 CRUD + 轨迹时间线 |
 | 14 | **`BottomNav` 在登录页也渲染**，点击只会被守卫弹回 | 按路由决定是否显示 |
 | 15 | 同一个 `Device` 类型重复定义 3 处，`Features` 与后端不同步 | 类型统一收口在 `src/types/index.ts`；`HomePage` 的 11 处 `any` 全部清除 |
-| 16 | 无任何测试 | `server/scripts/smoke-test.mjs`：158 项断言，覆盖认证/越权/指令闭环/后台权限 |
+| 16 | 无任何测试 | `server/scripts/smoke-test.mjs`：160 项断言，覆盖认证/越权/指令闭环/后台权限 |
 | 17 | 无运营侧能力（客服无法定位问题、无法处置违规账号） | 新增 `/admin` 管理后台：10 个页面、操作审计、角色分权 |
 | 18 | 设计系统 token 把品牌主色覆盖成近黑色，`<Button>` 默认渲染成黑底 | `--primary` 改回微信绿 `#07c160`，家长端各处不再需要硬编码颜色绕过 |
 
@@ -188,10 +233,14 @@ balloon-dog/
 并单独列出「只存不用 / 未实现」的功能（网址拦截、应用限制、应用审核、
 局数预算的设备端兜底、环境监听等）。
 
+**家长端有哪些功能、分布在哪一页、为什么这样布局**，见
+[`docs/PARENT-UX.md`](docs/PARENT-UX.md) —— 功能地图、六条布局原则、
+六种交互模式、开关与门禁对照表，以及改文案时必须避开的 e2e 断言锚点。
+
 ## 验证方式
 
 ```bash
-# 后端：158 项端到端断言（认证、越权、隔离、指令队列闭环、后台权限与审计）
+# 后端：160 项端到端断言（认证、越权、隔离、指令队列闭环、后台权限与审计）
 npm run server:smoke
 
 # 前后端类型与规范
@@ -199,10 +248,13 @@ npm run build && npm run lint
 npm run server:typecheck && npm --prefix server run lint
 ```
 
-浏览器端到端测试（需要 `npm run dev:all` 已在跑）：
+浏览器端到端测试（默认打 2727 的 `vite preview`，所以先 `npm run preview:all`；
+想打开发服务器则加 `APP_URL=http://localhost:5173` 并在跑 `npm run dev:all`）：
 
 ```bash
-npm run e2e           # 家长端 25 项 + 管理后台 30 项
+npm run e2e           # 家长端 46 项 + 管理后台 31 项
+npm run e2e:ux        # 家长端 UX 122 项（首次引导、功能提示、英文界面、登录态健壮性）
+npm run e2e:responsive  # 5 档视口 × 17 个页面（需先调大 RATE_LIMIT_MAX，见 server/.env.example）
 ```
 
 孩子设备端与屏幕洞察（需要一台模拟器/真机，以及跑着的后端）：
@@ -229,7 +281,7 @@ Chrome 路径可用 `CHROME_PATH` 覆盖。
 
 也可以手动体验管理后台：
 
-1. 打开 http://localhost:5173/admin ，用 `admin` / `balloon-admin-2026` 登录；
+1. 打开 http://localhost:2727/admin （`vite preview`，见上文），用 `admin` / `balloon-admin-2026` 登录；
 2. 用 `operator` 登录对比权限差异 —— 侧栏不会出现「管理员」菜单，
    直接访问 `/admin/admins` 会被弹回看板。
 
@@ -247,6 +299,25 @@ cd server && npm run agent:example
 
 它会打印一个绑定码；在家长端「设备管理」里输入该码完成认领，然后点首页的锁屏或拍照，
 就能看到指令被领取、执行、回报的完整链路。
+
+---
+
+## 品牌标识
+
+家长端、管理后台、孩子端三处用**同一个**标识（绿底 + 白盾牌 + 绿爪印）：**以孩子端的启动图标为准**，
+即 `android/app/src/main/res/drawable/ic_launcher.xml`（viewBox 108×108、底色 `#07C160`）。
+
+改图标时要一起改这四处，它们是同一份画稿的四份拷贝：
+
+| 文件 | 用在哪 |
+| --- | --- |
+| `android/app/src/main/res/drawable/ic_launcher.xml` | 孩子端桌面图标、锁屏页（**权威来源**） |
+| `src/components/BrandLogo.tsx` | 家长端侧栏 / 登录页 / 无设备页、后台侧栏 / 登录页 |
+| `public/logo.svg` | 两个入口 HTML 的 favicon（比组件多一个 `rx`：网页图标没有 CSS 可用） |
+| `public/apple-touch-icon.png`、`public/logo-512.png` | iOS 加到主屏 / PWA 图标（iOS 不支持 SVG，用 `rsvg-convert` 从方形版 SVG 生成） |
+
+原来家长端是五处各画各的 emoji（🐕 三处、🐶 一处、「狗」字一处），emoji 的实际字形由系统字体决定，
+换台设备就变样，所以统一成了矢量。
 
 ---
 

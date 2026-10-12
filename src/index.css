@@ -83,6 +83,15 @@ body {
   .page-shell > .page-header {
     margin-inline: calc(-1 * var(--shell-pad));
     padding-inline: calc(var(--shell-pad) + 1rem);
+    /* 标题栏固定在视口顶部：长页面往下滚时，当前在哪个页面、能不能刷新/返回
+       始终看得见，不用滚回顶部。
+       sticky 而不是 fixed，是因为标题栏要靠「负 margin 通栏」跟 .page-shell
+       的留白配合，一旦脱出文档流就得自己重算一遍宽度，等于把上面那套算法抄两遍。
+       z-index 取 30：低于底部导航 / 左侧栏（z-50）和浮层提示（z-40），
+       高于普通内容，卡片不会盖住它。 */
+    position: sticky;
+    top: 0;
+    z-index: 30;
   }
 
   /* 加载态 / 错误态：内容是单个居中块，不需要行宽上限 */

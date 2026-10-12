@@ -12,6 +12,7 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.balloondog.agent.capability.AccessibilityScreenCapture;
 import com.balloondog.agent.capability.LockEnforcer;
 import com.balloondog.agent.capability.StudyModeEngine;
 import com.balloondog.agent.capability.LockState;
@@ -105,11 +106,27 @@ public class LockWatchdogService extends AccessibilityService {
     /** 同一个应用 10 分钟内只向家长申请一次，避免点来点去刷屏（契约 §3）。 */
     private static final long INSTALL_AUDIT_DEDUP_MS = 10 * 60_000L;
 
+    /** 系统「设置」包名。无障碍设置页拦截只认它（见 {@link #isAccessibilitySettingsPage}）。 */
+    private static final String SETTINGS_PACKAGE = "com.android.settings";
+
+    /** 无障碍设置页拦截的日志/事件节流：孩子反复点那一项时不要刷屏。 */
+    private static final long A11Y_SETTINGS_BLOCK_INTERVAL_MS = 1_500L;
+
     /** 已上报过的「安装申请」标识 → 上报时刻（仅进程内，见 {@link #maybeReportInstallAttempt}）。 */
     private final Map<String, Long> installAuditReportedAt = new HashMap<>();
 
     /** 上报在后台线程做，结果要回到主线程才能弹 Toast / 发通知。 */
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    /** 无障碍设置页拦截：上次记录事件的时刻（节流）。 */
+    private long lastA11ySettingsBlockAt;
+    /** 加固关着时「放行无障碍设置页」只记一次日志的时刻。 */
+    private long lastA11ySettingsAllowedAt;
+    /** 上次被拦的无障碍设置页类名 + 时刻，用来判断「按了返回它还在不在」。 */
+    private String lastA11yBlockedClass = "";
+    private long lastA11yBlockedAt;
+    private int a11yBlockFailStreak;
+    private boolean a11yBlockFailReported;
 
     private static volatile boolean connected;
     /**
@@ -157,6 +174,9 @@ public class LockWatchdogService extends AccessibilityService {
         store = new AgentStore(this);
         connected = true;
         instance = this;
+        // 把本实例登记给无障碍截图能力：takeScreenshot() 是实例方法，
+        // 而截图指令来自别的线程，没有这个引用就只能回退到需要孩子点授权框的 MediaProjection。
+        AccessibilityScreenCapture.attach(this);
         // 把「用无障碍服务上下文起 Activity」的能力注入 ui 层。
         // 悬浮窗权限被撤销时，应用上下文起 Activity 会被系统静默拦掉，
         // 只有走无障碍服务这条合法豁免才能把锁定页重新拉起来。
@@ -176,8 +196,24 @@ public class LockWatchdogService extends AccessibilityService {
     public boolean onUnbind(android.content.Intent intent) {
         connected = false;
         instance = null;
-        EventLog.warn("无障碍看门狗已断开（被系统关闭或在设置里关掉了）");
+        // 服务已失效，必须注销截图实例，否则截图会一直卡在「调用成功但没有回调」上
+        AccessibilityScreenCapture.detach(this);
+        EventLog.warn("无障碍看门狗已断开（被系统关闭或在设置里关掉了），截图将回退到需要授权的屏幕共享");
+        // 这是「孩子绕过管控」里最要命的一条：关掉无障碍，锁定、限时、插件拦截、
+        // 免授权截图全部失效。立刻上报家长端并尝试自救（能不能重开取决于系统
+        // key 白名单，实测结论见 LongevityGuard.tryReEnableAccessibility）。
+        LongevityGuard.onAccessibilityLost(this, "无障碍服务被关闭");
         return super.onUnbind(intent);
+    }
+
+    @Override
+    public void onDestroy() {
+        // onUnbind 不一定被调用（例如进程内直接销毁），这里再兜一次底。
+        // 刻意不在这里上报「被关闭」：进程正常销毁（升级、家长停止守护）时
+        // onDestroy 也会被调用，在那上面报篡改会产生假警报；漏报由
+        // LongevityGuard 的 5 分钟巡检兜住。
+        AccessibilityScreenCapture.detach(this);
+        super.onDestroy();
     }
 
     // ---------------- 远程协助（契约 §7） ----------------
@@ -260,6 +296,28 @@ public class LockWatchdogService extends AccessibilityService {
         if (pkg.equals(context.getPackageName())) {
             LockOverlayWindow.setSuspended(false);
             return;
+        }
+
+        // ---- 无障碍设置页拦截（只在「管控加固」开着时） ----
+        //
+        // 为什么值得单列一条：Android 不允许任何人 —— 包括设备所有者 —— 静默重开一个
+        // 无障碍服务（实测原文：Device owners cannot update enabled_accessibility_services，
+        // 见 LongevityGuard.tryReEnableAccessibility）。既然「关掉之后」救不回来，
+        // 那就只能「在关掉之前」把路挡住：孩子一进这一页就按返回推走。
+        //
+        // 刻意<b>不</b>塞进 GuardRules：那里是学习模式/插件的文本匹配逻辑，
+        // 而 ALWAYS_ALLOWED 放行整个 settings 包是那条链路的前提，混进去会破坏它。
+        if (isAccessibilitySettingsPage(pkg, event)) {
+            if (store.isHardeningEnabled()) {
+                blockAccessibilitySettings(event);
+                return;
+            }
+            // 家长关掉了加固：这一页就是家长自己的逃生通道，放行并留一条日志便于排查
+            long allowedAt = SystemClock.elapsedRealtime();
+            if (allowedAt - lastA11ySettingsAllowedAt > 30_000L) {
+                lastA11ySettingsAllowedAt = allowedAt;
+                EventLog.info("看门狗：管控加固已关闭，放行无障碍设置页（家长逃生通道）");
+            }
         }
 
         // ---- 学习模式 / 应用插件管控 ----
@@ -391,6 +449,73 @@ public class LockWatchdogService extends AccessibilityService {
             }
         }
         return null;
+    }
+
+    /**
+     * 是否是系统「无障碍」设置页。
+     *
+     * <p>判据刻意用<b>类名</b>而不是文本：无障碍事件是 {@code TYPE_WINDOW_STATE_CHANGED}，
+     * {@code event.getClassName()} 给的就是 Activity 类名 —— 实测是
+     * {@code com.android.settings.Settings$AccessibilitySettingsActivity}
+     * 与 {@code com.android.settings.accessibility.AccessibilitySettings}，
+     * 换语言也不会变。文本匹配（学习模式/插件那套妥协做法）换个语言就废，不要用在这里。
+     *
+     * <p>三个条件缺一不可：包名是 {@code com.android.settings}、类名在这个包下、
+     * 类名含 {@code Accessibility}。这样既不会拦到 Wi-Fi/语言/电池这些家长自己要用的页面，
+     * 也不会漏掉各 ROM 的命名差异（例如 {@code ...AccessibilityDetailsSettingsActivity}
+     * 是单个服务的详情页，正是关掉开关的地方，一起拦掉）。
+     */
+    private static boolean isAccessibilitySettingsPage(String pkg, AccessibilityEvent event) {
+        if (!SETTINGS_PACKAGE.equals(pkg)) return false;
+        CharSequence cls = event.getClassName();
+        if (cls == null) return false;
+        String name = cls.toString();
+        return name.startsWith(SETTINGS_PACKAGE + ".") && name.contains("Accessibility");
+    }
+
+    /**
+     * 把系统的无障碍设置页推走（按返回）。
+     *
+     * <p><b>三条边界，都不要越界：</b>
+     * <ol>
+     *   <li>只在家长开着「管控加固」时拦（调用点已判断）；关掉加固就是家长自己的逃生通道。</li>
+     *   <li>只拦这一页，<b>不</b>拦整个 Settings —— 家长还要改 Wi-Fi、语言、电池。</li>
+     *   <li>拦不住不装成功：同一页在 3 秒内反复出现，说明上一次按返回没把它推走，
+     *       如实记一条「没拦住」而不是继续报「已阻止」。</li>
+     * </ol>
+     */
+    private void blockAccessibilitySettings(AccessibilityEvent event) {
+        String cls = event.getClassName() == null ? "unknown" : event.getClassName().toString();
+        long now = SystemClock.elapsedRealtime();
+
+        // 推走之后就不会再有这一页的窗口事件；同一个类名在 3 秒内反复出现 = 上一次没推走
+        if (cls.equals(lastA11yBlockedClass) && now - lastA11yBlockedAt < 3_000L) {
+            a11yBlockFailStreak++;
+        } else {
+            a11yBlockFailStreak = 0;
+            a11yBlockFailReported = false;
+        }
+        lastA11yBlockedClass = cls;
+        lastA11yBlockedAt = now;
+
+        // 按返回的动作每次都做（节流只节流日志/事件）：孩子多点一次就多推一次，
+        // 这与 enforce() 里「设置类界面逐层推出」是同一个思路。
+        if (now - lastA11ySettingsBlockAt > A11Y_SETTINGS_BLOCK_INTERVAL_MS) {
+            lastA11ySettingsBlockAt = now;
+            if (a11yBlockFailStreak >= 3 && !a11yBlockFailReported) {
+                a11yBlockFailReported = true;
+                EventLog.warn("看门狗：连续按返回后仍反复进入无障碍设置页（" + cls
+                        + "），如实记录：这条路径没能拦住");
+                com.balloondog.agent.service.AgentService.recordEventStatic(Constants.EVENT_TAMPER,
+                        "未能阻止进入无障碍设置页：连续按返回无效，孩子仍可能在这一页关闭「气球狗守护」");
+            } else {
+                EventLog.warn("看门狗：拦截无障碍设置页（按返回推走；加固开启期间不允许在设备上关闭守护服务）");
+                com.balloondog.agent.service.AgentService.recordEventStatic(Constants.EVENT_TAMPER,
+                        "已拦截无障碍设置页：加固开启期间无法在设备上关闭「气球狗守护」，"
+                                + "家长需要先关掉「管控加固」");
+            }
+        }
+        performGlobalAction(GLOBAL_ACTION_BACK);
     }
 
     /**

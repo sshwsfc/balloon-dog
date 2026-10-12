@@ -1,7 +1,9 @@
 package com.balloondog.agent.capability;
 
+import android.app.AppOpsManager;
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
@@ -72,6 +74,28 @@ public final class ScreenCapturer {
     private static String recordingId;
     private static long recordingStartedAt;
 
+    /** 截屏实际走通的路径。 */
+    public enum CapturePath {
+        /** 无障碍 {@code AccessibilityService.takeScreenshot}：免授权，需要 API 30+ 且服务在跑 */
+        ACCESSIBILITY,
+        /** MediaProjection：需要孩子在系统弹框上点「立即开始」 */
+        MEDIA_PROJECTION
+    }
+
+    /**
+     * 最近一次截屏实际走通的路径（还没截过时为 {@code null}）。
+     *
+     * <p>存在的理由是可观测性：周期采样是「每 10 秒一张」的持续行为，日志不能每张都打，
+     * 但必须能一眼看出「现在走的是免授权的无障碍路径，还是回退到了要点系统弹框的
+     * MediaProjection」—— 这正是本次修复之前最查不清的一件事。
+     */
+    private static volatile CapturePath lastCapturePath;
+
+    /** 最近一次截屏实际走通的路径；{@code null} 表示本进程还没成功截过屏。 */
+    public static CapturePath lastCapturePath() {
+        return lastCapturePath;
+    }
+
     private ScreenCapturer() {
     }
 
@@ -79,7 +103,12 @@ public final class ScreenCapturer {
     // 对外能力
     // ============================================================
 
-    /** 截一张屏，返回原始分辨率的 JPEG 字节（远程截图指令用）。 */
+    /**
+     * 截一张屏，返回原始分辨率的 JPEG 字节（远程截图指令用）。
+     *
+     * <p><b>优先走免授权的无障碍截图</b>（{@link AccessibilityScreenCapture}，API 30+ 且无障碍
+     * 服务在跑时完全不需要用户点任何弹框）；拿不到才回退到需要授权的 MediaProjection。
+     */
     public static byte[] captureScreenshot(Context context, long timeoutMs) throws CapabilityException {
         return capture(context, 0, JPEG_QUALITY, timeoutMs, false);
     }
@@ -87,9 +116,10 @@ public final class ScreenCapturer {
     /**
      * 截一张<b>低分辨率</b>的屏，用于周期采样。
      *
-     * <p>刻意在 {@code VirtualDisplay} 这一层就按目标尺寸创建，而不是先拍全分辨率再缩放：
-     * 1080×2340 的 ARGB_8888 位图约 10 MB，每分钟拍两张的话内存压力相当可观；
-     * 直接在 480 像素宽上合成，位图只有约 2 MB，且省掉一次缩放。
+     * <p>MediaProjection 回退路径刻意在 {@code VirtualDisplay} 这一层就按目标尺寸创建，
+     * 而不是先拍全分辨率再缩放：1080×2340 的 ARGB_8888 位图约 10 MB，每分钟拍两张的话
+     * 内存压力相当可观；直接在 480 像素宽上合成，位图只有约 2 MB，且省掉一次缩放。
+     * 无障碍路径由系统直接给全分辨率画面，只能拿到之后再缩放 + 重压（见 {@link #resizeJpeg}）。
      *
      * @param longEdge 目标长边像素（例如 480）
      * @param quality  JPEG 质量（例如 45）
@@ -107,6 +137,24 @@ public final class ScreenCapturer {
      */
     private static byte[] capture(Context context, int longEdge, int quality, long timeoutMs, boolean quiet)
             throws CapabilityException {
+        // 1) 先试免授权的无障碍截图。这条路径不需要任何人点系统弹框，是「截图」能不能
+        //    真正用起来的关键；也正因为排在 ensureProjection() 之前，孩子不会被弹框打扰。
+        byte[] viaAccessibility = AccessibilityScreenCapture.takeScreenshotBlocking(timeoutMs);
+        if (viaAccessibility != null) {
+            byte[] jpeg = viaAccessibility;
+            if (longEdge > 0) {
+                byte[] shrunk = resizeJpeg(viaAccessibility, longEdge, quality);
+                // 缩放失败就退回全分辨率原图：宁可存一张大图，也不要让整条链路失败
+                if (shrunk != null) jpeg = shrunk;
+            }
+            lastCapturePath = CapturePath.ACCESSIBILITY;
+            if (!quiet) {
+                EventLog.success("已通过无障碍接口截屏（免授权），" + (jpeg.length / 1024) + " KB");
+            }
+            return jpeg;
+        }
+
+        // 2) 无障碍不可用（API < 30 / 服务没开 / 抓取失败）→ 回退到需要用户授权的 MediaProjection
         Context app = context.getApplicationContext();
         ensureProjection(app, timeoutMs);
 
@@ -156,6 +204,7 @@ public final class ScreenCapturer {
             if (jpeg.length == 0) {
                 throw new CapabilityException("截屏压缩后为空");
             }
+            lastCapturePath = CapturePath.MEDIA_PROJECTION;
             if (!quiet) {
                 EventLog.success("已截屏 " + width + "×" + height + "，" + (jpeg.length / 1024) + " KB");
             }
@@ -382,8 +431,20 @@ public final class ScreenCapturer {
             }
 
             // 2) 再向用户要一次授权（系统授权框只能由 Activity 弹出）
+            //
+            //    在等之前先把这个 AppOps 的状态打进日志：失败时它能直接区分
+            //    「没人点授权框」和「系统把这个 op 记成了已忽略」。注意 ignore 只表示
+            //    「上一次授权被划掉/超时」，实测授权框仍会出现、点了仍能成功（见
+            //    explainProjectionFailure 的注释），所以这里只记录状态、不做任何拦截。
+            EventLog.info("屏幕共享授权状态：AppOps android:project_media="
+                    + projectMediaAppOpState(context));
             long consentTimeout = Math.max(15_000L, Math.min(timeoutMs, 45_000L));
-            ProjectionConsentActivity.await(context, consentTimeout);
+            try {
+                ProjectionConsentActivity.await(context, consentTimeout);
+            } catch (CapabilityException e) {
+                // 把「超时 / 被拒」翻译成家长能照着做的报错，见 explainProjectionFailure
+                throw explainProjectionFailure(context, e);
+            }
 
             MediaProjectionManager manager =
                     (MediaProjectionManager) context.getSystemService(Context.MEDIA_PROJECTION_SERVICE);
@@ -442,6 +503,86 @@ public final class ScreenCapturer {
         }
     }
 
+    /**
+     * 「屏幕共享」这个 AppOps 的名字。
+     *
+     * <p>写法是字面量而不是 {@code AppOpsManager.OPSTR_PROJECT_MEDIA}：后者虽然存在于 AOSP，
+     * 但在 compileSdk 33 的公开 stub 里没有导出（实测编译报「找不到符号」）。
+     * 这个字符串是平台稳定标识，`adb shell appops get <pkg> PROJECT_MEDIA` 打印的就是它。
+     */
+    private static final String OP_PROJECT_MEDIA = "android:project_media";
+
+    /**
+     * 「屏幕共享」这个 AppOps（{@code android:project_media}）的当前状态。
+     *
+     * <p>它才是屏幕共享能不能用的真正开关：{@code allow} 时系统直接放行（连授权框都不弹），
+     * {@code ignore} / {@code deny} 时**连授权框都不会再出现**，家长点多少次截图都只会得到
+     * 一句「等待授权超时」。所以失败时必须把它的值报出来，否则家长和排查的人都不知道差在哪。
+     *
+     * @return {@code "allow"} / {@code "ignore"} / {@code "deny"} / {@code "default"}；
+     *         系统太老（API < 29）或读取失败时返回 {@code "unknown"}（不抛异常）
+     */
+    private static String projectMediaAppOpState(Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return "unknown";
+        try {
+            AppOpsManager appOps =
+                    (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
+            if (appOps == null) return "unknown";
+            int mode = appOps.checkOpNoThrow(
+                    OP_PROJECT_MEDIA,
+                    context.getApplicationInfo().uid,
+                    context.getPackageName());
+            switch (mode) {
+                case AppOpsManager.MODE_ALLOWED:
+                    return "allow";
+                case AppOpsManager.MODE_IGNORED:
+                    return "ignore";
+                case AppOpsManager.MODE_ERRORED:
+                    return "deny";
+                case AppOpsManager.MODE_DEFAULT:
+                    return "default";
+                default:
+                    return "mode=" + mode;
+            }
+        } catch (Exception e) {
+            // 少数 ROM 会在这里抛 SecurityException；报状态失败不应该让截图本身失败
+            return "unknown";
+        }
+    }
+
+    /**
+     * 在「授权超时 / 被拒」的原因前面补上 {@code android:project_media} 的状态。
+     *
+     * <p>为什么值得单列：这句报错家长会看到，而「没人点授权框」和「系统把这个 op 记成了
+     * 已忽略」在表面上完全一样（都是 20 秒超时），只有 AppOps 状态能把两者分开。
+     *
+     * <p>实测边界（写下来免得后人误判）：在 Android 13 模拟器上，即使把 op 设成
+     * {@code ignore}，系统授权框**仍然会出现**，点「立即开始」后截图也能成功
+     * （logcat 有 `Displayed com.android.systemui/.media.MediaProjectionPermissionActivity: +699ms`，
+     * 点掉后紧跟着 `已截屏 1080×2340`）。所以 {@code ignore} 只是「上一次授权被划掉/超时」
+     * 留下的记录，<b>不是永久封禁</b>。因此这里只如实报告状态 + 给出两条出路，
+     * 不写「以后不会再弹框」这种没有验证过的断言。
+     */
+    private static CapabilityException explainProjectionFailure(
+            Context context, CapabilityException cause) {
+        // 「设备被锁，压根没申请授权」与 AppOps 无关，必须原样抛出，否则会把
+        // 「孩子在锁屏」误报成「屏幕共享被系统禁止」，把排查带偏（实测踩过）。
+        if (cause instanceof ProjectionConsentActivity.LockedException) {
+            return cause;
+        }
+        String state = projectMediaAppOpState(context);
+        if (!"ignore".equals(state) && !"deny".equals(state)) {
+            return cause;
+        }
+        String message = "屏幕共享授权没拿到（AppOps android:project_media=" + state
+                + "，通常是上一次授权框被划掉或超时留下的记录）。请在设备上点系统授权框的"
+                + "「立即开始」，或让家长在系统设置里重新授权屏幕共享；也可以用 adb 放行："
+                + "adb shell appops set " + context.getPackageName() + " PROJECT_MEDIA allow。"
+                + "原始原因：" + cause.getMessage();
+        EventLog.error(message);
+        return new CapabilityException(message, cause);
+    }
+
     // ============================================================
     // 内部：图像与尺寸
     // ============================================================
@@ -484,6 +625,58 @@ public final class ScreenCapturer {
         Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, width, height);
         if (cropped != padded) padded.recycle();
         return cropped;
+    }
+
+    /**
+     * 把一张完整 JPEG 缩到长边不超过 {@code longEdge}，并以 {@code quality} 重新压缩。
+     *
+     * <p>只有无障碍截图路径需要它：系统直接给的是全分辨率画面，而周期采样只要 480px 宽的
+     * 小图。先用 {@code inJustDecodeBounds} 读尺寸、再按 2 的幂次降采样解码，
+     * 避免把 1080×2340 的 ARGB_8888（约 10 MB）整张读进内存。
+     *
+     * @return 缩放后的 JPEG；参数异常或解码失败时返回 {@code null}（调用方退回原图）
+     */
+    @Nullable
+    private static byte[] resizeJpeg(byte[] jpeg, int longEdge, int quality) {
+        if (longEdge <= 0 || jpeg == null || jpeg.length == 0) return null;
+
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, options);
+        int width = options.outWidth;
+        int height = options.outHeight;
+        if (width <= 0 || height <= 0) return null;
+
+        int sample = 1;
+        int longSide = Math.max(width, height);
+        while (longSide / (sample * 2) >= longEdge) {
+            sample *= 2;
+        }
+        options.inJustDecodeBounds = false;
+        options.inSampleSize = sample;
+
+        Bitmap decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, options);
+        if (decoded == null) return null;
+        Bitmap target = decoded;
+        try {
+            int decodedLong = Math.max(decoded.getWidth(), decoded.getHeight());
+            if (decodedLong > longEdge) {
+                double ratio = (double) longEdge / decodedLong;
+                int targetWidth = Math.max(1, (int) Math.round(decoded.getWidth() * ratio));
+                int targetHeight = Math.max(1, (int) Math.round(decoded.getHeight() * ratio));
+                target = Bitmap.createScaledBitmap(decoded, targetWidth, targetHeight, true);
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            target.compress(Bitmap.CompressFormat.JPEG, quality, out);
+            byte[] result = out.toByteArray();
+            return result.length == 0 ? null : result;
+        } catch (Exception e) {
+            EventLog.warn("缩放无障碍截图失败，改用原图：" + e.getMessage());
+            return null;
+        } finally {
+            if (target != decoded) target.recycle();
+            decoded.recycle();
+        }
     }
 
     /** 等比缩放到长边不超过 limit，并保证宽高都是偶数（H.264 要求）。 */

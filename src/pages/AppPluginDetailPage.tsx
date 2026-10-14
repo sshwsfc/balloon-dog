@@ -5,6 +5,8 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ToggleSwitch } from '@/components/ToggleSwitch'
 import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
+import { AppIcon } from '@/components/AppIcon'
+import { invalidateAppIcons } from '@/hooks/useAppIcons'
 import { toast } from 'sonner'
 import { AlertTriangle, ArrowLeft, Info, Loader2, Puzzle, XCircle, CheckCircle2 } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
@@ -190,7 +192,13 @@ export function AppPluginDetailPage() {
           <ArrowLeft className="w-5 h-5" />
         </Button>
         <h1 className="text-xl font-medium text-gray-900 flex-1 truncate">{target.appName}</h1>
-        <HeaderRefreshButton onRefresh={() => loadData({ silent: true })} />
+        <HeaderRefreshButton
+          onRefresh={() => {
+            // 图标缓存跟着应用清单一起来：设备刚重新上报过图标时要立刻换新
+            invalidateAppIcons()
+            return loadData({ silent: true })
+          }}
+        />
       </div>
 
       {/* ---------------- 概览 ---------------- */}
@@ -198,9 +206,14 @@ export function AppPluginDetailPage() {
         <Card className="overflow-hidden">
           <CardContent className="p-4">
             <div className="flex items-center space-x-3">
-              <div className="w-12 h-12 rounded-xl bg-green-50 text-[#07c160] flex items-center justify-center font-medium text-lg flex-shrink-0">
-                {target.badge}
-              </div>
+              <AppIcon
+                packageName={target.packageName}
+                appName={target.appName}
+                className="w-12 h-12 rounded-xl flex-shrink-0"
+                fallbackClassName="bg-green-50 text-[#07c160]"
+                letterClassName="text-lg"
+                fallbackLetter={target.badge}
+              />
               <div className="min-w-0 flex-1">
                 <div className="font-medium text-gray-900 truncate">{target.appName}</div>
                 <div className="text-[11px] text-gray-400 truncate mt-0.5">{target.packageName}</div>

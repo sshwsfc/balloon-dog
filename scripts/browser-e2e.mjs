@@ -678,6 +678,8 @@ async function testAdmin(cdp) {
     ['/admin/questions', ['题库管理', '新增题目'], '题库管理'],
     ['/admin/quiz-records', ['答题记录'], '答题记录'],
     ['/admin/sms-codes', ['验证码审计'], '验证码审计'],
+    ['/admin/membership', ['会员', '套餐'], '会员管理'],
+    ['/admin/referral', ['分享提成', '统计概览'], '分享提成'],
     ['/admin/logs', ['操作日志'], '操作日志'],
     ['/admin/settings', ['账号设置'], '账号设置'],
   ]
@@ -714,7 +716,81 @@ async function testAdmin(cdp) {
   text = await cdp.eval('document.body.innerText')
   check('题库显示年级分布', /一年级|二年级|三年级/.test(text))
 
-  section('后台 4. 详情弹窗')
+  /*
+   * 分享提成八页：这八个标签共用一条路由，深层路由刷新那节覆盖不到它们，
+   * 所以要在这里逐个点开 —— 每个标签各自拉数据、各自有 loading/空态分支，
+   * 只验证「页面能打开」会漏掉其中七页的白屏。
+   * 判据取「内容区」而不是整页文本：标签按钮的名字和面板标题同名，
+   * 只看整页会连点都没点上也通过。
+   */
+  section('后台 4. 分享提成八页')
+  await cdp.goto('/admin/referral')
+  await sleep(3000)
+  const REFERRAL_TABS = ['统计概览', '提现审核', '邀请记录', '返现明细', '优惠券', '活动配置', '规则与阶梯', '风险排查']
+  const referralText = await cdp.eval('document.body.innerText')
+  check(
+    '八个标签都在',
+    REFERRAL_TABS.every((label) => referralText.includes(label)),
+    REFERRAL_TABS.filter((label) => !referralText.includes(label)).join('、') || '全部命中',
+  )
+  for (const label of REFERRAL_TABS) {
+    const clicked = await cdp.eval(`(() => {
+      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)})
+      if (!btn) return false
+      btn.click()
+      return true
+    })()`)
+    await sleep(2200)
+    const panel = await cdp.eval(`(() => {
+      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)})
+      const bar = btn && btn.parentElement
+      const box = bar && bar.nextElementSibling
+      return box ? box.innerText.slice(0, 200) : ''
+    })()`)
+    check(
+      `切到「${label}」后内容区渲染出对应的页`,
+      clicked === true && panel.includes(label),
+      panel.slice(0, 90).replace(/\n/g, ' | ') || '内容区是空的',
+    )
+  }
+
+  /*
+   * 会员管理五页：和分享提成同理，五个标签共用一条路由。这里不校验面板标题
+   * （各 tab 的标题并不等于标签名），而是校验「内容区真的渲染出了东西、且没有
+   * 落进错误分支」—— 那正是这五个标签唯一可能的坏法：白屏或「数据加载失败」。
+   */
+  section('后台 5. 会员管理五页')
+  await cdp.goto('/admin/membership')
+  await sleep(3000)
+  const MEMBERSHIP_TABS = ['统计', '套餐', '定价规则', '受邀用户定价', '订单']
+  const membershipText = await cdp.eval('document.body.innerText')
+  check(
+    '五个标签都在（含新增的受邀用户定价）',
+    MEMBERSHIP_TABS.every((label) => membershipText.includes(label)),
+    MEMBERSHIP_TABS.filter((label) => !membershipText.includes(label)).join('、') || '全部命中',
+  )
+  for (const label of MEMBERSHIP_TABS) {
+    const clicked = await cdp.eval(`(() => {
+      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)})
+      if (!btn) return false
+      btn.click()
+      return true
+    })()`)
+    await sleep(2200)
+    const panel = await cdp.eval(`(() => {
+      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)})
+      const bar = btn && btn.parentElement
+      const box = bar && bar.nextElementSibling
+      return box ? box.innerText : ''
+    })()`)
+    check(
+      `切到「${label}」后内容区渲染出内容且没落进错误分支`,
+      clicked === true && panel.trim().length > 20 && !panel.includes('数据加载失败'),
+      panel.trim().slice(0, 90).replace(/\n/g, ' | ') || '内容区是空的',
+    )
+  }
+
+  section('后台 6. 详情弹窗')
   await cdp.goto('/admin/commands')
   await sleep(2800)
   check(
@@ -730,7 +806,7 @@ async function testAdmin(cdp) {
   await cdp.clickText('关闭')
   await sleep(600)
 
-  section('后台 5. 深层路由刷新（history fallback）')
+  section('后台 7. 深层路由刷新（history fallback）')
   await cdp.goto('/admin/devices')
   await sleep(2600)
   await cdp.reload()
@@ -741,7 +817,7 @@ async function testAdmin(cdp) {
       (await cdp.eval('document.body.innerText')).includes('设备管理'),
   )
 
-  section('后台 6. 操作日志')
+  section('后台 8. 操作日志')
   await cdp.goto('/admin/logs')
   await sleep(2800)
   text = await cdp.eval('document.body.innerText')
@@ -755,7 +831,7 @@ async function testAdmin(cdp) {
   await cdp.fill('input[placeholder*="搜索操作描述"]', '')
   await sleep(1200)
 
-  section('后台 7. 运营账号权限差异')
+  section('后台 9. 运营账号权限差异')
   await cdp.clearStorage(['balloon_dog_admin_token', 'balloon_dog_admin_info'])
   await cdp.goto('/admin/login')
   await sleep(2600)
@@ -772,7 +848,7 @@ async function testAdmin(cdp) {
   check('运营账号直接访问 /admin/admins 被弹回看板', opUrl === '/admin' || opUrl === '/admin/',
     `实际 ${opUrl}`)
 
-  section('后台 8. 运行时健康度')
+  section('后台 10. 运行时健康度')
   check('没有未捕获的页面异常', cdp.pageErrors.length === 0, cdp.pageErrors.slice(0, 2).join(' | '))
   const ce = cdp.consoleErrors.filter((e) => !/favicon|DevTools|Download the React DevTools/i.test(e))
   check('没有 console error', ce.length === 0, ce.slice(0, 3).join(' | '))
@@ -820,12 +896,15 @@ const RESPONSIVE_ROUTES = [
   { path: '/profile', wide: false, must: '我的' },
   { path: '/schedule', wide: false, must: '锁屏' },
   { path: '/insights', wide: true, must: '洞察' },
+  { path: '/insights/config', wide: false, must: '配置' },
   { path: '/mode', wide: false, must: '模式' },
   { path: '/mode/schedule', wide: false, must: '时段' },
   { path: '/mode/apps', wide: true, must: '应用' },
   { path: '/eye-care', wide: false, must: '护眼' },
   { path: '/app-plugins', wide: true, must: '插件' },
   { path: '/app-audit', wide: false, must: '审批' },
+  { path: '/membership', wide: false, must: '会员中心' },
+  { path: '/referral', wide: false, must: '邀请返现' },
   { path: '/call-sms', wide: false, must: '通话与短信' },
   { path: '/remote-help', wide: false, must: '远程协助' },
   // /media 与 /quiz-unlock 是沉浸式页面：**故意**不显示任何导航，
@@ -930,6 +1009,28 @@ const COLUMN_PROBE = `(() => {
     viewport: window.innerWidth,
   };
 })()`;
+
+/**
+ * 判断内容列是否合格，合格返回 null，不合格返回给人看的说明。
+ *
+ * 要断言的是「内容被限宽且左右对称」。不再要求 padL 一定 > 0：≥1024px 时左侧栏已经
+ * 占掉 224px，剩余宽度可能正好等于上限（1180-224=956 ≈ 60rem=960），此时不该有额外留白。
+ * 真正的病是「通栏拉伸」，而 bounded 已经把它挡住了。
+ */
+function columnProblem(label, col, route, viewportWidth) {
+  if (viewportWidth < 768) {
+    return col.padL !== 0 || col.padR !== 0
+      ? `${label} 窄屏不该有左右留白：padL=${col.padL} padR=${col.padR}`
+      : null
+  }
+  const symmetric = Math.abs(col.padL - col.padR) <= 1
+  const bounded = col.contentWidth <= (route.wide ? 60 * 16 : 48 * 16) + 2
+  if (symmetric && bounded) return null
+  return (
+    `${label} 内容列异常：padL=${col.padL} padR=${col.padR} `
+    + `content=${col.contentWidth}（应左右对称且不超过 ${route.wide ? 60 : 48}rem）`
+  )
+}
 
 async function testResponsive(cdp) {
   suite = 'responsive'
@@ -1042,28 +1143,22 @@ async function testResponsive(cdp) {
       }
 
       // 2) 宽屏下内容必须居中限宽；窄屏下不应出现莫名留白
-      const col = await cdp.eval(COLUMN_PROBE)
-      if (col) {
-        if (vp.width >= 768) {
-          // 要断言的是「内容被限宽且左右对称」。
-          // 不再要求 padL 一定 > 0：≥1024px 时左侧栏已经占掉 224px，
-          // 剩余宽度可能正好等于上限（1180-224=956 ≈ 60rem=960），此时不该有额外留白。
-          // 真正的病是「通栏拉伸」，而 bounded 已经把它挡住了。
-          const symmetric = Math.abs(col.padL - col.padR) <= 1
-          const bounded = col.contentWidth <= (route.wide ? 60 * 16 : 48 * 16) + 2
-          if (!(symmetric && bounded)) {
-            problems.push(
-              `${label} 内容列异常：padL=${col.padL} padR=${col.padR} `
-              + `content=${col.contentWidth}（应左右对称且不超过 ${route.wide ? 60 : 48}rem）`,
-            )
-          } else {
-            vpPass++
-          }
-        } else if (col.padL !== 0 || col.padR !== 0) {
-          problems.push(`${label} 窄屏不该有左右留白：padL=${col.padL} padR=${col.padR}`)
-        } else {
-          vpPass++
-        }
+      //    宽度依赖样式回流，连续切 5 档视口时量到中间态是可能的（见过一次
+      //    content=908 的假失败，单独重跑就过了），所以这里量到不合格先等一等再量，
+      //    只有 3 次都不合格才记账 —— 断言本身不变，只是不再把中间态当结论。
+      let col = null
+      let colProblem = null
+      for (let attempt = 0; attempt < 3; attempt++) {
+        col = await cdp.eval(COLUMN_PROBE)
+        if (!col) break
+        colProblem = columnProblem(label, col, route, vp.width)
+        if (!colProblem) break
+        await sleep(250)
+      }
+      if (colProblem) {
+        problems.push(colProblem)
+      } else if (col) {
+        vpPass++
       }
 
       // 顺手留几张截图：断言只证明「没有溢出」，证明不了「好不好看」。

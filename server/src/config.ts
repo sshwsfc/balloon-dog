@@ -57,6 +57,23 @@ const schema = z.object({
   MEDIA_MAX_SIZE_MB: z.coerce.number().positive().default(10),
   MEDIA_URL_TTL_SECONDS: z.coerce.number().int().positive().default(600),
 
+  // ---- 会员 / 支付 ----
+  /**
+   * 是否启用内置的**模拟支付**。
+   *
+   * 默认 true：本项目还没有接入真实支付宝/微信渠道，先跑通「下单 → 支付 → 会员生效」
+   * 的完整链路。设成 false 时支付接口会拒绝服务（503）—— 这是故意留的一道闸：
+   * 避免上线后还以为在跑真支付，其实仍然是模拟。
+   */
+  MEMBERSHIP_MOCK_PAY: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+  /** 订单存活时间（秒），过期订单不能再支付 */
+  MEMBERSHIP_ORDER_TTL_SECONDS: z.coerce.number().int().positive().default(1800),
+  /** 连续包月的宽限期（天）：扣款失败后仍保留会员身份的天数 */
+  MEMBERSHIP_RENEW_GRACE_DAYS: z.coerce.number().int().positive().default(31),
+
   // ---- 屏幕行为 AI 洞察 ----
   // 截屏包（10 张低分辨率 JPEG 的 zip）通常 200~400 KB，给 8 MB 足够宽松
   SCREEN_BATCH_MAX_SIZE_MB: z.coerce.number().positive().default(8),

@@ -12,6 +12,7 @@ import {
   updateQuizConfigSchema,
 } from './quiz.dto';
 import { NotFoundError } from '../../errors';
+import { entitlementGate } from '../membership/membership.middleware';
 
 // ============================================================
 // 家长端控制器
@@ -96,8 +97,16 @@ export async function agentSubmitAnswer(req: Request, res: Response) {
 // ============================================================
 
 /** /api/quiz —— 家长端 */
+/**
+ * /api/quiz —— 答题解锁，**会员**功能（权益 quizUnlock）。
+ *
+ * 整条路由都要门禁：答题解锁是一整套能力（题库配置、预览题目、记录、统计），
+ * 只拦写入而放开读取的话，非会员照样能把整套界面用起来。
+ * 家长端进页面前会先看档位并渲染升级卡片。
+ */
 export const quizRoutes = Router();
 quizRoutes.use(authenticate);
+quizRoutes.use(entitlementGate('quizUnlock'));
 quizRoutes.get('/config', ah(getConfig));
 quizRoutes.put('/config', ah(updateConfig));
 quizRoutes.get('/question', ah(previewQuestion));

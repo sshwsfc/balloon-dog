@@ -18,8 +18,8 @@ interface AuthContextValue {
   /** 首次校验登录态期间为 true，避免受保护路由误跳登录页 */
   loading: boolean
   login: (phone: string, password: string) => Promise<boolean>
-  smsLogin: (phone: string, code: string) => Promise<boolean>
-  register: (phone: string, password: string, code: string) => Promise<boolean>
+  smsLogin: (phone: string, code: string, inviteCode?: string) => Promise<boolean>
+  register: (phone: string, password: string, code: string, inviteCode?: string) => Promise<boolean>
   sendCode: (phone: string, purpose?: 'register' | 'login' | 'bind') => Promise<string | null>
   /** 轮询微信扫码状态，成功后落地登录 */
   wechatPoll: (state: string) => Promise<boolean>
@@ -126,9 +126,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [t])
 
-  const smsLogin = useCallback(async (phone: string, code: string) => {
+  const smsLogin = useCallback(async (phone: string, code: string, inviteCode?: string) => {
     try {
-      const res = await authApi.smsLogin({ phone, code })
+      const res = await authApi.smsLogin({ phone, code, ...(inviteCode ? { inviteCode } : {}) })
       setAuthToken(res.token)
       setUser(res.user)
       toast.success(res.isNew ? t('账号已创建，欢迎使用') : t('登录成功'))
@@ -139,9 +139,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [t])
 
-  const register = useCallback(async (phone: string, password: string, code: string) => {
+  const register = useCallback(async (phone: string, password: string, code: string, inviteCode?: string) => {
     try {
-      const res = await authApi.register({ phone, password, code })
+      const res = await authApi.register({ phone, password, code, ...(inviteCode ? { inviteCode } : {}) })
       setAuthToken(res.token)
       setUser(res.user)
       toast.success(t('注册成功'))

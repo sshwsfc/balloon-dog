@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  应用被禁止使用 —— 说明页。
+
+  孩子被拦下来时看到的不是「按了个返回键就弹回桌面」，而是这一页：
+  哪个应用、为什么被禁、以及「想用该怎么办」。
+
+  静态中文文案直接写在布局里（孩子端不做 i18n，且 strings.xml 由其他改动占用），
+  只有应用名 / 原因 / 补充说明这三段动态内容由 Intent extras 带进来。
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/surface_bg"
+    android:fillViewport="true"
+    android:fitsSystemWindows="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="28dp">
+
+        <ImageView
+            android:layout_width="96dp"
+            android:layout_height="96dp"
+            android:contentDescription="应用已被禁止使用"
+            android:src="@drawable/ic_app_blocked" />
+
+        <TextView
+            android:id="@+id/textTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="应用已被禁止使用"
+            android:textColor="@color/text_primary"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <!-- 白色说明卡：应用名 + 原因 + 可选补充 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="20dp">
+
+            <TextView
+                android:id="@+id/textAppName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:maxLines="2"
+                android:textColor="@color/danger_red"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                tools:text="王者荣耀" />
+
+            <TextView
+                android:id="@+id/textReason"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:gravity="center"
+                android:lineSpacingExtra="4dp"
+                android:textColor="@color/text_primary"
+                android:textSize="15sp"
+                tools:text="学习模式：只允许使用白名单应用" />
+
+            <TextView
+                android:id="@+id/textDetail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center"
+                android:lineSpacingExtra="4dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                android:visibility="gone"
+                tools:text="当前可用：微信、作业帮"
+                tools:visibility="visible" />
+        </LinearLayout>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonBackHome"
+            style="@style/ButtonPrimary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="26dp"
+            android:text="返回桌面" />
+
+        <TextView
+            android:id="@+id/textHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:gravity="center"
+            android:lineSpacingExtra="4dp"
+            android:text="如需使用，请让家长在家长端调整设置"
+            android:textColor="@color/text_tertiary"
+            android:textSize="12sp" />
+
+    </LinearLayout>
+</ScrollView>

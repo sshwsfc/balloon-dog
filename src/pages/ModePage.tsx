@@ -4,6 +4,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
+import { AppIcon } from '@/components/AppIcon'
 import { toast } from 'sonner'
 import { AlertTriangle, ArrowLeft, BookOpen, CalendarClock, Check, Info, Loader2, Repeat, Smartphone } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
@@ -306,9 +307,13 @@ export function ModePage() {
               <div className="flex flex-wrap gap-x-3 gap-y-2">
                 {studyApps.map((app) => (
                   <div key={app.id} className="flex items-center space-x-1.5">
-                    <div className="w-8 h-8 rounded-lg bg-green-50 flex items-center justify-center text-xs text-[#07c160] font-medium">
-                      {(app.appName || app.packageName).slice(0, 1)}
-                    </div>
+                    <AppIcon
+                      packageName={app.packageName}
+                      appName={app.appName}
+                      className="w-8 h-8"
+                      fallbackClassName="bg-green-50 text-[#07c160]"
+                      letterClassName="text-xs"
+                    />
                     <span className="text-xs text-gray-700 max-w-[80px] truncate">
                       {app.appName || app.packageName}
                     </span>

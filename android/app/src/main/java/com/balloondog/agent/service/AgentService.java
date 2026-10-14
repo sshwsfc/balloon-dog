@@ -556,8 +556,20 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
 
         // 心跳里带回了权威的 locked / tempUnlockUntil，用它兜住错过 config 的情况。
         // 落地动作仍然交给 ticker，保证「判定只有一处」。
-        if (result.locked != store.isLocked() || result.tempUnlockUntil != store.getTempUnlockUntil()) {
+        //
+        // 这里必须与 applyConfig 一样处理「服务端说锁，就作废本地一切宽限」：
+        // 漏掉 setManualUnlockUntil(0) 时，家长点的「立即锁定」会被本地残留的
+        // 答题奖励 / 手动解锁宽限静默盖过去 —— LockState 的判定顺序里放行（grantUntil）
+        // 高于 remoteLocked，现象就是「家长端显示已锁定，设备却纹丝不动」。
+        // 这是用户实测报上来的「各种模式互相冲突」中最实的一条。
+        boolean lockStateChanged = result.locked != store.isLocked()
+                || result.tempUnlockUntil != store.getTempUnlockUntil();
+        boolean staleGrant = result.locked && store.getManualUnlockUntil() != 0L;
+        if (lockStateChanged || staleGrant) {
             store.setLockState(result.locked, result.tempUnlockUntil);
+            if (result.locked) {
+                store.setManualUnlockUntil(0L);
+            }
         }
         updateNotification("已绑定 · 电量 " + battery + "% · " + network);
     }

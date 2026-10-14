@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
+import { AppIcon } from '@/components/AppIcon'
+import { invalidateAppIcons } from '@/hooks/useAppIcons'
 import { toast } from 'sonner'
 import { AlertTriangle, ArrowLeft, ChevronRight, Info, Puzzle, Shield } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
@@ -80,7 +82,13 @@ export function AppPluginsPage() {
           <ArrowLeft className="w-5 h-5" />
         </Button>
         <h1 className="text-xl font-medium text-gray-900 flex-1">{t('插件管理')}</h1>
-        <HeaderRefreshButton onRefresh={() => loadData({ silent: true })} />
+        <HeaderRefreshButton
+          onRefresh={() => {
+            // 图标缓存跟着应用清单一起来：设备刚重新上报过图标时要立刻换新
+            invalidateAppIcons()
+            return loadData({ silent: true })
+          }}
+        />
       </div>
 
       {error && (
@@ -129,9 +137,14 @@ export function AppPluginsPage() {
                 className="text-left bg-white rounded-lg p-3 shadow-sm hover:bg-gray-50 active:bg-gray-100 transition-colors"
               >
                 <div className="flex items-center space-x-2 min-w-0">
-                  <div className="w-10 h-10 rounded-xl bg-green-50 text-[#07c160] flex items-center justify-center font-medium flex-shrink-0">
-                    {target.badge}
-                  </div>
+                  <AppIcon
+                    packageName={target.packageName}
+                    appName={target.appName}
+                    className="w-10 h-10 rounded-xl flex-shrink-0"
+                    fallbackClassName="bg-green-50 text-[#07c160]"
+                    letterClassName="text-base"
+                    fallbackLetter={target.badge}
+                  />
                   <div className="min-w-0">
                     <div className="text-sm font-medium text-gray-900 truncate">{target.appName}</div>
                     <div className="text-[10px] text-gray-400 truncate">{target.packageName}</div>

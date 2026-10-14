@@ -5,6 +5,8 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ToggleSwitch } from '@/components/ToggleSwitch'
 import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
+import { AppIcon } from '@/components/AppIcon'
+import { invalidateAppIcons } from '@/hooks/useAppIcons'
 import { toast } from 'sonner'
 import { AlertTriangle, ArrowLeft, Check, Info, ShieldCheck, X } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
@@ -118,7 +120,13 @@ export function AppAuditPage() {
           <ArrowLeft className="w-5 h-5" />
         </Button>
         <h1 className="text-xl font-medium text-gray-900 flex-1">{t('应用审批')}</h1>
-        <HeaderRefreshButton onRefresh={() => loadData({ silent: true })} />
+        <HeaderRefreshButton
+          onRefresh={() => {
+            // 图标缓存跟着应用清单一起来：设备刚重新上报过图标时要立刻换新
+            invalidateAppIcons()
+            return loadData({ silent: true })
+          }}
+        />
       </div>
 
       {/* ---------------- 头部 ---------------- */}
@@ -186,9 +194,11 @@ export function AppAuditPage() {
               pendingApps.map((app, index) => (
                 <div key={app}>
                   <div className="flex items-center py-3 px-4">
-                    <div className="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center text-sm text-gray-600 font-medium flex-shrink-0">
-                      {app.slice(0, 1)}
-                    </div>
+                    <AppIcon
+                      appName={app}
+                      className="w-9 h-9 flex-shrink-0"
+                      letterClassName="text-sm"
+                    />
                     <div className="flex-1 min-w-0 ml-3">
                       <div className="text-sm text-gray-900 truncate">{app}</div>
                       <div className="text-[11px] text-gray-400 mt-0.5">{t('等待家长决定是否允许安装')}</div>

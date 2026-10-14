@@ -1,7 +1,9 @@
 import type { ChildDevice } from '@prisma/client';
+import crypto from 'node:crypto';
 import { prisma } from '../../prisma';
 import { BadRequestError, NotFoundError } from '../../errors';
 import { parsePagination } from '../../shared/deviceScope';
+import { signAppIconPath } from './appIconUrl';
 import {
   APP_PLUGIN_CATALOG,
   ALL_PLUGIN_KEYS,
@@ -21,6 +23,61 @@ import type {
 
 /** 设备事件保留天数。它是轻量事件流，比截屏留得久，但也不该无限增长。 */
 const EVENT_RETENTION_DAYS = 30;
+
+/** 单个应用图标的最大字节数（zod 那层按 base64 长度还挡了一道）。 */
+const ICON_MAX_BYTES = 16 * 1024;
+
+/**
+ * 按魔数识别图片类型。
+ *
+ * 不信任客户端传来的 mime：孩子端理论上只会发 PNG，但服务端拿到的是 base64 字符串，
+ * 万一被塞进一段脚本/HTML 又原样回给浏览器，就是一个存储型 XSS。只认图片魔数、
+ * 且只回自己识别出来的 Content-Type，这条路就堵死了。
+ */
+function sniffImage(bytes: Buffer): { mime: string } | null {
+  if (bytes.length < 12) return null;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return { mime: 'image/png' };
+  }
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return { mime: 'image/jpeg' };
+  }
+  // WebP: "RIFF" .... "WEBP"
+  if (bytes.toString('latin1', 0, 4) === 'RIFF' && bytes.toString('latin1', 8, 12) === 'WEBP') {
+    return { mime: 'image/webp' };
+  }
+  return null;
+}
+
+/** 解析设备上报的图标 base64；不合法就当作「这次没带图标」。 */
+function decodeIcon(base64: string | undefined): { bytes: Buffer; mime: string; hash: string } | null {
+  if (!base64) return null;
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(base64, 'base64');
+  } catch {
+    return null;
+  }
+  if (bytes.length === 0 || bytes.length > ICON_MAX_BYTES) return null;
+  const sniffed = sniffImage(bytes);
+  if (!sniffed) return null;
+  return { bytes, mime: sniffed.mime, hash: sha256Short(bytes) };
+}
+
+function sha256Short(bytes: Buffer): string {
+  return crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16);
+}
 
 export type EffectiveMode = 'study' | 'normal';
 
@@ -201,8 +258,42 @@ export const modeService = {
       where,
       orderBy: [{ appName: 'asc' }],
       take: 500,
+      // 不 select icon：几百张图标的字节流会把响应从几十 KB 抬到几百 KB，
+      // 而图标是长期缓存的东西，单独用 /api/app-icons/:id 取。
+      select: {
+        id: true,
+        deviceId: true,
+        packageName: true,
+        appName: true,
+        isSystem: true,
+        isLaunchable: true,
+        iconHash: true,
+        lastSeenAt: true,
+        createdAt: true,
+      },
     });
-    return { apps, total: apps.length };
+    return {
+      apps: apps.map(({ iconHash, ...app }) => ({
+        ...app,
+        hasIcon: Boolean(iconHash),
+        iconUrl: iconHash ? signAppIconPath(app.id, iconHash) : null,
+      })),
+      total: apps.length,
+    };
+  },
+
+  /** 取单个应用图标（供 `/api/app-icons/:id` 使用；签名在路由层已经校验过）。 */
+  async getAppIcon(appId: string) {
+    const row = await prisma.deviceApp.findUnique({
+      where: { id: appId },
+      select: { icon: true, iconMime: true, iconHash: true },
+    });
+    if (!row?.icon) return null;
+    return {
+      bytes: Buffer.from(row.icon),
+      mimeType: row.iconMime ?? 'image/png',
+      iconHash: row.iconHash ?? '',
+    };
   },
 
   /**
@@ -210,17 +301,35 @@ export const modeService = {
    *
    * 用「先删后插」在一个事务里做：半套应用清单会让家长端的选择页少几个应用，
    * 而家长看不出少了什么 —— 这种静默缺失比多几个条目危险得多。
+   *
+   * 图标字段是可选的，所以「先删后插」要先把旧图标捞出来按包名续上：
+   * 孩子端只会重传变化过的图标，没带图标的包必须沿用库里那张，
+   * 否则每次上报都会把已有图标擦掉，家长端就一直退回首字徽标。
    */
   async reportApps(device: ChildDevice, input: ReportAppsInput) {
     const now = new Date();
-    const rows = input.apps.map((a) => ({
-      deviceId: device.id,
-      packageName: a.packageName,
-      appName: a.appName || a.packageName,
-      isSystem: a.isSystem,
-      isLaunchable: a.isLaunchable,
-      lastSeenAt: now,
-    }));
+
+    const previous = await prisma.deviceApp.findMany({
+      where: { deviceId: device.id },
+      select: { packageName: true, icon: true, iconMime: true, iconHash: true },
+    });
+    const previousByPackage = new Map(previous.map((p) => [p.packageName, p]));
+
+    const rows = input.apps.map((a) => {
+      const fresh = decodeIcon(a.icon);
+      const old = previousByPackage.get(a.packageName);
+      return {
+        deviceId: device.id,
+        packageName: a.packageName,
+        appName: a.appName || a.packageName,
+        isSystem: a.isSystem,
+        isLaunchable: a.isLaunchable,
+        icon: fresh ? fresh.bytes : (old?.icon ?? null),
+        iconMime: fresh ? fresh.mime : (old?.iconMime ?? null),
+        iconHash: fresh ? fresh.hash : (old?.iconHash ?? null),
+        lastSeenAt: now,
+      };
+    });
 
     await prisma.$transaction([
       prisma.deviceApp.deleteMany({ where: { deviceId: device.id } }),
@@ -241,7 +350,16 @@ export const modeService = {
       });
     }
 
-    return { success: true, count: rows.length };
+    // `icons` 是给设备端的诊断信号：这次上报**之后**库里有图标的应用数
+    // （含沿用下来的旧图，所以不是「本次新存了几张」）。
+    // 当前孩子端每次上报都全量带图标，用不到它；留着是为了将来孩子端改成
+    // 「只传变化过的图标」时能靠它对账 —— 比如服务端换了库/清了数据，
+    // 而孩子端以为图都传过了，这时就该全量重传一次。
+    return {
+      success: true,
+      count: rows.length,
+      icons: rows.filter((r) => r.iconHash).length,
+    };
   },
 
   // ==========================================================

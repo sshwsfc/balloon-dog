@@ -155,20 +155,97 @@ public class AgentStore {
     /**
      * 首次启动（或用户主动重置后）生成一套设备身份。
      *
-     * <p>设备码刻意避开容易看错的 0/O/1/I，家长要在家长端手动输入它。
-     * 密钥用 UUID 拼两次得到 64 位十六进制串（远超服务端要求的 16 位下限），
-     * 它只在本机保存，用来在重装后向服务端证明「我还是原来那台设备」。
+     * <p><b>身份由本机标识推导，而不是随机生成</b> —— 这是「重装后配对码不变、绑定不丢」的关键。
+     * 随机生成时，卸载重装（甚至只是清数据）就会算出新码，服务端眼里就是一台新设备：
+     * 家长端会多出一台永远离线的幽灵设备，而孩子手里这台要重新走一遍配对。
+     *
+     * <p>推导的种子是 {@code Settings.Secure.ANDROID_ID}（Android 8+ 起按
+     * <b>签名密钥 + 用户 + 设备</b>三元组作用域，所以本应用卸载重装、系统 OTA 都不变，
+     * 只有恢复出厂或换签名才会变），外加一个存在本地、只有「家长点重置」才会变的随机盐。
+     * 这样：
+     * <ul>
+     *   <li>卸载重装 → 同一套 deviceCode + deviceSecret → 服务端认出是同一台设备，
+     *       {@code bound} 保持为 true，家长什么都不用做；</li>
+     *   <li>家长点「重置设备身份」→ 换盐 → 得到一套全新身份，用于换绑或密钥不匹配时的自救。</li>
+     * </ul>
+     *
+     * <p>seed 取不到时（极少数 ROM）退回随机码，功能可用但重装会变 —— 会记一条日志说明。
      */
     public void ensureIdentity() {
         if (isRegistered()) return;
+        String seed = stableIdentitySeed();
+        if (seed != null) {
+            String code = deriveDeviceCode(seed);
+            prefs.edit()
+                    .putString(Constants.KEY_DEVICE_CODE, code)
+                    .putString(Constants.KEY_DEVICE_SECRET, deriveDeviceSecret(seed))
+                    .apply();
+            EventLog.info("设备身份由本机标识推导（重装后不变）：" + code);
+            return;
+        }
+        String code = generateDeviceCode();
         prefs.edit()
-                .putString(Constants.KEY_DEVICE_CODE, generateDeviceCode())
+                .putString(Constants.KEY_DEVICE_CODE, code)
                 .putString(Constants.KEY_DEVICE_SECRET, generateDeviceSecret())
                 .apply();
+        EventLog.warn("读不到本机标识，已退回随机设备码 " + code + "（卸载重装后会变）");
     }
 
-    private static final char[] CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".toCharArray();
+    /**
+     * 推导设备身份用的稳定种子，取不到时返回 {@code null}。
+     *
+     * <p>刻意<b>不</b>把 {@code Build.FINGERPRINT} 之类的系统版本信息拌进来：那些东西会随
+     * 系统 OTA 变化，一旦变了一次，孩子这台设备在服务端就又成了新设备 —— 稳定性优先级更高。
+     */
+    @Nullable
+    private String stableIdentitySeed() {
+        String androidId = null;
+        try {
+            androidId = android.provider.Settings.Secure.getString(
+                    appContext.getContentResolver(), android.provider.Settings.Secure.ANDROID_ID);
+        } catch (Exception e) {
+            EventLog.warn("读取 ANDROID_ID 失败：" + e.getMessage());
+        }
+        if (TextUtils.isEmpty(androidId)) return null;
+        String salt = prefs.getString(Constants.KEY_IDENTITY_SALT, "");
+        return androidId + "|" + salt;
+    }
 
+    /** 把种子推导成 8 位绑定码（避开容易看错的 0/O/1/I，家长要手输）。 */
+    static String deriveDeviceCode(String seed) {
+        byte[] digest = sha256("balloondog/device-code|" + seed);
+        if (digest == null) return generateDeviceCode();
+        StringBuilder sb = new StringBuilder(8);
+        for (int i = 0; i < 8; i++) {
+            // 32 个字符正好整除 256，取模不会引入偏置
+            sb.append(CODE_ALPHABET[(digest[i] & 0xFF) % CODE_ALPHABET.length]);
+        }
+        return sb.toString();
+    }
+
+    /** 把种子推导成 64 位十六进制设备密钥（服务端要求 ≥16 位，实际存的是它的 bcrypt）。 */
+    static String deriveDeviceSecret(String seed) {
+        byte[] digest = sha256("balloondog/device-secret|" + seed);
+        if (digest == null) return generateDeviceSecret();
+        StringBuilder sb = new StringBuilder(digest.length * 2);
+        for (byte b : digest) {
+            sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+            sb.append(Character.forDigit(b & 0xF, 16));
+        }
+        return sb.toString();
+    }
+
+    @Nullable
+    private static byte[] sha256(String input) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            return md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 推导不可用时（几乎没有）才走这条路：真随机，但重装后会变。 */
     public static String generateDeviceCode() {
         java.security.SecureRandom random = new java.security.SecureRandom();
         StringBuilder sb = new StringBuilder(8);
@@ -181,6 +258,8 @@ public class AgentStore {
     public static String generateDeviceSecret() {
         return (UUID.randomUUID().toString() + UUID.randomUUID().toString()).replace("-", "");
     }
+
+    private static final char[] CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".toCharArray();
 
     // ---------------- 管控状态（服务端下发的期望状态 + 本地实际执行结果） ----------------
 
@@ -218,8 +297,16 @@ public class AgentStore {
 
     // ---------------- 运行开关 ----------------
 
+    /**
+     * 守护是否应当运行。
+     *
+     * <p><b>默认 true</b>：装好、打开一次就该自己连上服务器并注册，而不是等家长去「设置」页
+     * 点一下保存。缺这个键的唯一含义是「从来没人配置过」，那就该跑；家长显式停止会把
+     * false 写进去（{@code MainActivity.toggleService()} / {@code AgentService.onDestroy()}），
+     * 那时这里读到的就是明确的「不要跑」，不会被默认值复活。
+     */
     public boolean isAgentEnabled() {
-        return prefs.getBoolean(Constants.KEY_AGENT_ENABLED, false);
+        return prefs.getBoolean(Constants.KEY_AGENT_ENABLED, true);
     }
 
     public void setAgentEnabled(boolean enabled) {
@@ -949,9 +1036,15 @@ public class AgentStore {
 
     // ---------------- 重置 ----------------
 
-    /** 清空设备身份，下次连接会以一台全新设备重新注册（家长需重新输入新绑定码）。 */
+    /**
+     * 清空设备身份，下次连接会以一台全新设备重新注册（家长需重新输入新绑定码）。
+     *
+     * <p>身份是「由本机标识 + 盐」推导出来的，所以<b>只删码是不够的</b>：必须同时换一个盐，
+     * 否则下一条 {@link #ensureIdentity()} 会推导出跟刚才一模一样的码，重置等于没做。
+     */
     public void resetIdentity() {
         prefs.edit()
+                .putString(Constants.KEY_IDENTITY_SALT, UUID.randomUUID().toString())
                 .remove(Constants.KEY_DEVICE_CODE)
                 .remove(Constants.KEY_DEVICE_SECRET)
                 .remove(Constants.KEY_DEVICE_TOKEN)

@@ -4,6 +4,8 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
+import { AppIcon } from '@/components/AppIcon'
+import { invalidateAppIcons } from '@/hooks/useAppIcons'
 import {
   Dialog,
   DialogContent,
@@ -248,7 +250,13 @@ export function ModeAppsPage() {
           <ArrowLeft className="w-5 h-5" />
         </Button>
         <h1 className="text-xl font-medium text-gray-900 flex-1">{t('选择应用')}</h1>
-        <HeaderRefreshButton onRefresh={() => loadData({ silent: true })} />
+        <HeaderRefreshButton
+          onRefresh={() => {
+            // 图标缓存跟着应用清单一起来：设备刚重新上报过图标时要立刻换新
+            invalidateAppIcons()
+            return loadData({ silent: true })
+          }}
+        />
       </div>
 
       {/* ---------------- 分组切换 ---------------- */}
@@ -405,9 +413,13 @@ export function ModeAppsPage() {
                 return (
                   <div key={app.id}>
                     <div className="flex items-center py-3 px-4">
-                      <div className="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center text-sm text-gray-600 font-medium flex-shrink-0">
-                        {displayName.slice(0, 1)}
-                      </div>
+                      <AppIcon
+                        url={app.iconUrl}
+                        packageName={app.packageName}
+                        appName={displayName}
+                        className="w-9 h-9 flex-shrink-0"
+                        letterClassName="text-sm"
+                      />
                       <div className="flex-1 min-w-0 ml-3">
                         <div className="flex items-center space-x-1.5 min-w-0">
                           <span className="text-sm text-gray-900 truncate">{displayName}</span>
@@ -475,9 +487,13 @@ export function ModeAppsPage() {
               <div className="flex flex-wrap gap-x-3 gap-y-2">
                 {activeList.map((app) => (
                   <div key={app.id} className="flex items-center space-x-1.5">
-                    <div className="w-8 h-8 rounded-lg bg-green-50 flex items-center justify-center text-xs text-[#07c160] font-medium">
-                      {(app.appName || app.packageName).slice(0, 1)}
-                    </div>
+                    <AppIcon
+                      packageName={app.packageName}
+                      appName={app.appName}
+                      className="w-8 h-8"
+                      fallbackClassName="bg-green-50 text-[#07c160]"
+                      letterClassName="text-xs"
+                    />
                     <span className="text-xs text-gray-700 max-w-[80px] truncate">
                       {app.appName || app.packageName}
                     </span>

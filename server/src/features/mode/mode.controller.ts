@@ -6,6 +6,7 @@ import { devicesService } from '../devices/devices.service';
 import { prisma } from '../../prisma';
 import { NotFoundError } from '../../errors';
 import { modeService } from './mode.service';
+import { verifyAppIconToken } from './appIconUrl';
 import {
   addModeAppSchema,
   deviceAppQuerySchema,
@@ -92,6 +93,25 @@ export async function refreshDeviceApps(req: Request, res: Response) {
   res.json({ success: true, command: dispatched.command });
 }
 
+/** GET /api/app-icons/:appId?v=<hash>&t=<签名> —— 应用图标字节流 */
+export async function deviceAppIcon(req: Request, res: Response) {
+  const appId = String(req.params.appId);
+  verifyAppIconToken(appId, String(req.query.t ?? ''));
+
+  const icon = await modeService.getAppIcon(appId);
+  if (!icon) {
+    // 没图就和「不存在」一样处理，前端会退回带首字的占位块
+    throw new NotFoundError('应用图标', appId);
+  }
+
+  res.setHeader('Content-Type', icon.mimeType);
+  res.setHeader('Content-Length', String(icon.bytes.length));
+  // URL 里带着 `v=<iconHash>`，内容一变 URL 就变，所以可以放心让浏览器长期缓存。
+  // 但仍然是「私有」的：图标暴露了这台设备装了哪些应用，不允许中间代理缓存。
+  res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
+  res.end(icon.bytes);
+}
+
 /** GET /api/eye-care */
 export async function getEyeCare(req: Request, res: Response) {
   const device = await resolveDevice(req);
@@ -173,6 +193,16 @@ export const deviceAppRoutes = Router();
 deviceAppRoutes.use(authenticate);
 deviceAppRoutes.get('/', ah(listDeviceApps));
 deviceAppRoutes.post('/refresh', ah(refreshDeviceApps));
+
+/**
+ * 应用图标：/api/app-icons/:id?v=<hash>&t=<签名>
+ *
+ * **故意不挂 authenticate**：图标要能直接塞进 `<img src>`，而 `<img>` 带不了
+ * Authorization 头。鉴权改由 URL 上的签名承担（见 appIconUrl.ts），
+ * 所以这个路由必须单独挂，绝不能塞进上面那个已经 `use(authenticate)` 的 router。
+ */
+export const appIconRoutes = Router();
+appIconRoutes.get('/:appId', ah(deviceAppIcon));
 
 export const eyeCareRoutes = Router();
 eyeCareRoutes.use(authenticate);

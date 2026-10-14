@@ -31,8 +31,8 @@ export async function sendCode(req: Request, res: Response) {
 
 /** POST /api/auth/register */
 export async function register(req: Request, res: Response) {
-  const { phone, password, code, nickname } = registerSchema.parse(req.body);
-  const result = await authService.register(phone, password, code, nickname);
+  const { phone, password, code, nickname, inviteCode } = registerSchema.parse(req.body);
+  const result = await authService.register(phone, password, code, nickname, inviteCode);
   res.status(201).json({ success: true, ...result });
 }
 
@@ -45,8 +45,8 @@ export async function login(req: Request, res: Response) {
 
 /** POST /api/auth/sms-login —— 验证码登录（无密码，首次自动注册）。 */
 export async function smsLogin(req: Request, res: Response) {
-  const { phone, code } = smsLoginSchema.parse(req.body);
-  const result = await authService.smsLogin(phone, code);
+  const { phone, code, inviteCode } = smsLoginSchema.parse(req.body);
+  const result = await authService.smsLogin(phone, code, inviteCode);
   res.json({ success: true, ...result });
 }
 

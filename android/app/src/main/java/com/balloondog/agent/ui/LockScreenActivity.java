@@ -76,6 +76,14 @@ public class LockScreenActivity extends AppCompatActivity {
 
     /** 打开锁定页。 */
     public static void show(Context context, @Nullable String reason, @Nullable String strength) {
+        // 孩子正在答题解锁时绝不重新拉起锁定页：本方法带 CLEAR_TOP，
+        // 一拉就把答题页弹掉，孩子永远答不完题（实测过的 bug）。
+        // 真正的判断在 LockReassertor / LockWatchdogService，这里再兜一道，
+        // 避免以后新增调用点又把这条链路踩坏。
+        if (QuizActivity.isShowing()) {
+            EventLog.info("锁定页：孩子正在答题解锁流程中，跳过本次拉起");
+            return;
+        }
         Intent intent = new Intent(context, LockScreenActivity.class);
         intent.putExtra(EXTRA_REASON, reason);
         intent.putExtra(EXTRA_STRENGTH, strength);

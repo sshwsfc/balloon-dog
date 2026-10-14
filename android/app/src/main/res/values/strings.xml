@@ -110,7 +110,7 @@
 
 「网址拦截」需要系统 VPN 授权，授权后由本机在 DNS 解析层拦截家长设置的网址。它只覆盖 DNS：直接填 IP 的访问、DoH/DoT 加密 DNS、以及已经缓存的域名仍可绕过。
 
-桌面图标被家长隐藏后，本机不再有任何入口，只能通过家长端远程恢复，或用 adb 重新启用 MainActivityLauncher 组件。</string>
+桌面图标被家长隐藏后，桌面与本机设置里都不再有入口：在拨号盘输入 *#*#2887#*#* 可以重新打开本机（家长端隐藏图标时给出的就是这个号），或由家长端远程恢复；应急时也可以用 adb 重新启用 MainActivityLauncher 组件。</string>
 
     <!-- 首页：绑定引导（未绑定） -->
     <string name="binding_unbound_title">还没绑定家长</string>
@@ -141,6 +141,8 @@
     <string name="action_open_now">去开启</string>
     <string name="action_granted_tick">已开启 ✓</string>
 
+    <string name="todo_name_owner">防卸载保护</string>
+    <string name="todo_reason_owner">需要「设备所有者」权限</string>
     <string name="todo_name_accessibility">无障碍服务</string>
     <string name="todo_reason_accessibility">锁定与拦截靠它执行</string>
     <string name="todo_name_runtime">定位/相机/录音等</string>
@@ -157,8 +159,10 @@
     <string name="todo_reason_vpn">按家长设置拦网址，可选</string>
 
     <string name="one_key_hint_need_accessibility">请先开启无障碍</string>
+    <string name="one_key_hint_need_owner">未开启「设备所有者」，孩子可直接卸载本应用（需用电脑开通）</string>
     <string name="one_key_hint_ready">无障碍已开，可一键开启其余权限</string>
     <string name="one_key_hint_all_done">权限都已开启，无需操作</string>
+    <string name="todo_alert_owner">防卸载未生效：现在孩子可以直接卸载本应用</string>
     <string name="action_one_key_grant">一键开启权限</string>
     <string name="action_one_key_done">权限已全部开启</string>
     <string name="toast_one_key_need_accessibility">请先开启无障碍服务</string>
@@ -183,4 +187,7 @@
     <string name="status_detail_unbound">未绑定家长</string>
     <string name="status_locked_now">锁定中</string>
     <string name="status_detail_usage">今日已用 %1$s</string>
+
+    <!-- 家长入口：桌面图标隐藏后在拨号盘输入暗码打开本应用（见 SecretCodeReceiver） -->
+    <string name="icon_hint_dial_entry">要在本机打开守护应用：在系统拨号盘输入 %1$s（图标隐藏后这是本机唯一的入口）。</string>
 </resources>

@@ -108,11 +108,11 @@ Vite 会校验请求的 `Host` 头，`vite.config.ts` 已经把 `VITE_SERVER_URL
 | `npm run server:dev` | 启动后端（tsx watch） |
 | `npm run server:build` | 编译后端到 `server/dist` |
 | `npm run server:typecheck` | 后端类型检查 |
-| `npm run server:smoke` | **后端端到端冒烟测试（160 项断言）** |
+| `npm run server:smoke` | **后端端到端冒烟测试（162 项断言）** |
 | `npm run db:clean` | 清理冒烟测试留下的临时账号与设备（先预演） |
 | `npm run e2e` | **浏览器端到端测试**（家长端 + 管理后台，CDP 驱动无头 Chrome） |
 | `npm run e2e:parent` / `e2e:admin` | 只跑其中一套 |
-| `npm run e2e:responsive` | **响应式视口矩阵**（5 档视口 × 17 个页面：无横向溢出、内容限宽居中、标题栏铺满、导航形态正确，见 [`docs/RESPONSIVE.md`](docs/RESPONSIVE.md)） |
+| `npm run e2e:responsive` | **响应式视口矩阵**（5 档视口 × 20 个页面：无横向溢出、内容限宽居中、标题栏铺满、导航形态正确，见 [`docs/RESPONSIVE.md`](docs/RESPONSIVE.md)） |
 | `npm run android:build` | 构建孩子设备端 Agent 的调试 APK（见 [`android/README.md`](android/README.md)） |
 | `npm run android:release` | 构建 Agent 的发布 APK |
 | `npm run android:e2e` | **Agent 端到端联调**（真机/模拟器 + 真实后端：协议闭环、拍照/录音/截图、Kiosk 锁定、倒计时悬浮窗、作息时间表、最高强度档、保活） |
@@ -120,6 +120,9 @@ Vite 会校验请求的 `Host` 头，`vite.config.ts` 已经把 `VITE_SERVER_URL
 | `npm run android:e2e:screen` | **截屏洞察 + 锁定复核端到端联调**（真机/模拟器：采样→打包→上传→AI 分析→亮屏重锁→降级路径拉回） |
 | `npm run android:capture` | 在模拟器上批量截取界面截图到 `android/docs/screenshots/` |
 | `npm run server:e2e:insights` | **屏幕洞察后端全链路**（上传→入库→家长端可见→预算→屏幕出题→清理，28 项） |
+| `npm run server:e2e:icons` | **应用图标后端全链路**（上报→嗅探→签名 URL→缓存与鉴权→重传不丢图，32 项） |
+| `npm run server:e2e:membership` | **会员体系全链路**（动态定价→下单快照→三种周期→续费与升级→自动续费→门禁 403→受邀用户定价，175 项） |
+| `npm run server:e2e:referral` | **分享提成全链路**（邀请码→注册绑定→首充阶梯返现→续费返现→券里程碑→次月结算→提现门槛与审核→风控，159 项） |
 | `npm run server:e2e:ai` | **AI 分析全链路**，对着 `npm run server:mock:ai` 起的假视觉服务跑（28 项，不需要真 key） |
 | `npm run server:mock:ai` | 起一个 OpenAI 兼容的假视觉服务（默认 :4100），用 `MOCK_AI_SCENARIO` 切换场景 |
 | `npm run db:up` / `db:down` | 起停 PostgreSQL 容器 |
@@ -186,7 +189,9 @@ balloon-dog/
 | **护眼设置** | ✅ 完成 | 连续用眼到点强制锁屏休息（不可被临时解锁绕过）、夜间护眼时段、屏幕亮度上限 |
 | **微信 / QQ 功能管控** | ✅ 完成 | 按应用聚合的功能清单逐项开关；设备端用无障碍按界面文本拦截。**拦不住 WebView/画布内容**，见 `android/README.md` §2.4.1 |
 | **家长端响应式** | ✅ 完成 | 竖屏手机 / 横屏手机 / 平板 / 桌面 / 超宽屏五档均可用：宽屏内容居中限宽（不再通栏拉伸）、导航在宽屏变侧栏、横屏矮视口压缩留白 |
-| 管理后台（`/admin`） | ✅ 完成 | 独立管理员体系；数据看板、家长账号/设备/指令/题库管理、验证码审计、操作日志、角色分权 |
+| **会员体系（三档 + 动态定价）** | ✅ 完成 | 普通 / 会员 / 超级会员；按月、按年、连续包月三种周期，**金额按账号画像动态计算且规则后台可管**；**受邀注册的账号价格更高**（上浮比例 / 加收固定金额 / 一口价，后台可维护，与常规定价取更高者 —— 邀请人的返现是平台成本，得由被邀请的订单覆盖）；支付宝 / 微信收银台目前是 **mock**（`MEMBERSHIP_MOCK_PAY=true` 直接开通，不真扣款）；答题解锁 / 远程监控 / 多设备绑定归会员，AI 洞察归超级会员，非会员触达时统一提示升级 |
+| **分享提成（邀请返现）** | ✅ 完成 | 每个账号自带 8 位邀请码与分享链接/二维码；好友注册充值后邀请人拿返现 —— 首充按阶梯（0-3 人 50% / 4-9 人 40% / ≥10 人 20%，月卡季卡保底 50%，年卡单笔封顶 75 元）、续费 20%–50% 封顶 75 元；奖励按当月统计、**次月 10-15 日发放**，提现需「≥3 名有效充值好友 + 实名认证 + 累计返现 ≥50 元」，提现单走后台人工审核（待审核→已通过→已打款）；邀请满 3/10/20 人及每满 30 人发优惠券，可用于会员下单抵扣。**返现与提现目前是站内记账**，真实打款仍需人工在站外汇出 |
+| 管理后台（`/admin`） | ✅ 完成 | 独立管理员体系；数据看板、家长账号/设备/指令/题库管理、验证码审计、操作日志、角色分权，以及**会员管理的套餐 / 定价规则 / 受邀用户定价 / 订单 / 统计**五页与**分享提成的统计 / 提现审核 / 邀请记录 / 返现明细 / 优惠券 / 活动配置 / 规则阶梯 / 风险排查**八页 |
 
 > ⚠️ 的这几项后端无法单独完成 —— 任何声称「纯服务端就能读孩子短信」的实现都是假的。
 > 本仓库提供 `server/scripts/device-agent-example.mjs` 作为可运行的客户端参考实现。
@@ -220,7 +225,7 @@ balloon-dog/
 | 13 | **`LocationPage` 100% 硬编码**，`db.locations` 是无人读写的死数据 | 真实位置接口 + 安全区 CRUD + 轨迹时间线 |
 | 14 | **`BottomNav` 在登录页也渲染**，点击只会被守卫弹回 | 按路由决定是否显示 |
 | 15 | 同一个 `Device` 类型重复定义 3 处，`Features` 与后端不同步 | 类型统一收口在 `src/types/index.ts`；`HomePage` 的 11 处 `any` 全部清除 |
-| 16 | 无任何测试 | `server/scripts/smoke-test.mjs`：160 项断言，覆盖认证/越权/指令闭环/后台权限 |
+| 16 | 无任何测试 | `server/scripts/smoke-test.mjs`：162 项断言，覆盖认证/越权/指令闭环/后台权限 |
 | 17 | 无运营侧能力（客服无法定位问题、无法处置违规账号） | 新增 `/admin` 管理后台：10 个页面、操作审计、角色分权 |
 | 18 | 设计系统 token 把品牌主色覆盖成近黑色，`<Button>` 默认渲染成黑底 | `--primary` 改回微信绿 `#07c160`，家长端各处不再需要硬编码颜色绕过 |
 
@@ -240,7 +245,7 @@ balloon-dog/
 ## 验证方式
 
 ```bash
-# 后端：160 项端到端断言（认证、越权、隔离、指令队列闭环、后台权限与审计）
+# 后端：162 项端到端断言（认证、越权、隔离、指令队列闭环、后台权限与审计）
 npm run server:smoke
 
 # 前后端类型与规范
@@ -252,9 +257,9 @@ npm run server:typecheck && npm --prefix server run lint
 想打开发服务器则加 `APP_URL=http://localhost:5173` 并在跑 `npm run dev:all`）：
 
 ```bash
-npm run e2e           # 家长端 46 项 + 管理后台 31 项
+npm run e2e           # 家长端 46 项 + 管理后台 48 项
 npm run e2e:ux        # 家长端 UX 122 项（首次引导、功能提示、英文界面、登录态健壮性）
-npm run e2e:responsive  # 5 档视口 × 17 个页面（需先调大 RATE_LIMIT_MAX，见 server/.env.example）
+npm run e2e:responsive  # 5 档视口 × 20 个页面（需先调大 RATE_LIMIT_MAX，见 server/.env.example）
 ```
 
 孩子设备端与屏幕洞察（需要一台模拟器/真机，以及跑着的后端）：

@@ -24,24 +24,67 @@ datasource db {
 // ============================================================
 
 model User {
-  id             Int      @id @default(autoincrement())
-  phone          String?  @unique // 手机号（验证码/密码登录）
-  email          String?  @unique
-  passwordHash   String // bcrypt；验证码/微信登录的账号用随机串占位
-  nickname       String   @default("家长用户")
-  avatar         String   @default("")
-  wechatOpenid   String?  @unique // 微信网页授权 openid
-  status         String   @default("active") // active 正常 | disabled 已禁用
-  activeDeviceId String? // 当前选中的设备（前端不传 deviceId 时的默认作用对象）
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id                  Int       @id @default(autoincrement())
+  phone               String?   @unique // 手机号（验证码/密码登录）
+  email               String?   @unique
+  passwordHash        String // bcrypt；验证码/微信登录的账号用随机串占位
+  nickname            String    @default("家长用户")
+  avatar              String    @default("")
+  wechatOpenid        String?   @unique // 微信网页授权 openid
+  status              String    @default("active") // active 正常 | disabled 已禁用
+  activeDeviceId      String? // 当前选中的设备（前端不传 deviceId 时的默认作用对象）
+  // ---- 会员（见 features/membership）----
+  // 档位存「账号当前实际拥有的档位」，过期不会写回 ordinary，而是由
+  // resolveMembership() 按 membershipExpiresAt 惰性判定并顺手降级：
+  // 依赖定时任务去清档位，只要任务停一次，过期用户就永久享受会员权限。
+  membershipTier      String    @default("ordinary") // ordinary 普通 | member 会员 | super 超级会员
+  membershipExpiresAt DateTime? // 到期时间；null = 从未开通或已过期
+  /// 首次开通会员的时间。用于「首单优惠」判定与留存统计，过期也不清。
+  membershipStartedAt DateTime?
+  /// 连续包月：到期是否自动续费。用户可随时关闭，关闭后到期即降级。
+  membershipAutoRenew Boolean   @default(false)
+  /// 连续包月签约的档位。自动续费要按签约时的档位续，不能跟着当前档位漂。
+  membershipRenewTier String?
+  /// 首次支付成功时间（任何订单）。「首单立减」只认它，不认 device/订单数。
+  firstPaidAt         DateTime?
+  /// 累计实付金额（分）。用于「老客优惠」与运营统计，退款不回冲（退款另行记录）。
+  totalPaidCents      Int       @default(0)
+  // ---- 分享提成 / 邀请返现（见 features/referral）----
+  /// 本人的邀请码。注册时生成；老账号（或生成失败）由 ensureInviteCode() 惰性补发。
+  inviteCode          String?   @unique
+  /// 邀请人。null = 自然注册（没有被谁邀请）。
+  /// 用 SetNull 而不是 Cascade：邀请人注销不该把被邀请人的账号一起带走。
+  referredById        Int?
+  referredBy          User?     @relation("UserReferral", fields: [referredById], references: [id], onDelete: SetNull)
+  referrals           User[]    @relation("UserReferral")
+  /// 绑定邀请关系的时刻（与 createdAt 可能不同：老账号是后补绑的）。
+  referredAt          DateTime?
+  /// 实名认证（提现前置条件）。只留姓名 + 身份证后 4 位 + 整串哈希：
+  /// 提现要能证明「钱给对了人」，但平台没有任何理由存一份明文身份证号。
+  realName            String?
+  idCardHash          String?
+  idCardTail          String?
+  verifiedAt          DateTime?
 
-  devices     ChildDevice[]
-  quizRecords QuizRecord[]
-  commands    DeviceCommand[] @relation("CommandRequester")
-  media       MediaAsset[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  devices          ChildDevice[]
+  quizRecords      QuizRecord[]
+  commands         DeviceCommand[]   @relation("CommandRequester")
+  media            MediaAsset[]
+  membershipOrders MembershipOrder[]
+
+  referralRewards     ReferralReward[]     @relation("RewardInviter")
+  rewardsFromReferral ReferralReward[]     @relation("RewardInvitee")
+  referralWithdrawals ReferralWithdrawal[]
+  referralCoupons     ReferralCoupon[]
+  referralsMade       Referral[]           @relation("ReferralInviter")
+  referralSource      Referral?            @relation("ReferralInvitee")
 
   @@index([status])
+  @@index([membershipTier, membershipExpiresAt])
+  @@index([referredById])
 }
 
 // ============================================================
@@ -60,7 +103,8 @@ model ChildDevice {
   osVersion            String    @default("")
   avatar               String    @default("")
   /// 隐藏孩子设备桌面上的图标（§9）。设备端按此值切换 activity-alias 的启用状态。
-  hideIcon             Boolean   @default(false)
+  /// 默认 true：桌面图标能被长按卸载，所以默认不显示；家长在「隐藏图标」卡片里可改回 false。
+  hideIcon             Boolean   @default(true)
   deviceCode           String    @unique // 设备绑定码：设备端生成并展示，家长输入后完成认领
   deviceSecretHash     String // 设备端密钥的 bcrypt 哈希（设备端用于续订 device token）
   boundAt              DateTime? // 家长认领时间；null 表示尚未被任何家长绑定
@@ -766,6 +810,18 @@ model DeviceApp {
   /// 普通应用（可启动、有桌面图标）—— 只有这些才值得管控
   isLaunchable Boolean @default(true)
 
+  /// 应用图标（孩子端从 PackageManager 抓取后压缩成的 PNG 原始字节）。
+  ///
+  /// 为什么放数据库而不是磁盘：图标只有几 KB，跟着 DeviceApp 一起级联删除，
+  /// 解绑设备时不会留下孤儿文件；也不需要再维护一套存储目录。
+  /// 为什么不在列表接口里内联返回：一次列表最多 500 条，内联会让响应涨到几百 KB，
+  /// 而图标几乎不变 —— 用 /api/device-apps/:id/icon 单独取，让浏览器长期缓存。
+  icon     Bytes?
+  /// 图标 MIME，目前固定 image/png
+  iconMime String?
+  /// 图标内容 sha256（前 16 位），既做缓存失效参数，也用来判断要不要重传
+  iconHash String?
+
   lastSeenAt DateTime @default(now())
   createdAt  DateTime @default(now())
 
@@ -884,4 +940,361 @@ model SmsMessage {
   createdAt  DateTime @default(now())
 
   @@index([deviceId, occurredAt])
+}
+
+// ============================================================
+// 会员
+// ============================================================
+
+/// 会员套餐（家长端「成为会员」页展示的每一个可购项）。
+///
+/// 家长端的档位只有三档：ordinary（普通，不售卖）/ member / super，
+/// 但「会员」与「超级会员」各自又有按月/按年/连续包月三种买法，
+/// 所以套餐是 (tier × period) 的笛卡尔积，共 6 个 —— 用 code 唯一标识而不是用 id，
+/// 因为 code 要写进订单、写进埋点，值得稳定且可读。
+model MembershipPlan {
+  id             String   @id @default(cuid())
+  code           String   @unique // member_monthly | member_yearly | member_auto_monthly | super_*
+  tier           String // member | super
+  period         String // monthly 按月 | yearly 按年 | auto_monthly 连续包月
+  name           String // 「会员 · 按月」
+  description    String   @default("")
+  /// 基准价（分）。页面上显示的「原价」就是它，动态定价规则在它基础上减。
+  /// 用整数分而不是浮点元：金额算错一次就是资损，浮点 0.1+0.2 的坑不值得踩。
+  basePriceCents Int
+  /// 折算月数（月付 1 / 年付 12 / 连续包月 1），用来算「折合每月多少钱」。
+  months         Int      @default(1)
+  /// 是否在家长端标「推荐」角标。
+  recommended    Boolean  @default(false)
+  sortOrder      Int      @default(0)
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([enabled, sortOrder])
+}
+
+/// 动态定价规则（后台可管理）。
+///
+/// 家长端每个套餐的最终价格 = 套餐基准价 → 依次套用命中的规则 → 取整。
+/// 规则只描述「什么条件下减多少」，具体命中哪几条由 pricing.ts 的引擎决定：
+/// 不可叠加的规则按 priority 只取一条，可叠加的全部生效，最后兜底不低于 1 分。
+model MembershipPricingRule {
+  id                  String   @id @default(cuid())
+  name                String // 「首单立减 20 元」
+  /// 触发条件。取值见 membership.constants.ts 的 RULE_CONDITIONS：
+  /// first_purchase 从未付费 | active_membership 会员续费 | no_active_membership 未开通/已过期
+  /// | device_count 绑定设备数 ≥ N | registered_within_days 注册 ≤ N 天 | tier_upgrade 由低档升级
+  conditionType       String
+  /// conditionType 的参数（不用的留空）。用独立列而不是 JSON 字符串：
+  /// 后台要按这些字段做表单校验，JSON 里的错字只能等到运行期才炸。
+  conditionMinDevices Int?
+  conditionDays       Int?
+  conditionFromTier   String? // tier_upgrade 专用：来源档位
+  /// 作用范围。all 表示不限；targetTier 与 targetPeriod 同时匹配才生效。
+  targetTier          String   @default("all") // all | member | super
+  targetPeriod        String   @default("all") // all | monthly | yearly | auto_monthly
+  /// 优惠方式：percent 按比例减 | amount 直接减固定金额
+  discountType        String // percent | amount
+  /// percent: 1-100 的百分比；amount: 分
+  discountValue       Int
+  /// 可否与其他规则叠加。false 时同一订单只取优先级最高的一条（避免「满减叠满减」变成 1 分钱）。
+  stackable           Boolean  @default(false)
+  /// 优先级，越大越先算。不可叠加的规则之间只留最高优先级那条。
+  priority            Int      @default(0)
+  enabled             Boolean  @default(true)
+  /// 结算明细里给家长看的一句话；留空则由服务端按 discountType 自动生成。
+  note                String   @default("")
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([enabled, priority])
+}
+
+/// 受邀用户定价规则（后台可管理）—— 会员价格与「买家是不是被邀请来的」的关联公式。
+///
+/// 结账价格 = max(常规定价, 受邀价)：
+///  - 常规定价 = 套餐基准价 − MembershipPricingRule 命中的规则（见 pricing.ts）；
+///  - 受邀价 = 本表**每条**命中的规则各算一个价（percent/amount/fixed），取其中最高的；
+///  - 被邀请注册的家长价格**更高**：邀请人要拿的分享返现是平台出的，成本落在这张订单上。
+///
+/// 命中前提：账号是被邀请注册的（`User.referredById` 非空）。本表只描述「受邀价怎么算」，
+/// 「算不算受邀用户」由账号自己的数据决定 —— 定价引擎仍然是纯函数，试算与线上必然一致。
+///
+/// 取 max 还有一个安全上的理由：后台把规则配错（比例填 0、一口价填得比常规价还低）
+/// 只会「不生效」，绝不会出现「被邀请反而更便宜」的套利口子 —— 那是能被直接刷的漏洞。
+model MembershipReferralPriceRule {
+  id                    String   @id @default(cuid())
+  name                  String // 「受邀好友首单上浮 50%」
+  /// 作用范围。all 表示不限；targetTier 与 targetPeriod 同时匹配才参与比价。
+  targetTier            String   @default("all") // all | member | super
+  targetPeriod          String   @default("all") // all | monthly | yearly | auto_monthly
+  /// 上浮方式：percent 按常规定价实付上浮 | amount 加收固定金额 | fixed 一口价
+  priceType             String // percent | amount | fixed
+  /// percent: 上浮百分比（在常规定价**实付价**基础上 ×(100+v)/100）；
+  /// amount: 加收多少分；fixed: 一口价（分），低于常规定价时不生效。
+  /// 不管哪种方式，最终都不会低于 MIN_PAYABLE_CENTS（1 元）。
+  priceValue            Int
+  /// 只在被邀请人**首单**生效。专享价的目的就是推动首充（邀请人也是靠首充拿返现），
+  /// 默认开；关掉则续费也享受专享价。
+  firstPurchaseOnly     Boolean  @default(true)
+  /// 邀请关系必须存在且**未作废**（Referral.status ≠ invalid，即没被反作弊判为自买自返）。
+  /// 关掉则任何被邀请注册过的账号都享受，包括已被作废的。
+  requireActiveReferral Boolean  @default(true)
+  /// 优先级只影响**展示**（并列同价时优先显示谁）与后台排序：
+  /// 价格本身是「所有命中规则各算一次再取 max」，不靠优先级挑。
+  priority              Int      @default(0)
+  enabled               Boolean  @default(true)
+  /// 结算明细里给家长看的一句话；留空则由服务端按 priceType 自动生成。
+  note                  String   @default("")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([enabled, priority])
+}
+
+/// 会员订单。
+///
+/// 金额与命中的规则都在下单时**快照**下来：规则是可以后台随时改的，
+/// 若订单只存 planCode，事后对账就会用今天的价格去解释上个月的订单。
+model MembershipOrder {
+  id      String @id @default(cuid())
+  /// 对外的订单号（家长端展示、客服查询用），与内部 id 分开。
+  orderNo String @unique
+  userId  Int
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  planCode String
+  tier     String // member | super
+  period   String // monthly | yearly | auto_monthly
+
+  originalCents          Int // 下单时套餐的基准价
+  amountCents            Int // 实付金额（规则算完之后，再扣掉优惠券）
+  /// 命中的规则快照，JSON 字符串：[{ ruleId, name, discountType, discountValue, amountCents }]
+  adjustments            String  @default("[]")
+  /// 本单使用的邀请返现优惠券（见 features/referral）。规则折扣之后再抵扣，
+  /// 券的金额同样要快照 —— 券用掉之后记录会被置为 used，金额只能从这里回溯。
+  couponId               String?
+  couponCents            Int     @default(0)
+  /// 本单生效的「受邀用户定价」规则快照。与常规定价规则一样必须冻结：
+  /// 规则改一次，上个月的订单就解释不清了。没命中时留空。
+  referralRuleId         String?
+  referralRuleName       String  @default("")
+  /// 受邀用户定价比常规定价**多收**了多少分（取 max 的结果）。0 表示这单不是受邀订单，
+  /// 或者命中的规则都没能超过常规定价。
+  referralSurchargeCents Int     @default(0)
+
+  payChannel    String // alipay | wechat
+  /// pending 待支付 | paid 已支付 | failed 支付失败 | cancelled 已取消 | refunded 已退款
+  status        String    @default("pending")
+  /// 支付渠道流水号（mock 支付页生成）。
+  transactionId String?
+  paidAt        DateTime?
+  /// 本单带来的会员生效区间（支付成功时写入）。
+  startsAt      DateTime?
+  expiresAt     DateTime?
+  /// 是否开通了连续包月（决定到期后是否自动续费）。
+  autoRenew     Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+  @@index([tier, createdAt])
+}
+
+// ============================================================
+// 分享提成 / 邀请返现（见 features/referral）
+// ============================================================
+
+/// 活动配置（单行表，id 固定为 "default"）。
+///
+/// 放在库里而不是写死在 constants：截图里的「50% / 40% / 20%」「75 元上限」
+/// 「次月 10-15 日发放」都是运营口径，活动一改就要发版是不可接受的。
+/// 阶梯比例与券里程碑是「一张表」而不是「一个数字」，所以另开两章表：
+/// ReferralRewardTier / ReferralCouponRule（后台要按行增删改，不是整段 JSON）。
+model ReferralConfig {
+  id      String  @id @default("default")
+  enabled Boolean @default(true)
+
+  title     String    @default("邀请新用户，返现 50%")
+  subtitle  String    @default("新用户注册充值后，您最高可获得 50% 返现")
+  /// 活动说明（家长端「邀请奖励说明」逐条渲染，一行一条）。
+  notice    String    @default("")
+  startedAt DateTime  @default(now())
+  endsAt    DateTime?
+
+  /// 月卡/季卡的最低返现比例（%）。截图规则：「月卡、季卡返现 50%」——
+  /// 是**下限**而不是固定值：邀请人数价阶梯更高时按阶梯算，家长不会因为
+  /// 买的是月卡反而比年卡拿得少。
+  shortPeriodMinRatePercent Int @default(50)
+  /// 年卡及以上的单笔返现上限（分）。截图规则：「年卡以上最高返现 75 元」。
+  longPeriodCapCents        Int @default(7500)
+
+  /// 续费返现比例（%）。截图规则：「20% 到 50%」。
+  renewalRatePercent Int @default(20)
+  /// 续费单笔上限（分）。截图规则：「单个邀请人奖励上限为 75 元」。
+  renewalCapCents    Int @default(7500)
+
+  /// 提现门槛（截图第 6 条）：至少 N 名有效充值用户 + 实名认证 + 累计返现 ≥ M 分。
+  withdrawMinInvitees     Int     @default(3)
+  withdrawMinCents        Int     @default(5000)
+  withdrawRequireVerified Boolean @default(true)
+
+  /// 发放窗口：奖励按当月统计，次月 [settleDayStart, settleDayEnd] 日发放。
+  settleDayStart Int @default(10)
+  settleDayEnd   Int @default(15)
+
+  updatedAt DateTime @updatedAt
+}
+
+/// 首充返现的「邀请人数 → 返现比例」阶梯（截图第 2 条）。
+/// maxInvitees 为 null 表示开区间（≥ minInvitees 全按这条）。
+model ReferralRewardTier {
+  id          String   @id @default(cuid())
+  minInvitees Int
+  maxInvitees Int?
+  /// 返现比例（%）。注意截图里是「人越多比例越低」（50/40/20），不是笔误。
+  ratePercent Int
+  sortOrder   Int      @default(0)
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([enabled, sortOrder])
+}
+
+/// 优惠券里程碑（截图第 4 条）：邀请满 inviteeCount 人送 amountCents 券。
+/// repeatEvery 不为空表示可以重复达成：「超过 30 人每 30 人 100 元」
+/// = inviteeCount 30 + repeatEvery 30（30/60/90… 各一张）。
+model ReferralCouponRule {
+  id           String   @id @default(cuid())
+  name         String
+  inviteeCount Int
+  repeatEvery  Int?
+  amountCents  Int
+  /// 券有效期（天）。0 = 不过期。
+  validDays    Int      @default(90)
+  sortOrder    Int      @default(0)
+  enabled      Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([enabled, sortOrder])
+}
+
+/// 邀请关系。一个被邀请人只会有一条（inviteeId @unique）。
+model Referral {
+  id            String    @id @default(cuid())
+  inviterId     Int
+  inviter       User      @relation("ReferralInviter", fields: [inviterId], references: [id], onDelete: Cascade)
+  inviteeId     Int       @unique
+  invitee       User      @relation("ReferralInvitee", fields: [inviteeId], references: [id], onDelete: Cascade)
+  /// 绑定用的邀请码（留档：家长可能换了码来投诉）。
+  code          String
+  /// bound 已绑定（还没充值）| valid 有效邀请（已充值且未退款）| invalid 已作废
+  status        String    @default("bound")
+  invalidReason String    @default("")
+  boundAt       DateTime  @default(now())
+  /// 首次有效充值的时间；提现门槛「至少 3 名有效充值用户」按它计数。
+  validAt       DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([inviterId, status])
+}
+
+/// 返现记录。
+model ReferralReward {
+  id        String @id @default(cuid())
+  rewardNo  String @unique
+  inviterId Int
+  inviter   User   @relation("RewardInviter", fields: [inviterId], references: [id], onDelete: Cascade)
+  inviteeId Int
+  invitee   User   @relation("RewardInvitee", fields: [inviteeId], references: [id], onDelete: Cascade)
+
+  /// 产生返现的会员订单号。
+  orderNo String
+  /// first_purchase 首充返现 | renewal 续费返现
+  kind    String
+
+  /// 计费基数（订单实付金额，分）与最终返现额。两个都存：
+  /// 比例一改，只存金额就再也解释不清这笔钱是怎么算出来的。
+  baseAmountCents Int
+  ratePercent     Int
+  amountCents     Int
+  /// 是否触发了上限（年卡 75 元 / 续费 75 元），家长端要提示「已达单笔上限」。
+  capApplied      Boolean @default(false)
+
+  /// pending 待发放（当月累计）| settled 已发放（可提现）| cancelled 已取消（退款或作弊追回）
+  status       String    @default("pending")
+  /// 归属月份 YYYY-MM（按当月统计的依据）。
+  settleMonth  String
+  settledAt    DateTime?
+  cancelReason String    @default("")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([inviterId, status])
+  @@index([inviterId, settleMonth])
+  @@index([orderNo])
+  @@index([status, settleMonth])
+}
+
+/// 提现申请。
+model ReferralWithdrawal {
+  id          String @id @default(cuid())
+  withdrawNo  String @unique
+  userId      Int
+  user        User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amountCents Int
+
+  /// pending 待审核 | approved 审核通过（打款中）| paid 已打款 | rejected 已驳回
+  status     String @default("pending")
+  /// 提现时的实名信息快照（账号后来改了实名也不影响这笔的历史记录）。
+  realName   String
+  idCardTail String
+  /// alipay | wechat | bank
+  channel    String
+  /// 收款账号（脱敏存储，如 138****8000）。
+  account    String
+
+  userNote   String    @default("")
+  reviewNote String    @default("")
+  reviewedBy Int?
+  reviewedAt DateTime?
+  paidAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+}
+
+/// 邀请返现优惠券（截图第 4 条），可用于购买会员时抵扣。
+model ReferralCoupon {
+  id          String    @id @default(cuid())
+  userId      Int
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amountCents Int
+  /// 来源：milestone 里程碑奖励
+  source      String    @default("milestone")
+  /// 来源标识（里程碑的规则 id + 第几轮，如 "cuid#2"），用来保证同一里程碑只发一次。
+  /// **唯一性必须带上 userId**：规则 id 是全平台共用的，只对 sourceRef 建唯一索引
+  /// 会让「满 3 人发 5 元券」这个里程碑全平台只发得出第一张券。
+  sourceRef   String
+  /// unused 未使用 | used 已使用 | expired 已过期
+  status      String    @default("unused")
+  expiresAt   DateTime?
+  usedAt      DateTime?
+  usedOrderNo String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([userId, sourceRef])
+  @@index([userId, status])
+  @@index([status, expiresAt])
 }

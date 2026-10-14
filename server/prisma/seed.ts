@@ -10,6 +10,8 @@ import 'dotenv/config';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../src/prisma';
 import { FEATURE_DEFS } from '../src/features/devices/devices.constants';
+import { membershipService } from '../src/features/membership/membership.service';
+import { referralService } from '../src/features/referral/referral.service';
 
 const DEMO_PHONE = '13800138000';
 const DEMO_PASSWORD = 'balloon123';
@@ -132,17 +134,29 @@ async function main() {
 
   // ---------- 演示家长 ----------
   const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 10);
+  // 演示账号直接给「超级会员」：e2e / 冒烟 / 响应式几套回归都拿它登录，
+  // 而普通账号在答题解锁、远程监控、AI 洞察这些页面上看到的是升级引导而不是功能本身，
+  // 让演示账号保持普通档位会把那几套回归全部测成「怎么没内容」。
+  // 「普通账号看到引导」这条路径由 server/scripts/e2e-membership.mjs 单独覆盖。
+  const demoMembership = {
+    membershipTier: 'super',
+    membershipExpiresAt: new Date(Date.now() + 3650 * 24 * 3600 * 1000),
+    membershipStartedAt: new Date(),
+    membershipAutoRenew: false,
+    membershipRenewTier: null,
+  };
   const parent = await prisma.user.upsert({
     where: { phone: DEMO_PHONE },
-    update: { passwordHash, nickname: '张小明', status: 'active' },
+    update: { passwordHash, nickname: '张小明', status: 'active', ...demoMembership },
     create: {
       phone: DEMO_PHONE,
       passwordHash,
       nickname: '张小明',
       avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${DEMO_PHONE}`,
+      ...demoMembership,
     },
   });
-  console.log(`   ✓ 演示家长：${DEMO_PHONE} / ${DEMO_PASSWORD}（id=${parent.id}）`);
+  console.log(`   ✓ 演示家长：${DEMO_PHONE} / ${DEMO_PASSWORD}（id=${parent.id}，超级会员）`);
 
   // ---------- 演示设备（先删后建，保证可重复执行）----------
   await prisma.childDevice.deleteMany({ where: { deviceCode: { in: DEMO_DEVICES.map((d) => d.deviceCode) } } });
@@ -389,6 +403,29 @@ async function main() {
     },
   });
   console.log(`   ✓ 管理员：${admin.username}（超级管理员）/ operator（运营）`);
+
+  // 会员套餐与定价规则：ensureDefaults 是幂等的，且**不会覆盖**后台改过的价格，
+  // 所以每次 seed 都可以放心调用（规则表非空时只补套餐，不重建规则）。
+  const membership = await membershipService.ensureDefaults();
+  const planCount = await prisma.membershipPlan.count();
+  const ruleCount = await prisma.membershipPricingRule.count();
+  console.log(
+    `   ✓ 会员套餐 ${planCount} 个 / 定价规则 ${ruleCount} 条（本次补 ${membership.plans} 套餐、${membership.rules} 规则）`,
+  );
+
+  const referralPriceTotal = await prisma.membershipReferralPriceRule.count();
+  console.log(
+    `   ✓ 受邀定价规则（受邀用户价格上浮）${referralPriceTotal} 条（本次补 ${membership.referralRules} 条）`,
+  );
+
+  // 分享提成：阶梯 / 券规则 / 活动配置。backfillInviteCodes 只补没有邀请码的老账号。
+  const referral = await referralService.ensureDefaults();
+  const backfilled = await referralService.backfillInviteCodes();
+  const tierCount = await prisma.referralRewardTier.count();
+  const couponRuleCount = await prisma.referralCouponRule.count();
+  console.log(
+    `   ✓ 邀请返现：阶梯 ${tierCount} 档 / 券规则 ${couponRuleCount} 条（本次补 ${referral.tiers} / ${referral.couponRules}，补发邀请码 ${backfilled} 个）`,
+  );
 
   console.log('\n✅ 种子数据写入完成');
   console.log('   家长端：' + DEMO_PHONE + ' / ' + DEMO_PASSWORD);

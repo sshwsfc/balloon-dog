@@ -67,6 +67,8 @@ public final class LockController {
 
     /** 拉起系统的「激活设备管理器」授权页。 */
     public static void requestAdmin(Activity activity, int requestCode) {
+        // 部分 ROM 上这个页面落在 com.android.settings 里，会被看门狗当成敏感界面推走
+        SensitiveScreens.allowTemporarily(activity, SensitiveScreens.HINT_GENERIC);
         Intent intent = new Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN);
         intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent(activity));
         intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
@@ -77,6 +79,9 @@ public final class LockController {
     /** 拉起「在其他应用上层绘制」授权页。 */
     public static void requestOverlayPermission(Activity activity) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        // 加固开启时系统页面默认会被看门狗推回桌面，先给自己开一张限时通行证
+        // （见 SensitiveScreens：这不是安全边界，只是让家长点得动这个按钮）
+        SensitiveScreens.allowTemporarily(activity, SensitiveScreens.HINT_GENERIC);
         Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
         intent.setData(android.net.Uri.parse("package:" + activity.getPackageName()));
         activity.startActivity(intent);

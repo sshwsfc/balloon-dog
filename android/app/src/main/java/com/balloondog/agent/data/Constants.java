@@ -227,6 +227,12 @@ public final class Constants {
     public static final String KEY_BASE_URL = "base_url";
     public static final String KEY_DEVICE_CODE = "device_code";
     public static final String KEY_DEVICE_SECRET = "device_secret";
+    /**
+     * 身份推导用的随机盐：设备码/密钥由「ANDROID_ID + 这个盐」推导而来，
+     * 因此它<b>只在家长点「重置设备身份」时才换</b>，平时必须保持不变，
+     * 否则重装后推导出的码会变、绑定就丢了。
+     */
+    public static final String KEY_IDENTITY_SALT = "identity_salt";
     public static final String KEY_DEVICE_TOKEN = "device_token";
     public static final String KEY_DEVICE_ID = "device_id";
     public static final String KEY_DEVICE_NAME = "device_name";

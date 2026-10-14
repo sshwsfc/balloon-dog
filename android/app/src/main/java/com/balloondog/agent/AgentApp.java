@@ -25,6 +25,9 @@ public class AgentApp extends Application implements ApiClient.TokenProvider {
     public void onCreate() {
         super.onCreate();
         store = new AgentStore(this);
+        // 身份要尽早确定：设备码现在是由本机标识推导出来的（重装也不变），
+        // 在主界面之前算好，日志、看门狗唤醒、开机广播拿到的都是同一个码。
+        store.ensureIdentity();
         ApiClient.get().setTokenProvider(this);
         AgentNotifications.ensureChannels(this);
 

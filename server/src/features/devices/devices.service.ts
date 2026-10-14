@@ -3,6 +3,8 @@ import type { CallLogEntry, ChildDevice, SmsMessage } from '@prisma/client';
 import { prisma } from '../../prisma';
 import { logger } from '../../logger';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors';
+import { FREE_DEVICE_LIMIT } from '../membership/membership.constants';
+import { requireEntitlement, requireFeatureEntitlement } from '../membership/membership.guard';
 import { signDeviceToken } from '../../shared/tokens';
 import { humanizeLastActive, parsePagination, toDeviceView } from '../../shared/deviceScope';
 import { devicesRepo } from './devices.repository';
@@ -245,7 +247,14 @@ export const devicesService = {
       throw new ConflictError('该设备已被其他账号绑定，请先在对方账号中解绑');
     }
 
+    // 绑定数量受会员档位限制：普通账号 1 台，会员起放宽到 MAX_DEVICES_PER_USER。
+    //
+    // 顺序很重要：先问会员够不够，再问系统够不够。反过来的话，
+    // 一个普通账号绑第 2 台时会先撞上「最多只能绑定 20 台设备」这种莫名其妙的报错。
     const count = await devicesRepo.countByUser(userId);
+    if (count >= FREE_DEVICE_LIMIT) {
+      await requireEntitlement(userId, 'multiDevice');
+    }
     if (count >= MAX_DEVICES_PER_USER) {
       throw new BadRequestError(`最多只能绑定 ${MAX_DEVICES_PER_USER} 台设备`);
     }
@@ -302,6 +311,11 @@ export const devicesService = {
   async setFeature(userId: number, deviceId: string, key: string, enabled: boolean) {
     if (!isFeatureKey(key)) throw new BadRequestError(`未知的功能标识：${key}`);
     const device = await this.requireOwned(userId, deviceId);
+
+    // 只拦「打开」：关掉一个高级功能永远要允许，否则会员到期后
+    // 家长连关都关不掉，只能看着一个用不了还亮着的开关。
+    if (enabled) await requireFeatureEntitlement(userId, key);
+
     await devicesRepo.setFeature(device.id, key, enabled);
 
     // 打开/关闭答题解锁时同步 QuizConfig，避免两处状态不一致
@@ -554,7 +568,11 @@ export const devicesService = {
           : type === 'start_recording'
             ? 'videoRecord'
             : 'remoteRecord';
-      await requireFeatureEnabled(device.id, featureKey);
+      await requireFeatureEnabled(device.id, featureKey, userId);
+    } else {
+      // 截图没有功能开关（见上），但它是「远程监控」能力的一部分，同样要会员。
+      // 只查会员、不查开关，正好绕开了上面那段「凭空编一个开关」的问题。
+      await requireEntitlement(userId, 'remoteMonitor');
     }
 
     return dispatchCommand(device, userId, type, payload, {});
@@ -583,13 +601,13 @@ export const devicesService = {
    * 否则「关了开关，麦克风还在录，而且停不掉」是最坏的情况。
    */
   async requestAmbient(userId: number, device: ChildDevice, start: boolean) {
-    if (start) await requireFeatureEnabled(device.id, 'audioRecord');
+    if (start) await requireFeatureEnabled(device.id, 'audioRecord', userId);
     return dispatchCommand(device, userId, start ? 'start_ambient' : 'stop_ambient', {}, {});
   },
 
   /** 远程协助（§7）：返回 / 主页 / 最近任务 / 通知栏 / 打开指定应用。 */
   async remoteAction(userId: number, device: ChildDevice, action: RemoteAction, packageName?: string) {
-    await requireFeatureEnabled(device.id, 'remoteHelp');
+    await requireFeatureEnabled(device.id, 'remoteHelp', userId);
     const payload: Record<string, unknown> =
       action === 'open_app' ? { action, packageName } : { action };
     return dispatchCommand(device, userId, 'remote_action', payload, {});
@@ -597,7 +615,7 @@ export const devicesService = {
 
   /** 让设备重新上报通话记录与短信（§8 家长端「刷新」）。 */
   async requestCallsSmsSync(userId: number, device: ChildDevice) {
-    await requireFeatureEnabled(device.id, 'callSms');
+    await requireFeatureEnabled(device.id, 'callSms', userId);
     return dispatchCommand(device, userId, 'sync_calls_sms', {}, {});
   },
 
@@ -905,8 +923,18 @@ export const devicesService = {
   },
 };
 
-/** 确认设备上某个功能开关已打开，否则拒绝下发对应指令。 */
-async function requireFeatureEnabled(deviceId: string, featureKey: string): Promise<void> {
+/**
+ * 确认设备上某个功能开关已打开，否则拒绝下发对应指令。
+ *
+ * 顺序是「先会员、后开关」：反过来的话，普通账号点远程拍照会先看到
+ * 「请先开启「远程拍照」功能」，照着打开开关又被告知要开会员 —— 白跑一趟。
+ */
+async function requireFeatureEnabled(
+  deviceId: string,
+  featureKey: string,
+  userId: number,
+): Promise<void> {
+  await requireFeatureEntitlement(userId, featureKey);
   const row = await prisma.deviceFeature.findUnique({
     where: { deviceId_key: { deviceId, key: featureKey } },
   });

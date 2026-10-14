@@ -35,10 +35,13 @@ import {
   studySlotRoutes,
   modeAppRoutes,
   deviceAppRoutes,
+  appIconRoutes,
   eyeCareRoutes,
   appPluginRoutes,
   deviceEventRoutes,
 } from './features/mode/mode.controller';
+import { membershipRoutes } from './features/membership/membership.controller';
+import { referralRoutes } from './features/referral/referral.controller';
 
 /**
  * Express 应用工厂。中间件顺序严格遵循：
@@ -63,7 +66,10 @@ export function createApp(): Express {
     }),
   );
 
-  app.use(express.json({ limit: '1mb' }));
+  // 4mb 而不是 1mb：孩子端上报应用清单时会顺带带上应用图标的 base64
+  // （每个约 2~4KB，几百个可启动应用就是几百 KB）。图标只在应用有增删时才会重传，
+  // 平时心跳/上报都是小包。
+  app.use(express.json({ limit: '4mb' }));
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
   app.use(requestId);
 
@@ -133,10 +139,14 @@ export function createApp(): Express {
   app.use('/api/screen-monitor', screenConfigRoutes);
   app.use('/api/usage-budgets', usageBudgetRoutes);
   app.use('/api/usage-summary', usageSummaryRoutes);
+  app.use('/api/membership', membershipRoutes);
+  app.use('/api/referral', referralRoutes);
   app.use('/api/device-mode', deviceModeRoutes);
   app.use('/api/study-slots', studySlotRoutes);
   app.use('/api/mode-apps', modeAppRoutes);
   app.use('/api/device-apps', deviceAppRoutes);
+  // 图标走签名 URL（<img> 带不了 Authorization 头），不能挂在上面那个 router 下
+  app.use('/api/app-icons', appIconRoutes);
   app.use('/api/eye-care', eyeCareRoutes);
   app.use('/api/app-plugins', appPluginRoutes);
   app.use('/api/device-events', deviceEventRoutes);

@@ -6,6 +6,7 @@ import { currentUserId, resolveDevice } from '../../shared/deviceScope';
 import { config } from '../../config';
 import { BadRequestError, NotFoundError } from '../../errors';
 import { devicesRepo } from '../devices/devices.repository';
+import { entitlementGate } from '../membership/membership.middleware';
 import { insightsService } from './insights.service';
 import {
   alertIdSchema,
@@ -180,9 +181,16 @@ screenAgentRoutes.post(
 screenAgentRoutes.get('/screen-quiz/next', authenticateDevice, ah(nextScreenQuestion));
 screenAgentRoutes.post('/screen-quiz/answer', authenticateDevice, ah(answerScreenQuestion));
 
-/** /api/insights —— 家长端时间线 */
+/**
+ * /api/insights —— 家长端时间线
+ *
+ * 整条路由归**超级会员**（权益 aiInsight）：AI 洞察 = 屏幕洞察 + AI 画面分析 + 异常提醒。
+ * 家长端在拉数据之前会先看档位，非超级会员直接渲染升级卡片，正常不会走到这里的 403；
+ * 这里的门禁是防「绕过界面直接打接口」。
+ */
 export const insightRoutes = Router();
 insightRoutes.use(authenticate);
+insightRoutes.use(entitlementGate('aiInsight'));
 insightRoutes.get('/', ah(listInsights));
 insightRoutes.get('/:insightId', ah(getInsight));
 insightRoutes.post('/:insightId/reanalyze', ah(reanalyzeInsight));
@@ -190,6 +198,7 @@ insightRoutes.post('/:insightId/reanalyze', ah(reanalyzeInsight));
 /** /api/alerts —— 异常提醒 */
 export const alertRoutes = Router();
 alertRoutes.use(authenticate);
+alertRoutes.use(entitlementGate('aiInsight'));
 alertRoutes.get('/', ah(listAlerts));
 alertRoutes.post('/read-all', ah(markAllAlertsRead));
 alertRoutes.post('/:alertId/read', ah(markAlertRead));
@@ -197,10 +206,18 @@ alertRoutes.post('/:alertId/read', ah(markAlertRead));
 /** /api/screen-monitor —— 截屏与 AI 设置 */
 export const screenConfigRoutes = Router();
 screenConfigRoutes.use(authenticate);
+screenConfigRoutes.use(entitlementGate('aiInsight'));
 screenConfigRoutes.get('/', ah(getScreenConfig));
 screenConfigRoutes.put('/', ah(updateScreenConfig));
 
-/** /api/usage-budgets —— 玩几局 / 看几集 */
+/**
+ * /api/usage-budgets —— 玩几局 / 看几集
+ *
+ * **不加会员门禁**：用量上限属于基础管控（每日使用时长对任何账号都可用）。
+ * 局数/集数那两条依赖「屏幕洞察」，设备上没开时本来就只是不生效，
+ * 家长端也已经用琥珀色提示说明了这一点 —— 在这里整页 403 反而把
+ * 时长限制也一起挡掉了。
+ */
 export const usageBudgetRoutes = Router();
 usageBudgetRoutes.use(authenticate);
 usageBudgetRoutes.get('/', ah(listBudgets));

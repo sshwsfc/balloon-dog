@@ -86,20 +86,21 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
     private static final int DEVICE_CODE_QR_SIZE_DP = 166;
 
     /** 待办清单的固定项 id —— 数组下标即显示顺序。 */
-    private static final int TODO_ACCESSIBILITY = 0;
-    private static final int TODO_RUNTIME = 1;
-    private static final int TODO_OVERLAY = 2;
-    private static final int TODO_USAGE = 3;
-    private static final int TODO_BATTERY = 4;
-    private static final int TODO_CAPTURE = 5;
-    private static final int TODO_VPN = 6;
-    private static final int TODO_COUNT = 7;
+    private static final int TODO_OWNER = 0;
+    private static final int TODO_ACCESSIBILITY = 1;
+    private static final int TODO_RUNTIME = 2;
+    private static final int TODO_OVERLAY = 3;
+    private static final int TODO_USAGE = 4;
+    private static final int TODO_BATTERY = 5;
+    private static final int TODO_CAPTURE = 6;
+    private static final int TODO_VPN = 7;
+    private static final int TODO_COUNT = 8;
 
     /** 「使用情况访问」不是运行时权限，走 AppOps，这里给它一个名字常量。 */
     private static final String PERMISSION_USAGE_STATS = "android.permission.PACKAGE_USAGE_STATS";
 
     /** 清单进度只统计「必备项」——可选项不该拉低分母，让家长看着像永远做不完。 */
-    private static final int REQUIRED_TODO_COUNT = 5;
+    private static final int REQUIRED_TODO_COUNT = 6;
 
     /** 徽标配色：绿=已开启、灰=未开启、琥珀=可选/启动中。 */
     private static final int BADGE_OK = 0;
@@ -476,7 +477,18 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         boolean accessibilityOn = isAccessibilityEnabledInSettings();
         boolean accessibilityConnected = LockWatchdogService.isConnected();
 
-        // 0. 无障碍：所有拦截动作的前提，置顶
+        // 0. 设备所有者：防卸载、防强行停止的唯一前提，所以放第一位
+        boolean ownerOn = LockController.isDeviceOwner(this);
+        TodoRow owner = todoRows[TODO_OWNER];
+        setTodoBasics(owner, R.drawable.ic_shield,
+                R.string.todo_name_owner, R.string.todo_reason_owner);
+        setTodoBadge(owner, ownerOn ? R.string.badge_on : R.string.badge_off,
+                ownerOn ? BADGE_OK : BADGE_OFF);
+        setTodoAction(owner, ownerOn);
+        // 这一项没开就必须写在明面上：清单里其余项全绿也挡不住卸载
+        binding.textTodoAlert.setVisibility(ownerOn ? View.GONE : View.VISIBLE);
+
+        // 1. 无障碍：所有拦截动作的前提
         TodoRow accessibility = todoRows[TODO_ACCESSIBILITY];
         setTodoBasics(accessibility, R.drawable.ic_accessibility,
                 R.string.todo_name_accessibility, R.string.todo_reason_accessibility);
@@ -490,7 +502,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         }
         setTodoAction(accessibility, accessibilityOn);
 
-        // 1. 运行时权限：合成一行显示 N/M，点开看逐项
+        // 2. 运行时权限：合成一行显示 N/M，点开看逐项
         List<String> required = PermissionGranter.requiredPermissions();
         int grantedCount = required.size() - PermissionGranter.missing(this).size();
         boolean runtimeDone = grantedCount >= required.size();
@@ -501,7 +513,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
                 runtimeDone ? BADGE_OK : BADGE_OFF);
         setTodoAction(runtime, runtimeDone);
 
-        // 2. 悬浮窗
+        // 3. 悬浮窗
         boolean overlayOn = Settings.canDrawOverlays(this);
         TodoRow overlay = todoRows[TODO_OVERLAY];
         setTodoBasics(overlay, R.drawable.ic_overlay,
@@ -510,7 +522,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
                 overlayOn ? BADGE_OK : BADGE_OFF);
         setTodoAction(overlay, overlayOn);
 
-        // 3. 使用情况访问
+        // 4. 使用情况访问
         boolean usageOn = PermissionGranter.isSpecialGranted(this, PERMISSION_USAGE_STATS);
         TodoRow usage = todoRows[TODO_USAGE];
         setTodoBasics(usage, R.drawable.ic_usage,
@@ -519,7 +531,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
                 usageOn ? BADGE_OK : BADGE_OFF);
         setTodoAction(usage, usageOn);
 
-        // 4. 电池优化白名单：M 以下这个系统概念不存在，如实写「本机不支持」
+        // 5. 电池优化白名单：M 以下这个系统概念不存在，如实写「本机不支持」
         boolean batterySupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M;
         boolean batteryOn = isIgnoringBatteryOptimizations();
         TodoRow battery = todoRows[TODO_BATTERY];
@@ -533,7 +545,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         }
         setTodoAction(battery, batteryOn || !batterySupported);
 
-        // 5. 屏幕采集（可选）：家长没开就是「可选」，不是「未开启」，别制造焦虑
+        // 6. 屏幕采集（可选）：家长没开就是「可选」，不是「未开启」，别制造焦虑
         boolean captureOn = store.isCaptureEnabled() && ScreenCapturer.hasProjection();
         TodoRow capture = todoRows[TODO_CAPTURE];
         setTodoBasics(capture, R.drawable.ic_screen,
@@ -542,7 +554,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
                 captureOn ? BADGE_OK : BADGE_WARN);
         setTodoAction(capture, captureOn);
 
-        // 6. 网址拦截 VPN（可选）：家长配了黑名单却还没授权，那才算「未开启」
+        // 7. 网址拦截 VPN（可选）：家长配了黑名单却还没授权，那才算「未开启」
         boolean vpnOn = DnsFilterVpnService.hasSystemConsent(this);
         boolean vpnWanted = DnsFilterVpnService.isWanted(this);
         TodoRow vpn = todoRows[TODO_VPN];
@@ -556,9 +568,9 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         }
         setTodoAction(vpn, vpnOn);
 
-        int doneRequired = (accessibilityOn ? 1 : 0) + (runtimeDone ? 1 : 0)
+        int doneRequired = (ownerOn ? 1 : 0) + (accessibilityOn ? 1 : 0) + (runtimeDone ? 1 : 0)
                 + (overlayOn ? 1 : 0) + (usageOn ? 1 : 0) + (batteryOn ? 1 : 0);
-        renderOneKeyButton(accessibilityOn, doneRequired);
+        renderOneKeyButton(accessibilityOn, ownerOn, doneRequired);
     }
 
     /**
@@ -568,14 +580,22 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
      * 并在旁边写清原因 —— 不置灰的话，家长点了只会看到一串「需要手动开启」，
      * 却不知道为什么，体验比不给按钮还差。
      */
-    private void renderOneKeyButton(boolean accessibilityOn, int doneRequired) {
+    private void renderOneKeyButton(boolean accessibilityOn, boolean ownerOn, int doneRequired) {
         binding.textTodoProgress.setText(getString(R.string.todo_progress,
                 doneRequired, REQUIRED_TODO_COUNT));
+        // 设备所有者不在「一键开启」能力范围内（必须在设备未添加账号时用 adb 设置），
+        // 所以判「其余项都开好了」时要把它排除在外，否则会永远显示「还有活没干完」。
+        boolean restDone = doneRequired >= REQUIRED_TODO_COUNT - (ownerOn ? 0 : 1);
         if (!accessibilityOn) {
             binding.buttonOneKeyGrant.setEnabled(false);
             binding.buttonOneKeyGrant.setText(R.string.action_one_key_grant);
             binding.textOneKeyHint.setText(R.string.one_key_hint_need_accessibility);
-        } else if (doneRequired >= REQUIRED_TODO_COUNT) {
+        } else if (restDone && !ownerOn) {
+            // 其余权限都齐了、只差设备所有者：按钮没活可干（置灰），但不能说「已全部开启」
+            binding.buttonOneKeyGrant.setEnabled(false);
+            binding.buttonOneKeyGrant.setText(R.string.action_one_key_grant);
+            binding.textOneKeyHint.setText(R.string.one_key_hint_need_owner);
+        } else if (restDone) {
             binding.buttonOneKeyGrant.setEnabled(false);
             binding.buttonOneKeyGrant.setText(R.string.action_one_key_done);
             binding.textOneKeyHint.setText(R.string.one_key_hint_all_done);
@@ -633,6 +653,11 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
     /** 某一行的操作按钮。 */
     private void onTodoAction(int id) {
         switch (id) {
+            case TODO_OWNER:
+                // 这一项没有应用内开关：设备所有者只能在设备尚未添加任何账号时用 adb 设置，
+                // 所以「去开启」给的是操作指引，不是跳系统页面。
+                showOwnerGuide();
+                break;
             case TODO_ACCESSIBILITY:
                 openAccessibilitySettings();
                 break;
@@ -832,6 +857,14 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
             if (hardening.length() > 0) hardening.append('\n');
             hardening.append(line);
         }
+        // 敏感界面封锁单独写一行：系统里没有「禁止打开系统设置」这条限制，它是无障碍
+        // 盯前台窗口追出来的，所以不能和上面那些真正的设备所有者限制混在一起，
+        // 而且必须写明「是拦截、有延迟」。
+        if (hardening.length() > 0) hardening.append('\n');
+        hardening.append(store.isHardeningEnabled()
+                ? "敏感界面封锁：已开启 —— 进入系统设置 / 应用管理 / 卸载界面会自动退回桌面"
+                        + "（拦截有约 0.1 秒延迟，不是设备所有者限制）"
+                : "敏感界面封锁：已关闭（「管控加固」关着）");
         binding.textHardening.setText(hardening.toString());
 
         StringBuilder emergency = new StringBuilder();
@@ -975,6 +1008,11 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
     /** 跳到系统的无障碍设置页，让家长手动开启看门狗（系统不允许应用自行开启）。 */
     private void openAccessibilitySettings() {
         try {
+            // 加固开启时这一页默认会被看门狗按返回推走（否则孩子也能进来关掉它），
+            // 所以先开一张限时通行证 —— 见 SensitiveScreens 里「没有家长身份验证，
+            // 应用内放行按钮不是安全边界」的说明。
+            com.balloondog.agent.capability.SensitiveScreens.allowTemporarily(this,
+                    com.balloondog.agent.capability.SensitiveScreens.HINT_ACCESSIBILITY);
             startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS));
             Toast.makeText(this,
                     "请在列表中找到「气球狗守护」并开启。\nAndroid 13 及以上若提示「受限设置」，"
@@ -1139,6 +1177,8 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
             return;
         }
         try {
+            com.balloondog.agent.capability.SensitiveScreens.allowTemporarily(this,
+                    com.balloondog.agent.capability.SensitiveScreens.HINT_GENERIC);
             Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
             intent.setData(Uri.parse("package:" + getPackageName()));
             startActivity(intent);

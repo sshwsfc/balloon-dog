@@ -27,7 +27,7 @@
 
 | 方法 | 路径 | 本工程中的实现 |
 | --- | --- | --- |
-| POST | `/api/agent/register` | `AgentApi.register()` — 本机生成 `deviceCode`/`deviceSecret` 并持久化，换取 `deviceToken`；重复调用幂等，用于重装 / 重启后恢复身份 |
+| POST | `/api/agent/register` | `AgentApi.register()` — 本机按设备标识**推导** `deviceCode`/`deviceSecret`（卸载重装不变，见 5.5.1）并持久化，换取 `deviceToken`；重复调用幂等，用于重装 / 重启后恢复身份 |
 | POST | `/api/agent/heartbeat` | `AgentService.doHeartbeat()` — 每 15 秒上报真实电量、网络类型、版本 |
 | GET | `/api/agent/config` | `AgentService.applyConfig()` — 每 60 秒拉取管控策略并在本地强制执行 |
 | GET | `/api/agent/commands/next?wait=25` | `AgentApi.nextCommand()` — OkHttp 长轮询（独立 45 秒读超时），家长一点锁屏孩子手机立刻响应 |
@@ -355,8 +355,17 @@ BadTokenException: Unable to add window -- token null is not valid; is your acti
   且随配置下发，便于集中修正。看不见 WebView / 游戏画布里的内容。
 - **有延迟**：无障碍事件到达 + 判定约几百毫秒，快速滑动可能闪过一帧。
 - **关掉无障碍权限即失效** —— 但关权限本身会被看门狗与设备所有者限制挡住（见 §2.2）。
-- **拦截动作是「按返回推回上一层」**，不是盖一层遮罩：遮罩会被应用的下一次重绘盖过去，
-  而且孩子会以为手机坏了。
+- **拦截动作是「弹一页说明」**，不是静默按返回：原来是按一下系统返回键，
+  孩子被静默弹回上一层，既不知道发生了什么、也不知道该找谁，观感就是「手机坏了」。
+  现在拉起 `AppBlockedActivity`（一页说明，唯一出口是「回桌面」，所以不会被扔回被禁的应用），
+  同时照常写日志、给家长端发 `app_blocked` / `plugin_blocked` 事件。
+- **只判当前活动窗口**：无障碍事件不区分前后台 —— 桌面的搜索框
+  （`com.google.android.googlequicksearchbox`）、后台应用的界面刷新一样会发
+  `typeWindowContentChanged`。照单全收会把「桌面自己刷新」当成「桌面被拉到前台」，
+  实测后果是**桌面被拦掉**：孩子按「返回桌面」后说明页立刻盖回去，手机等于变砖。
+  现在 `isForegroundEvent()` 会取 `getWindows()` 里 `isActive()` 那个窗口的根包名比对，
+  不一致直接放行（30 秒最多记一条 `看门狗：放行后台窗口事件 …（当前活动窗口是 …）`）；
+  判不出窗口信息时按老逻辑处理，宁可偶尔拦错，也不能因为系统不给窗口就让管控整体失效。
 
 #### 为什么插件判定被抽成纯函数
 
@@ -517,17 +526,28 @@ Android 11（API 30）起的 `setUserControlDisabledPackages`（本工程叫「�
 ### 2.7 锁定优先级：谁压过谁
 
 `LockState` 是整个 Agent 里**唯一**决定「此刻该不该锁」的地方，
-`AgentService` 每秒调它一次。优先级从高到低：
+`AgentService` 每秒调它一次。`isLockedAt()` 与 `reasonAt()` 共用**同一个顺序**，
+免得出现「判定说锁了、原因却说是放行」这种自相矛盾。优先级从高到低：
 
-1. **放行期**（家长临时解锁 / 答题奖励 / 家长手动解锁）—— 显式授权压过一切，
-   包括时间表与每日额度。否则「家长刚点了临时使用、却被作息表立刻锁回去」会很荒谬。
-2. **家长远程锁定** —— 显式指令，压过时间表。
-3. **作息时间表** —— 按设备本地时钟求值。
-4. **每日可用时长耗尽** —— 本地统计。
+0. **护眼锁定**（强制休息 / 夜间护眼）—— 压过一切：孩子正在护眼休息，任何额度都不该把它顶开。
+1. **放行期**（`grantUntil > at`：家长临时解锁 / 答题奖励 / 家长手动解锁）—— 显式授权压过
+   后面所有自动规则。否则「家长刚点了临时使用、却被作息表立刻锁回去」会很荒谬。
+2. **家长远程锁定**（`remoteLocked`）—— 显式指令，压过时间表与额度。
+3. **局数 / 集数预算耗尽** —— 服务端 AI 分析出的权威计数，随 config 下发并落盘（离线兜底）。
+4. **作息时间表** —— 按设备本地时钟求值。
+5. **每日可用时长耗尽** —— 本地统计。
 
-> 这里踩过一个真实的坑并已修正：家长先点「解锁」会留下宽限状态，
-> 如果之后点「锁定」时不清掉它，远程锁定就会被本地宽限静默压住、根本锁不上。
-> 现在 `lock` 指令与 `applyConfig`（当服务端 `locked=true`）都会强制清空本地宽限。
+> 这里踩过一个真实的坑并已修正（家长反馈「点了立即锁定，设备纹丝不动」）：
+> 放行期的优先级**高于**远程锁定，所以只要本地还留着一笔未来的宽限，远程锁定就会被静默压住。
+> 最容易漏的是**心跳那条路**：`AgentService` 的心跳原本只在 `locked` / `tempUnlockUntil`
+> 发生变化时才写状态，而写的时候不带 `manualUnlockUntil` 的清理 ——
+> 于是「服务端说锁了、本地宽限还在」这个组合会长期停留，锁定等于没生效。
+> 现在心跳与 `applyConfig` 对齐：**服务端 `locked=true` 就强制清空本地一切宽限**
+> （`store.setManualUnlockUntil(0L)`），`lock` 指令同样如此。
+>
+> 上机验证（Android 13 模拟器）：用 `run-as` 直接改 prefs 造出「`locked=false` + 1 小时后到期的宽限」，
+> **不经指令队列**在服务端把 `locked` 置真 → 25 秒后心跳把它同步下来，
+> `manual_unlock_until` 归零、`topResumedActivity` 变成 `LockScreenActivity`（锁定页真的被拉到最前）。
 
 远程「解锁」的宽限被精确设为**下一次本会锁定的时刻**（复用 `LockState.findNextLockAt`，
 而不是拍一个「30 分钟」）：这样 22:30 点解锁不会被 22:00→07:00 的作息立刻锁回去，
@@ -575,8 +595,34 @@ Android 11（API 30）起的 `setUserControlDisabledPackages`（本工程叫「�
 ```
 kiosk 档      ActivityManager.getLockTaskModeState() == LOCK_TASK_MODE_LOCKED
 悬浮窗档      LockOverlayWindow.isShowing()
-Activity 档   LockScreenActivity.isShowing()
+本应用解锁页  LockScreenActivity.isShowing() || QuizActivity.isShowing()
 ```
+
+最后一行不是随手加的：它修的是一个真实故障，见下面「复核器不能把答题页顶掉」。
+
+#### 复核器不能把「答题解锁」页顶掉（实测踩到的坑）
+
+`QuizActivity`（孩子答题解锁的那一页）原本不在任何「我们自己的界面」判据里，于是出现这条链：
+孩子点「答题解锁」→ 答题页弹出 → 屏幕一亮（或 3 秒周期复核到点）→ 路径 B 不检查实际锁定状态
+→ `LockEnforcer.showLockUi()` → `LockScreenActivity.show()` 带着 `FLAG_ACTIVITY_CLEAR_TOP`
+把答题页直接弹掉。表现出来就是「刚点进答题就回到锁定页」，答题解锁这条路等于废掉。
+
+修法是把「我们自己的解锁流程是否在最前」加进判据，三处收口：
+
+| 位置 | 收口 |
+| --- | --- |
+| `LockReassertor.reassertIfNeeded()` | 强制分支里先判 `isOwnUnlockUiOnTop()`，是就 `return false`（不再重新摆锁定页） |
+| `LockScreenActivity.show()` | 答题页在最前时直接跳过，日志`锁定页：孩子正在答题解锁流程中，跳过本次拉起` |
+| `LockWatchdogService.enforce()` | 同样先判，避免看门狗另开一条路把锁定页拉上来 |
+
+`isOwnUnlockUiOnTop()` = `LockScreenActivity.isShowing() || QuizActivity.isShowing()`。
+`QuizActivity` 为此补了 `onResume` / `onPause` 维度的 `showing` 标志 —— 原来只有
+onCreate / onDestroy，答题页被盖住时旧标志仍是 true，判据本身就会失真。
+
+Android 13 模拟器实测：锁定态下 `am start -n com.balloondog.agent/.ui.QuizActivity`，
+再 `input keyevent KEYCODE_POWER` 两次（熄屏 → 亮屏，触发路径 B），3 秒后
+`topResumedActivity` 仍是 `com.balloondog.agent/.ui.QuizActivity`，日志里没有
+「锁定复核…重新把锁定界面摆回最前」。
 
 #### 一个实测踩到的坑：撤销悬浮窗权限会同时堵死降级路径
 
@@ -648,7 +694,7 @@ BroadcastQueue: Exported Denial: sending Intent { act=android.intent.action.USER
 | 关闭悬浮窗授权 | 能自动补（补不上则检测） | `SYSTEM_ALERT_WINDOW` 同样是 appop；`PermissionGranter.grantSpecialAsDeviceOwner` 会**尽力写一次并回读验证**，无效就 warn。检测：`Settings.canDrawOverlays` | 🟡 实测 Android 13 上 DO 代授被系统拒绝（日志「系统不支持代授，只能由家长在系统设置里手动开启」），所以是「检测 + 上报」 |
 | 撤销运行时权限（相机/定位/麦克风…） | 不能（DO 可重新授权） | `setPermissionGrantState(...GRANTED)`，每次自愈重授一遍 | ✅ 每次启动/巡检重新施加（`PermissionGranter.grantAsDeviceOwner`） |
 | 撤销 VPN 授权 | 只能检测 | 检测 `VpnService.prepare(this) != null` / 隧道是否在跑 | 🟡 会记为缺口「网址拦截的 VPN 授权已被撤销：DNS 拦截已停」 |
-| **在设置里关掉无障碍服务** | **不能强制恢复，但设置页进不去了** | ①加固开启时 `LockWatchdogService.isAccessibilitySettingsPage()` 命中就按返回（实测：2 秒内被弹回桌面 + tamper 事件）；②真被关掉时 `onUnbind()` **同秒**检测（实测 16:37:14.128）→ 尝试 `setSecureSetting(admin, ENABLED_ACCESSIBILITY_SERVICES, …)` 写回被系统拒绝（原文 `Permission denial: Device owners cannot update enabled_accessibility_services`）→ 如实报「无法自动恢复」并发 tamper；③5 分钟巡检兜底 | 🟡 这是**最严重的绕过面**：拦截只覆盖「从设置页关」，不是平台级强制；DO 没有 API 能强制打开无障碍服务。详见 §2.5.4 |
+| **在设置里关掉无障碍服务** | **不能强制恢复，但设置页进不去了** | ①加固开启时 `LockWatchdogService.isAccessibilitySettingsPage()` 命中就按返回（实测：2 秒内被弹回桌面 + tamper 事件）；**唯一的例外是「家长从应用内点『去开启』」，走 45 秒放行窗口**（见 §2.11，不加这条会自锁死）；②真被关掉时 `onUnbind()` **同秒**检测（实测 16:37:14.128）→ 尝试 `setSecureSetting(admin, ENABLED_ACCESSIBILITY_SERVICES, …)` 写回被系统拒绝（原文 `Permission denial: Device owners cannot update enabled_accessibility_services`）→ 如实报「无法自动恢复」并发 tamper；③5 分钟巡检兜底 | 🟡 这是**最严重的绕过面**：拦截只覆盖「从设置页关」，不是平台级强制；DO 没有 API 能强制打开无障碍服务。详见 §2.5.4 |
 | 用无障碍快捷方式 / TalkBack 关掉我们的服务 | 同上 | 同上（无障碍快捷方式最终也是打开无障碍设置页，同样被拦）；另用 `setPermittedAccessibilityServices` 把**新装**的第三方无障碍服务挡在门外（已启用的服务保留，不误伤 TalkBack） | 🟡 挡住的是「新装一个第三方无障碍来对付我们」，挡不住孩子从别的入口（如 `adb`、快捷方式绕过设置页）关掉我们自己的服务 |
 
 #### B. 安全模式 / 多用户 / 恢复出厂
@@ -730,6 +776,11 @@ BroadcastQueue: Exported Denial: sending Intent { act=android.intent.action.USER
 3. **完全堵不住**：恢复出厂（Recovery 硬件组合键）、关机/拔电、直接用 IP 或自带 DoH 的
    应用绕过域名拦截。这些是平台/协议边界。
 
+> **另有一条「拦截级」而不是「限制级」的防护**：敏感界面封锁（§2.11）—— 加固开启时，
+> 进入系统设置 / 应用管理 / 卸载界面会被退回桌面。它不是设备所有者限制（平台没有这一条），
+> 有约 0.1 秒延迟，所以不并入上面第 1 档「已堵死」，单独列在这里，避免读者把它
+> 误当成「进去不了」的硬保证。
+
 > **关于「关掉无障碍服务」这一条的完整交代**：`setPermittedAccessibilityServices`
 > 只限制「哪些服务的**包**可以被启用」，它能让新装的第三方无障碍服务无法被打开，
 > 但**不能阻止孩子关掉本应用已经启用的服务**。DO 也没有 API 可以强制打开一个无障碍服务。
@@ -739,6 +790,147 @@ BroadcastQueue: Exported Denial: sending Intent { act=android.intent.action.USER
 > enabled_accessibility_services`）→ 5 分钟巡检兜底。写不进去就把缺口交给家长端，
 > 不假装已经堵死。**注意那条逃生通道现在还没有 UI 入口**（`setHardeningEnabled` 无调用者），
 > 家长目前点不到「关掉管控加固」，详见 §2.5.4。
+
+### 2.11 敏感界面封锁：一进「应用信息 / 卸载」界面就退回桌面
+
+需求原话是「只要进入应用管理、应用卸载、或者系统设置界面就退回到桌面」。
+**第一版就是照字面做的（整个 `com.android.settings` 整包封），随后被用户实测推翻**：
+本应用自己的授权引导页全都长在设置包里，整包封会把家长正在点的
+「无障碍开关 / 忽略电池优化 / 悬浮窗 / 使用情况访问」一起推走 ——
+用户的原话是「有时会让气球狗的页面也退出」。现在收窄成**只封「应用信息页」与卸载界面**：
+孩子想卸载守护软件，唯一必须进的就是那个页面。
+
+先说清楚为什么这件事**不能**靠设备所有者完成，再说做法和边界。
+
+#### 为什么不是一条设备所有者限制
+
+逐条核对过 `android-33/android.jar` 的 `UserManager`：**没有**「整体禁止打开系统设置」这个常量，
+只有 `DISALLOW_CONFIG_WIFI` / `_VPN` / `_DATE_TIME` 这类**单项**限制。DPM 侧也没有
+「禁止某个 Activity 启动」的 API（可用的只有 `setApplicationHidden` / `setPackagesSuspended` /
+`setUninstallBlocked` / `setUserControlDisabledPackages` / `setStatusBarDisabled` /
+`setLockTaskPackages` …）。所以「进去就弹回桌面」只能靠无障碍服务盯
+`TYPE_WINDOW_STATE_CHANGED`，也就是下面两个文件配合出来的效果：
+
+| 文件 | 职责 |
+| --- | --- |
+| `app/src/main/java/com/balloondog/agent/capability/SensitiveScreens.java` | 判定「这个前台窗口算不算敏感界面」+ 放行窗口的存取 |
+| `app/src/main/java/com/balloondog/agent/service/LockWatchdogService.java` | `blockSensitiveScreen()` 按 `GLOBAL_ACTION_HOME` 退回桌面 |
+
+被封的界面（`SensitiveScreens.match()`）：
+
+- **系统设置包**（`com.android.settings`、`com.android.settings.intelligence`、
+  `com.google.android.settings.intelligence`）：**只封「应用信息页」，不整包封**。
+  判据是**页面文字** —— `event.getClassName()` 实测经常是 `android.widget.FrameLayout` /
+  `Button` 这类根视图类，**不是**承载页面的 Activity 名，只按类名根本分不出
+  「设置首页」和「应用信息页」。命中条件（任一）：
+  1. 类名含 `appinfo` / `installedapp`，或类名含 `uninstall`；
+  2. 窗口文字里有「应用信息 / 应用详情 / App info / App details」；
+  3. 窗口文字里**同时**出现「强行停止」与「卸载」（只有应用信息页才同时有这两个按钮）。
+- **整包封**：`com.android.packageinstaller` / `com.google.android.packageinstaller` /
+  `com.miui.packageinstaller` / `com.samsung.android.packageinstaller`，
+  以及各 ROM 的「安全中心 / 应用管理」——`com.miui.securitycenter`、`com.huawei.systemmanager`、
+  `com.coloros.safecenter`、`com.oplus.safecenter`、`com.oppo.safe`、`com.vivo.permissionmanager`、
+  `com.iqoo.secure`、`com.samsung.android.lool`、`com.oneplus.security`。
+  这些包只干卸载 / 应用管理这一件事，不怕误伤；列表里不存在的包名不会命中，不影响别的机型。
+- **只按类名封**：`com.android.permissioncontroller` / `com.google.android.permissioncontroller`。
+  这两个包既承载运行时权限对话框，又在部分 ROM 上承载卸载确认界面；整包封会把本应用自己的
+  权限申请也推走（家长点「允许」的框一闪就没），所以只在类名里出现 `uninstall` 时才拦。
+
+> **收窄不会削弱防护**：加固开着时，改 Wi-Fi / 语言 / 日期时间 / 私有 DNS / VPN / 飞行模式
+> 本来就由设备所有者限制硬挡（§2.10 A 表），孩子点进设置首页也改不动。
+> 真正需要「用拦截补一层」的只有卸载与强行停止，而它们只在应用信息页上。
+
+被拦到时：`GLOBAL_ACTION_HOME` 退回桌面（**不是**按返回 —— 按返回只退一层，孩子还能从
+「设置 → 应用」一层层点进去），并写一条中文告警 + 发一条 `tamper` 设备事件。
+动作节流 800ms、日志 2s、**上报 60s**：内容变化事件很密，不节流会把家长端的消息刷屏。
+
+#### 放行窗口：不是可选项，是必需项
+
+本应用自己就要用系统设置页完成授权（无障碍开关、忽略电池优化、悬浮窗、使用情况访问、
+应用详情、激活设备管理器）。没有放行窗口的话，「一键开启权限」会把自己刚拉起来的页面立刻推走，
+家长看到的是「按钮点了没反应」。
+
+所以每个跳设置页的入口都先调 `SensitiveScreens.allowTemporarily(context, hint)`，开一张
+**45 秒**的通行证。窗口有两条约束，把它钉在「引导流程」里：
+
+1. **有时长**：45 秒后自动失效；
+2. **进入系统页面的那一刻，上一个前台应用必须还是本应用** ——
+   孩子从桌面/最近任务自己点进设置不算（`LockWatchdogService.updateSensitiveExcursion`）。
+   家长在系统页面里连续操作时自动续期（5 秒节流），免得读到一半被推走。
+   系统弹框（`permissioncontroller`、`com.android.vpndialogs`、`com.android.systemui`、`android`）
+   不算「离开」，否则「忽略电池优化」页上弹一次确认框就会被我们自己推回桌面。
+
+调用点共 7 处，全部带 `Context`：`MainActivity.openAccessibilitySettings()`（提示词
+`HINT_ACCESSIBILITY`）、`MainActivity` 电池白名单、`LockController.requestOverlayPermission()`、
+`LockController.requestAdmin()`、`AppUsageTracker.openSettings()`、
+`PermissionGranter.openAppDetails()`、`LongevityGuard.requestBatteryExemption()`。
+
+> **这一节同时修掉了一个自锁死**：加固默认是开的（`AgentStore.isHardeningEnabled()` 默认
+> `true`，且 `setHardeningEnabled` 至今无调用者），而原先无障碍设置页是**无条件**被按返回推走的。
+> 于是一旦无障碍被关掉（装包副作用、孩子手动关），唯一能重新打开它的入口也进不去了 ——
+> 这台设备从此永久失去看门狗，只能卸载重装。现在改成「只有从应用内点『去开启』才放行」。
+
+#### 验证这个功能时的坑（踩过一次，记下来）
+
+`adb install -r` 会把**已经启用**的无障碍服务踢下线，装完再写
+`settings put secure enabled_accessibility_services …` 也可能不生效。这时候所有拦截都不动，
+看起来像「功能失效」，其实是服务根本没绑上。踩过的一次现场：同一份 APK，重装后进系统设置
+**没有被拦、日志一条没有**；重新下发一次无障碍设置后立刻恢复正常（`拦截「系统设置」…已退回桌面`）。
+
+所以验证前必须回读绑定状态，而不是只看设置字符串：
+
+```
+adb shell dumpsys accessibility | grep "Bound services"
+```
+
+注意这一行打印的是**服务标签**`气球狗守护`（`Service[label=气球狗守护, … capabilities=129 …]`），
+**不是**类名 `LockWatchdogService` —— 按类名 grep 会一直「找不到」，把好状态误判成坏状态。
+另外 `capabilities=129` 本身就证明无障碍截图能力（`1<<7`）也在。
+
+按这个方法在 Android 13 模拟器上实测（`emulator-5554`，Android 13，设备所有者 `AgentAdminReceiver`，
+`hardening` 默认开）：
+
+| 操作 | 结果 |
+| --- | --- |
+| `am start -a android.settings.SETTINGS`（**设置首页，应当放行**） | 停在 `com.android.settings/.homepage.SettingsHomepageActivity` ✔ |
+| `am start -a android.settings.APPLICATION_DETAILS_SETTINGS -d package:com.balloondog.agent`（应用信息页） | 回到桌面，日志`敏感界面封锁：拦截「应用信息」（android.widget.FrameLayout），已退回桌面` |
+| `am start -a android.intent.action.DELETE -d package:com.balloondog.agent`（卸载界面） | 回到桌面 |
+
+第二条同时**印证了「必须靠窗口文字判定」这个设计**：事件给出的类名就是
+`android.widget.FrameLayout`，而不是 `.applications.InstalledAppDetails` 这类页面名 ——
+只按类名根本分不出设置首页与应用信息页。
+
+加固关掉时（`hardening_enabled` 删掉＝回到默认 `true`）上面后两条**都停在原页面**，
+日志`管控加固已关闭，放行「应用信息」（家长逃生通道）`；重新打开加固后又被拦下。
+改这个开关用的是 `run-as` 直接改
+`/data/data/com.balloondog.agent/shared_prefs/balloon_dog_agent_prefs.xml`。
+
+> **改 prefs 必须先让进程停下来写**：应用的 SharedPreferences 是一份内存快照，只要还有
+> 周期性写盘（心跳会写 `last_alive_at`），`run-as` 改完的文件在下一次 `apply()` 时就被整体
+> 覆盖回去，看起来就像「改不生效」。而且设备所有者身份下 `am force-stop` **无效**、
+> `pm clear` 会报 `does not have permission CLEAR_APP_USER_DATA`。
+> 可行做法：先在首页点「停止守护」（`agent_enabled=false`，服务与心跳一起停），
+> 再 `run-as` 改文件（此时能稳定生效），最后 `kill -9` 让系统重载进程读新文件。
+
+#### 诚实边界：这是「追赶」，不是「墙」
+
+- **有约 0.1 秒的时间差**：目标页面会先出现一小会儿再被推走。真正保证「卸不掉」的仍然是
+  §2.10 A 表那两条设备所有者限制（`DISALLOW_UNINSTALL_APPS` + `setUninstallBlocked`），
+  不要把这一节当成卸载防护的唯一依靠。
+- **没有家长身份验证**：`HINT_ACCESSIBILITY` 放行的是「无障碍设置页」这个页面本身，
+  不校验是谁点的。孩子在加固开启时点应用内那个「去开启」按钮，一样能进无障碍设置页。
+  原因是**应用内没有可靠的「家长已通过身份验证」信号** —— 孩子端本来就握在孩子手里，
+  用一道弹窗当门槛只会挡家长、不会挡孩子。代价说清楚：这一条是「拦得住顺手点设置，
+  拦不住有备而来的孩子」，与 §2.5.4「无障碍关掉后无法强制恢复」是同一个平台边界的两个侧面。
+- **应用信息页同样受放行窗口保护，而且这一条不只是无障碍页**：只要「进系统页面那一刻上一个
+  前台还是本应用」，`sensitiveExcursion` 就成立，应用信息页也会被放行（实测：先
+  `am start …/.ui.MainActivity` 再拉应用信息页 → 页面留在前台；直接从桌面拉起 → 被拦下并回到桌面）。
+  所以孩子点应用内的「去开启 / 应用详情」按钮一样能走到应用信息页。这不构成卸载缺口：
+  那一页上的「强行停止 / 卸载 / 清除数据」由受保护包与设备所有者限制挡着（§2.10 A 表）——
+  放行的是「看这一页」，不是「改这一页」。
+- **恢复出厂 / 进 Recovery**：拦不住（平台边界，见 §2.10 B 表）。
+- **加固关掉时整段放行**：`store.isHardeningEnabled() == false` 时只记一条日志、不拦。
+  这既是家长逃生通道，也意味着「管控加固」这个开关目前**还没有 UI 入口**，家长点不到它。
 
 ## 3. 构建与安装
 
@@ -791,7 +983,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 装好后：
 
-1. 打开「气球狗守护」，界面顶部会显示 **8 位绑定码**（例如 `RS4B63PG`）；
+1. 打开「气球狗守护」，界面顶部会显示 **8 位绑定码**（例如 `RS4B63PG`）——
+   它按**本机标识推导**而来（见 5.5.1），卸载重装后还是同一个，家长的绑定不会掉；
+   App 一打开就会自动连服务器注册，**不需要**先进设置页点一次保存；
 2. 点「申请采集权限」试拍一张，确认截图链路可用 —— 无障碍在跑时它走**免授权**路径，
    不会弹任何框；只有无障碍不可用时才会弹系统授权框（`MediaProjection` 兜底，见 10.5）；
 3. 点「激活设备管理器」（**必须**，否则 `lockNow()` 调不动，锁屏会退化成应用内遮罩）；
@@ -822,7 +1016,38 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell dpm set-device-owner com.balloondog.agent/.capability.AgentAdminReceiver
 ```
 
-设置成功后，「锁屏能力」一栏会显示 *设备所有者（最强…）*。
+设置成功后，「锁屏能力」一栏会显示 *设备所有者（最强…）*，首页「需要开启 → 防卸载保护」
+也会从「未开启」变绿。
+
+> **⚠️ 防卸载完全依赖这一条，没有备选方案。**
+> Android 不提供任何「普通应用阻止自己被卸载」的 API：设备管理器（Device Admin）只能锁屏，
+> 不能拦截卸载；被卸载后应用自己也无法自救（进程都没了）。真正做到「孩子卸不掉」只有
+> 设备所有者一条路，靠这三件事（代码在
+> [`OwnerHardening.java`](app/src/main/java/com/balloondog/agent/capability/OwnerHardening.java)：
+> `:100` 的 `DISALLOW_UNINSTALL_APPS`、`:213` 的 `setUninstallBlocked(admin, 自己, true)`、
+> `:226` 的 `setUserControlDisabledPackages`）：
+>
+> - `UserManager.DISALLOW_UNINSTALL_APPS`：设备级禁止卸载任何应用（含本应用），
+>   系统设置的「卸载」按钮直接置灰；
+> - `setUninstallBlocked(admin, 本应用, true)`：把本应用单独钉住，`pm uninstall` 会回
+>   `Failure [DELETE_FAILED_USER_RESTRICTED]`；
+> - `setUserControlDisabledPackages(admin, [本应用])`（API 30+）：让「应用信息」页里的
+>   **强行停止 / 清除数据**也点不动。
+>
+> **为什么家长会遇到「还是能卸载」**：`dpm set-device-owner` 只在设备**尚未添加任何账号**时
+> 才会成功，否则系统回 `Not allowed to set the device owner because there are already some
+> accounts on the device`。常见情形是 APK 装在一台已经在用的手机上，那就**永远不是设备所有者**，
+> 上面三条一条都不会生效 —— 这时系统里没有任何东西能挡住卸载。要么先恢复出厂设置、在开机
+> 引导里就先装好并执行上面这行命令，要么接受「防卸载不可用」。设备是否已是设备所有者可以
+> 现场确认：
+>
+> ```bash
+> adb shell dpm list-owners        # 期望看到 DeviceOwner{...com.balloondog.agent...}
+> adb shell dumpsys user | grep -i no_uninstall_apps   # 期望出现在 Effective restrictions 段
+> ```
+>
+> 首页的「防卸载保护」行与红色告警条读的正是 `LockController.isDeviceOwner()`，
+> 所以**界面上是「未开启」就说明确实没被保护**，不是显示问题。
 
 > **顺手把 `PROJECT_MEDIA` 放行（强烈建议，设备所有者之后执行）**：
 >
@@ -1016,6 +1241,12 @@ Android 14 规定：声明了 `camera` / `microphone` 类型的服务若缺少�
 配套的 `MainActivity.selfHealIfServiceDied()`：界面一打开发现「开过守护但服务没在跑」，
 就自动把它拉起来 —— 用户明明授权过，不该因为一次系统回收就永久失效。
 
+> ⚠️ `agent_enabled` 的**缺省值是 `true`**（`AgentStore.isAgentEnabled()`）。这个键唯一的
+> 存在意义是记录「家长显式停止过」；全新安装时它根本不存在。早期版本拿 `false` 当缺省，
+> 结果新装的设备打开 App 也不启动守护、必须进一次设置页点保存才活 —— 这是一个真实踩到过的
+> **首启死锁**（孩子端表现为「装上就永远离线」），别再改回去。另外 `AgentApp.onCreate()`
+> 会先 `ensureIdentity()`，让设备码在任何界面出现之前就确定下来。
+
 ### 5.5 设备被解绑后自动重新注册
 
 解绑会删掉服务端的设备行，设备令牌随即 401。协议没有「设备申诉」接口，
@@ -1026,6 +1257,38 @@ Android 14 规定：声明了 `camera` / `microphone` 类型的服务若缺少�
 > 唯一的例外：如果设备码被别人抢先注册、密钥对不上，服务端返回 403。
 > 这时客户端**不会**自动换身份（那会让家长端留下一台永远离线的幽灵设备），
 > 而是明确提示去「设置 → 重置设备身份」，由人决定。
+
+### 5.5.1 绑定码由设备标识推导，卸载重装不变
+
+绑定码**不再**是每次安装随机生成的。`AgentStore.ensureIdentity()` 用
+
+```
+seed   = Settings.Secure.ANDROID_ID + "|" + 本地盐
+码     = sha256("balloondog/device-code|"   + seed) 前 8 字节，各 % 32 映射到去混淆字母表
+密钥   = sha256("balloondog/device-secret|" + seed) 的 64 位十六进制
+```
+
+（32 个字符正好整除 256，取模不引入偏置；字母表去掉了 `0/O/1/I`，家长要手输。）
+
+- `ANDROID_ID` 在 Android 8+ 按「**签名密钥 + 用户 + 设备**」作用域，卸载重装、系统 OTA 都不变，
+  只有恢复出厂设置（或换签名）才会变。**注意应用拿到的值与 `adb shell settings get secure
+  android_id` 不是同一个**：前者是按签名派生的 SSAID，只能从
+  `/data/system/users/0/settings_ssaid.xml` 里读。
+- 本地盐只存在 SharedPreferences 里，只有家长点「重置设备身份」才会换新值
+  （`resetIdentity()` 先写一个新盐 —— 否则重置后推出来的码与原来一模一样，重置等于没做）。
+- 读不到 `ANDROID_ID` 的极少数 ROM 上退回原来的随机实现，功能可用但重装会变，日志里会写明
+  （`读不到本机标识，已退回随机设备码 …（卸载重装后会变）`）。
+
+于是卸载重装的流程变成：本机推出**同一套** `deviceCode + deviceSecret` →
+`POST /agent/register` 认出是同一台设备（`created: false`，令牌续订）→ 家长的绑定原样保留，
+不会再凭空多出一台永远离线的幽灵设备。
+
+> 验证方式（不必真的卸载）：先停掉守护，避免进程把内存里的 prefs 快照回写（做法见 §2.11 的
+> 方框），再 `run-as <pkg>` 删掉 `device_code` / `device_secret` / `device_token` / `device_id` / `bound` /
+> `identity_salt` / `agent_enabled` 七个键（等于全新安装），再让进程重载；
+> 用 Python 按上面的公式在外部复算一遍，码与密钥应当逐位一致（实测：SSAID
+> `a90da458651b3fcb` → 码 `GYD6ZLW9`、密钥 `2462d540…103d`，与设备上完全一致，
+> 且服务端返回 `created: false`、绑定未变）。
 
 ### 5.6 儿童隐私的基本尊重
 
@@ -1042,14 +1305,24 @@ Android 14 规定：声明了 `camera` / `microphone` 类型的服务若缺少�
 | --- | --- |
 | 运行状态 | 守护在不在跑、今日已用、启动/停止守护 |
 | 绑定家长 | 未绑定：**大字绑定码** + 二维码 + 复制按钮 + 「家长端 → 设备管理 → 绑定设备」；已绑定：压成一行 |
-| 需要开启 | 7 行待办 + 顶部「一键开启权限」 |
+| 需要开启 | 8 行待办 + 顶部「一键开启权限」+ 未开通设备所有者时的**显眼告警条** |
 | 应急与修复 | 应急解锁密码、立即自检并恢复守护 |
 | 高级 / 诊断（默认收起） | 权限与能力、防护与保活、加固逐项明细、服务器、日志 —— **原功能一条没删，只是不再挡在首屏** |
 
 「需要开启」的每一行 = 图标 + 名称 + 一句话原因 + **实时状态徽标** + 操作按钮，
-覆盖无障碍（置顶，它是锁定/拦截/免授权截图的前提）、运行时权限（合成一行显示 `N/M`）、
-悬浮窗、使用情况访问、电池优化白名单，以及两项**可选**能力（屏幕采集、网址拦截 ——
-家长没开时显示琥珀色「可选」，不写成「未开启」，避免制造焦虑）。
+覆盖**防卸载保护（置顶，需要「设备所有者」，详见 §3.4）**、无障碍（锁定/拦截/免授权截图的前提）、
+运行时权限（合成一行显示 `N/M`）、悬浮窗、使用情况访问、电池优化白名单，以及两项**可选**能力
+（屏幕采集、网址拦截 —— 家长没开时显示琥珀色「可选」，不写成「未开启」，避免制造焦虑）。
+
+> **为什么「防卸载保护」必须置顶并单独告警**：Android 不允许普通应用阻止自己被卸载，
+> 唯一手段是设备所有者 + `DISALLOW_UNINSTALL_APPS`/`setUninstallBlocked`（见 §3.4）。
+> 也就是说，**没开通设备所有者时，清单里其余项全绿也挡不住卸载**。
+> 早期版本把设备所有者只写在「高级 / 诊断 → 锁屏能力」里，家长看到首页
+> 「5/5 已开启」全绿就会以为防护已经生效 —— 这是实实在在的谎报，所以现在：
+> ①它计入必备项分母（`REQUIRED_TODO_COUNT = 6`）；②没开时在清单里显示红色告警条
+> `textTodoAlert`「防卸载未生效：现在孩子可以直接卸载本应用」；③只差它一项时，
+> 「一键开启权限」旁边的说明改成「未开启「设备所有者」，孩子可直接卸载本应用（需用电脑开通）」，
+> 而不会落到「权限都已开启，无需操作」。
 
 三处刻意的设计：
 
@@ -1057,7 +1330,7 @@ Android 14 规定：声明了 `camera` / `microphone` 类型的服务若缺少�
   `isConnected()`、运行时权限问 `PermissionGranter.missing()`、使用情况访问走
   `PermissionGranter.isSpecialGranted()`，`onResume()` 之后每 2 秒重渲染一次。
   验证方式是可复现的：`adb shell appops set com.balloondog.agent GET_USAGE_STATS ignore`
-  之后界面应从「5/5 已开启」变成「4/5 已开启」且该行变「未开启 / 去开启」，`allow` 后翻回来。
+  之后界面应从「6/6 已开启」变成「5/6 已开启」且该行变「未开启 / 去开启」，`allow` 后翻回来。
 - **无障碍既没开也没连上时显示「启动中」而不是「已开启」**：`isEnabledInSettings()` 读的是
   系统开关，服务重连的那几秒它可能为真而服务并未在跑，此时说「已开启」是在撒谎。
 - **「一键开启权限」以无障碍为前提**：无障碍没开时按钮直接置灰并写明「请先开启无障碍」——
@@ -1202,7 +1475,7 @@ android/
 | 应用审核（阻止安装） | ✅ 设备所有者下可以 | `OwnerHardening.syncInstallRestriction()` 开合 `DISALLOW_INSTALL_APPS`；非设备所有者时只记一条日志说明做不到。家长批准后靠 `/agent/config` 的 `installApprovalUntil` 自动开窗。**已上机验证**：设备所有者施加 `no_install_apps` 后孩子侧**真的装不了**（`dumpsys user` 可查），审批链路真的通（`appAudit.pendingApps` 非空 + pref `install_audit_last_at` 落盘 + 日志「安装审核申请已提交」）。**但走的是安装器的「卸载确认页」而不是真安装页** —— 真安装窗口无法从 adb 构造（安装器只声明 `content` scheme 的 filter，`file://` 解析不到，`content://` 被 URI 权限挡住）。卸载确认页走同一条 `INSTALLER_PACKAGES` 判定路径，所以判定逻辑被覆盖了，但「真实安装流程被拦」这一步**没有设备级证据** |
 | 安全区（电子围栏） | ⚠️ 只报事件，不阻止移动 | 本地 haversine 判定 + `geofence_enter`/`geofence_exit` 事件。它回答的是「孩子现在不在安全区」，**不是**「拦住孩子不让他走」——设备端没有任何手段阻止物理移动 |
 | 通话记录 / 短信 | ⚠️ 已实现，受权限与审核限制 | `READ_CALL_LOG` / `READ_SMS` 是受限权限；读不到 RCS/端到端加密的聊天内容。0 条时跳过上报（服务端对空数组返回 422） |
-| 隐藏桌面图标 | ⚠️ 可以隐藏，但本机就没有入口了 | `activity-alias` 禁用（`DONT_KILL_APP`，避免顺带重启无障碍守卫）。隐藏后只能靠家长端远程恢复或 `adb shell pm enable com.balloondog.agent/.MainActivityLauncher` |
+| 隐藏桌面图标 | ⚠️ 可以隐藏，本机只留一个拨号暗码入口 | `activity-alias` 禁用（`DONT_KILL_APP`，避免顺带重启无障碍守卫）。**默认就是隐藏**（`ChildDevice.hideIcon` 建表默认 `true`，见 `server/prisma/migrations/20261013214520_hide_icon_default_true`，该迁移同时回填存量设备）。图标隐藏后本机仍有入口：在系统拨号盘输入 `*#*#2887#*#*`（`SecretCodeReceiver`，`action=android.provider.Telephony.SECRET_CODE` + `data=android_secret_code://2887`），主界面与设置页都会把这个号告诉家长；家长端也可以远程恢复；应急时还有 `adb shell pm enable com.balloondog.agent/.MainActivityLauncher` |
 | 环境监听（持续录音） | ⚠️ 可见、不自恢复 | 每 5 分钟一段循环上传，前台通知固定写「家长开启了环境监听」，**不做隐蔽录音**。进程被杀后不会自动恢复（避免变成没人知道的常驻窃听） |
 | 远程协助 | ⚠️ 是「远程操作」，不是投屏 | 只做返回/主页/最近任务/通知栏/打开应用；不含实时投屏，也不注入触摸。无障碍未连接时如实失败并提示家长去系统设置重开 |
 | 防止孩子改系统时间绕过作息 | ✅ 设备所有者下可以 | `DISALLOW_CONFIG_DATE_TIME`。否则改时间确实能绕过时间表 |

@@ -7,7 +7,11 @@ import { SchedulePage } from './pages/SchedulePage'
 import { LoginPage } from './pages/LoginPage'
 import { OnboardingPage } from './pages/OnboardingPage'
 import { DeviceManagePage } from './pages/DeviceManagePage'
+import { MemberOnlyPage } from './components/MemberOnlyPage'
 import { MediaPage } from './pages/MediaPage'
+import { InsightsConfigPage } from './pages/InsightsConfigPage'
+import { MembershipPage } from './pages/MembershipPage'
+import { ReferralPage } from './pages/ReferralPage'
 import { InsightsPage } from './pages/InsightsPage'
 import { ModePage } from './pages/ModePage'
 import { ModeSchedulePage } from './pages/ModeSchedulePage'
@@ -128,7 +132,14 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <RequireDevice>
-                <MediaPage />
+                <MemberOnlyPage
+                  entitlementKey="remoteMonitor"
+                  title="媒体"
+                  gateTitle="远程监控是会员功能"
+                  gateDescription="开通会员后，可以查看孩子设备上报的照片、截图与录音。"
+                >
+                  <MediaPage />
+                </MemberOnlyPage>
             </RequireDevice>
             </ProtectedRoute>
           }
@@ -149,6 +160,42 @@ function AppShell() {
             <ProtectedRoute>
               <RequireDevice>
                 <InsightsPage />
+            </RequireDevice>
+            </ProtectedRoute>
+          }
+        />
+        {/*
+          会员中心。**故意不套 RequireDevice**：绑设备属于会员权益，
+          但充值本身不能要求先绑设备，否则新用户会卡在「先绑设备才能买会员、
+          买会员才能绑第二台设备」的死循环里。
+        */}
+        <Route
+          path="/membership"
+          element={
+            <ProtectedRoute>
+              <MembershipPage />
+            </ProtectedRoute>
+          }
+        />
+        {/*
+          邀请返现。同样不套 RequireDevice：分享提成是「拉新」动作，
+          新账号还没绑设备时就应该能拿到自己的邀请码和链接。
+        */}
+        <Route
+          path="/referral"
+          element={
+            <ProtectedRoute>
+              <ReferralPage />
+            </ProtectedRoute>
+          }
+        />
+        {/* 洞察配置独立成页；入口是洞察页标题栏的「配置」按钮 */}
+        <Route
+          path="/insights/config"
+          element={
+            <ProtectedRoute>
+              <RequireDevice>
+                <InsightsConfigPage />
             </RequireDevice>
             </ProtectedRoute>
           }
@@ -231,7 +278,14 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <RequireDevice>
-                <CallSmsPage />
+                <MemberOnlyPage
+                  entitlementKey="remoteMonitor"
+                  title="通话与短信"
+                  gateTitle="通话与短信是会员功能"
+                  gateDescription="开通会员后，可以查看孩子设备的通话记录与短信。"
+                >
+                  <CallSmsPage />
+                </MemberOnlyPage>
             </RequireDevice>
             </ProtectedRoute>
           }
@@ -242,7 +296,14 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <RequireDevice>
-                <RemoteHelpPage />
+                <MemberOnlyPage
+                  entitlementKey="remoteMonitor"
+                  title="远程协助"
+                  gateTitle="远程协助是会员功能"
+                  gateDescription="开通会员后，可以通过远程协助帮孩子操作手机。"
+                >
+                  <RemoteHelpPage />
+                </MemberOnlyPage>
             </RequireDevice>
             </ProtectedRoute>
           }

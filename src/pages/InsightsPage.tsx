@@ -4,13 +4,8 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
+import { AppIcon } from '@/components/AppIcon'
+import { MembershipGate } from '@/components/MembershipGate'
 import { toast } from 'sonner'
 import {
   AlertTriangle,
@@ -21,30 +16,27 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
-  Eye,
-  EyeOff,
   Film,
   Gamepad2,
   ImageOff,
-  Info,
   Loader2,
-  Pencil,
-  Plus,
   RefreshCw,
   Shield,
+  SlidersHorizontal,
   Sparkles,
-  Trash2,
+  Timer,
 } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
+import { useMembership } from '@/hooks/useMembership'
 import { FeatureTip } from '@/components/FeatureTip'
 import type {
+  Features,
   Insight,
   InsightDetail,
   InsightFrame,
   InsightListResponse,
   InsightRiskLevel,
   ScreenMonitorConfig,
-  ScreenMonitorConfigPatch,
   UsageAlert,
   UsageAlertSeverity,
   UsageAlertType,
@@ -94,35 +86,10 @@ const BUDGET_KIND_META: Record<UsageBudgetKind, { label: string; unit: string; d
   video_episode: { label: '动画集数', unit: '集', desc: '今天最多能看完几集动画', icon: Film },
 }
 
-/** 数值型设置项的合法区间，与后端 zod 校验保持一致 */
-const NUMBER_RULES = {
-  captureIntervalSeconds: { min: 10, max: 600, label: '截屏间隔', unit: '秒' },
-  framesPerBatch: { min: 2, max: 30, label: '每包张数', unit: '张' },
-  analyzeSampleCount: { min: 1, max: 20, label: '采样张数', unit: '张' },
-  retentionDays: { min: 1, max: 90, label: '留档天数', unit: '天' },
-} as const
-
-type NumberFieldKey = keyof typeof NUMBER_RULES
-
-const ALERT_SWITCHES: { key: keyof ScreenMonitorConfig; label: string; desc: string }[] = [
-  { key: 'alertMinorContent', label: '不适龄内容', desc: '出现暴力、成人等内容时提醒' },
-  { key: 'alertScam', label: '疑似诈骗', desc: '出现刷单、返利、转账等话术时提醒' },
-  { key: 'alertEmotional', label: '情绪问题', desc: '出现自伤、霸凌、极端情绪内容时提醒' },
-  { key: 'alertGameAddiction', label: '游戏沉迷', desc: '连续多局游戏或长时间在线时提醒' },
-  { key: 'alertHighSpending', label: '高额消费', desc: '出现充值、打赏、付款界面时提醒' },
-]
-
 interface FilterState {
   onlyRisky: boolean
   alertType: UsageAlertType | ''
   unreadOnly: boolean
-}
-
-interface BudgetFormState {
-  kind: UsageBudgetKind
-  appName: string
-  dailyLimit: string
-  enabled: boolean
 }
 
 function padTwo(value: number): string {
@@ -186,37 +153,6 @@ function sortAlerts(items: UsageAlert[]): UsageAlert[] {
 }
 
 /** 开关：与 HomePage / SchedulePage 保持同一套样式与无障碍语义 */
-function Toggle({
-  checked,
-  disabled,
-  label,
-  onChange,
-}: {
-  checked: boolean
-  disabled?: boolean
-  label: string
-  onChange: () => void
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      disabled={disabled}
-      onClick={onChange}
-      className="w-11 h-6 rounded-full relative flex-shrink-0 ml-2 disabled:opacity-50"
-    >
-      <span
-        className={`absolute w-5 h-5 rounded-full top-0.5 bg-white shadow transition-all ${
-          checked ? 'right-0.5' : 'left-0.5'
-        }`}
-      />
-      <span className={`block w-full h-full rounded-full ${checked ? 'bg-[#07c160]' : 'bg-gray-300'}`} />
-    </button>
-  )
-}
-
 /** 一条异常提醒。evidence 一定要露出来，家长据此判断是不是误报。 */
 function AlertCard({
   alert,
@@ -285,6 +221,7 @@ function AlertCard({
 export function InsightsPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  const { isSuper } = useMembership()
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -292,6 +229,7 @@ export function InsightsPage() {
   const [usage, setUsage] = useState<UsageSummary | null>(null)
   const [config, setConfig] = useState<ScreenMonitorConfig | null>(null)
   const [budgets, setBudgets] = useState<UsageBudget[]>([])
+  const [features, setFeatures] = useState<Features | null>(null)
   const [insightData, setInsightData] = useState<InsightListResponse | null>(null)
   const [alerts, setAlerts] = useState<UsageAlert[]>([])
   const [alertUnread, setAlertUnread] = useState(0)
@@ -300,13 +238,6 @@ export function InsightsPage() {
   const [alertType, setAlertType] = useState<UsageAlertType | ''>('')
   const [unreadOnly, setUnreadOnly] = useState(false)
 
-  /** 数值型设置项需要本地草稿，避免每敲一位就发一次请求 */
-  const [numberDrafts, setNumberDrafts] = useState<Record<NumberFieldKey, string>>({
-    captureIntervalSeconds: '30',
-    framesPerBatch: '10',
-    analyzeSampleCount: '6',
-    retentionDays: '7',
-  })
   const [busyKey, setBusyKey] = useState<string | null>(null)
 
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -314,40 +245,34 @@ export function InsightsPage() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [rawOpen, setRawOpen] = useState(false)
 
-  const [budgetDialogOpen, setBudgetDialogOpen] = useState(false)
-  const [editingBudget, setEditingBudget] = useState<UsageBudget | null>(null)
-  const [budgetForm, setBudgetForm] = useState<BudgetFormState>({
-    kind: 'game_round',
-    appName: '',
-    dailyLimit: '3',
-    enabled: true,
-  })
-  const [budgetFormError, setBudgetFormError] = useState<string | null>(null)
-  const [submittingBudget, setSubmittingBudget] = useState(false)
-  const [removeBudgetTarget, setRemoveBudgetTarget] = useState<UsageBudget | null>(null)
-
   const loadAll = useCallback(async (filters: FilterState, options?: { silent?: boolean }) => {
+    /*
+      非超级会员直接跳过：这页有 6 个接口，服务端个个都会 403，
+      跑一遍只会在 Network 面板刷一屏红、再在 console 里打 6 条日志。
+      页面本身会被下面的 MembershipGate 接管，不需要这些数据。
+    */
+    if (!isSuper) {
+      setLoading(false)
+      return
+    }
     try {
-      const [summaryData, configData, budgetData, insightRes, alertRes] = await Promise.all([
-        api.getUsageSummary(),
-        api.getScreenMonitorConfig(),
-        api.getUsageBudgets(),
-        api.getInsights({ limit: 30, onlyRisky: filters.onlyRisky }),
-        api.getAlerts({
-          limit: 50,
-          type: filters.alertType || undefined,
-          unreadOnly: filters.unreadOnly,
-        }),
-      ])
+      const [summaryData, configData, budgetData, insightRes, alertRes, featuresData] =
+        await Promise.all([
+          api.getUsageSummary(),
+          api.getScreenMonitorConfig(),
+          api.getUsageBudgets(),
+          api.getInsights({ limit: 30, onlyRisky: filters.onlyRisky }),
+          api.getAlerts({
+            limit: 50,
+            type: filters.alertType || undefined,
+            unreadOnly: filters.unreadOnly,
+          }),
+          api.getFeatures(),
+        ])
       setUsage(summaryData)
       setConfig(configData)
-      setNumberDrafts({
-        captureIntervalSeconds: String(configData.captureIntervalSeconds),
-        framesPerBatch: String(configData.framesPerBatch),
-        analyzeSampleCount: String(configData.analyzeSampleCount),
-        retentionDays: String(configData.retentionDays),
-      })
       setBudgets(budgetData.items ?? [])
+      setFeatures(featuresData)
       setInsightData(insightRes)
       setAlerts(alertRes.items ?? [])
       setAlertUnread(alertRes.unread ?? 0)
@@ -360,7 +285,7 @@ export function InsightsPage() {
     } finally {
       setLoading(false)
     }
-  }, [t])
+  }, [t, isSuper])
 
   useEffect(() => {
     void loadAll({ onlyRisky: false, alertType: '', unreadOnly: false })
@@ -368,35 +293,6 @@ export function InsightsPage() {
 
   const reload = (options?: { silent?: boolean }) =>
     loadAll({ onlyRisky, alertType, unreadOnly }, options)
-
-  // ---------------- 截屏与 AI 设置 ----------------
-
-  const saveConfig = async (patch: ScreenMonitorConfigPatch, successText: string, key: string) => {
-    setBusyKey(key)
-    try {
-      await api.updateScreenMonitorConfig(patch)
-      toast.success(successText)
-      await reload({ silent: true })
-    } catch (err) {
-      toast.error(toUserMessage(err, t('保存失败，请稍后重试')))
-      console.error('保存截屏与 AI 设置失败：', err)
-    } finally {
-      setBusyKey(null)
-    }
-  }
-
-  const handleNumberBlur = async (field: NumberFieldKey) => {
-    const rule = NUMBER_RULES[field]
-    const raw = numberDrafts[field]
-    const value = Number.parseInt(raw, 10)
-    if (!Number.isFinite(value) || value < rule.min || value > rule.max) {
-      toast.error(t('{{v0}}需在 {{v1}} ~ {{v2}} {{v3}}之间', { v0: t(rule.label), v1: rule.min, v2: rule.max, v3: t(rule.unit) }))
-      setNumberDrafts((current) => ({ ...current, [field]: String(config?.[field] ?? rule.min) }))
-      return
-    }
-    if (value === config?.[field]) return
-    await saveConfig({ [field]: value }, t('{{v0}}已设为 {{v1}} {{v2}}', { v0: t(rule.label), v1: value, v2: t(rule.unit) }), field)
-  }
 
   // ---------------- 异常提醒 ----------------
 
@@ -485,82 +381,40 @@ export function InsightsPage() {
     }
   }
 
-  // ---------------- 用量上限 ----------------
-
-  const openBudgetDialog = (kind: UsageBudgetKind, budget?: UsageBudget) => {
-    setEditingBudget(budget ?? null)
-    setBudgetForm({
-      kind,
-      appName: budget?.appName ?? '',
-      dailyLimit: String(budget?.dailyLimit ?? (kind === 'game_round' ? 3 : 2)),
-      enabled: budget?.enabled ?? true,
-    })
-    setBudgetFormError(null)
-    setBudgetDialogOpen(true)
-  }
-
-  const handleSubmitBudget = async () => {
-    const limit = Number.parseInt(budgetForm.dailyLimit, 10)
-    if (!Number.isFinite(limit) || limit < 1 || limit > 200) {
-      setBudgetFormError('每日上限需在 1 ~ 200 之间')
-      return
-    }
-    setSubmittingBudget(true)
-    setBudgetFormError(null)
-    try {
-      await api.upsertUsageBudget({
-        kind: budgetForm.kind,
-        appName: budgetForm.appName.trim(),
-        dailyLimit: limit,
-        enabled: budgetForm.enabled,
-      })
-      toast.success(t('{{v0}}上限已保存', { v0: kindLabel(budgetForm.kind) }))
-      setBudgetDialogOpen(false)
-      setEditingBudget(null)
-      await reload({ silent: true })
-    } catch (err) {
-      const message = toUserMessage(err, t('保存用量上限失败'))
-      setBudgetFormError(message)
-      toast.error(message)
-      console.error('保存用量上限失败：', err)
-    } finally {
-      setSubmittingBudget(false)
-    }
-  }
-
-  const handleToggleBudget = async (budget: UsageBudget) => {
-    setBusyKey(`budget-${budget.id}`)
-    try {
-      await api.upsertUsageBudget({
-        kind: budget.kind,
-        appName: budget.appName,
-        dailyLimit: budget.dailyLimit,
-        enabled: !budget.enabled,
-      })
-      toast.success(budget.enabled ? t('上限已停用') : t('上限已启用'))
-      await reload({ silent: true })
-    } catch (err) {
-      toast.error(toUserMessage(err, t('操作失败，请稍后重试')))
-      console.error('切换用量上限失败：', err)
-    } finally {
-      setBusyKey(null)
-    }
-  }
-
-  const handleRemoveBudget = async () => {
-    if (!removeBudgetTarget) return
-    try {
-      await api.deleteUsageBudget(removeBudgetTarget.id)
-      toast.success(t('用量上限已删除'))
-      setRemoveBudgetTarget(null)
-      await reload({ silent: true })
-    } catch (err) {
-      toast.error(toUserMessage(err, t('删除失败，请稍后重试')))
-      console.error('删除用量上限失败：', err)
-    }
-  }
-
   // ---------------- 渲染 ----------------
+
+  /*
+    AI 洞察整页是超级会员权益，所以门禁放在所有 loading / error 分支之前 ——
+    否则普通账号会先看到一屏「加载中...」再跳成升级卡片，闪一下很廉价。
+    注意仍然照常调用 useMembership() 之类的 hook，只是提前 return。
+  */
+  if (!isSuper) {
+    return (
+      <div className="page-shell page-shell--wide">
+        <div className="page-header flex items-center border-b border-gray-200 bg-white px-4 py-3 [@media(max-height:520px)]:py-2 sm:px-5">
+          <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
+            <ArrowLeft className="w-5 h-5" />
+          </Button>
+          <h1 className="text-xl font-medium text-gray-900 flex-1">{t('AI 洞察')}</h1>
+        </div>
+        <div className="px-3 py-4 sm:px-4">
+          <MembershipGate
+            entitlementKey="aiInsight"
+            title={t('AI 洞察是超级会员功能')}
+            description={t(
+              '开通超级会员后，可以查看孩子的屏幕洞察结论、异常提醒与用量分析。普通账号的基础管控（锁屏、时间规划、应用限制）不受影响。',
+            )}
+          />
+          {/*
+            升级卡片里也挂上这条提示：它是「每个功能页首次打开都有一句话说明」的一部分，
+            而且说的正是家长最关心的隐私口径（看不到原图），
+            放在决定要不要开通的位置比放在开通之后更有用。
+          */}
+          <FeatureTip id="insights" text={t('截图按留档天数自动删除；家长端只能看到「时间 + 应用名」的帧时间线，看不到原图。')} />
+        </div>
+      </div>
+    )
+  }
 
   if (loading) {
     return (
@@ -601,6 +455,10 @@ export function InsightsPage() {
 
   const gameUsed = usage?.used?.game_round ?? 0
   const videoUsed = usage?.used?.video_episode ?? 0
+  const timeLimit = features?.timePlan.dailyLimit ?? 0
+  const timeUsed = features?.timePlan.usedToday ?? 0
+  const insightsOn = features?.screenMonitor.enabled ?? false
+
   const enabledBudgets: UsageSummaryBudget[] = usage?.budgets ?? []
   const tightest = enabledBudgets.reduce<UsageSummaryBudget | null>(
     (acc, budget) => (acc === null || budget.remaining < acc.remaining ? budget : acc),
@@ -619,6 +477,14 @@ export function InsightsPage() {
           <ArrowLeft className="w-5 h-5" />
         </Button>
         <h1 className="text-xl font-medium text-gray-900 flex-1">{t('AI 洞察')}</h1>
+        <button
+          type="button"
+          onClick={() => navigate('/insights/config')}
+          className="mr-1 flex items-center gap-1 rounded-lg bg-gray-50 px-2.5 py-1.5 text-xs font-medium text-gray-600 active:bg-gray-100"
+        >
+          <SlidersHorizontal className="w-4 h-4" />
+          {t('配置')}
+        </button>
         <HeaderRefreshButton onRefresh={() => reload({ silent: true })} />
       </div>
 
@@ -830,328 +696,6 @@ export function InsightsPage() {
             {t('提醒按紧急程度排序（高危在前）。结论均为模型推断，有疑问请先和孩子沟通。')}
           </p>
         )}
-      </div>
-
-      {/* ---------------- 截屏与 AI 设置 ---------------- */}
-      <div className="px-3 mt-3">
-        <div className="mb-2 px-1">
-          <span className="text-sm font-medium text-gray-500">{t('截屏与 AI 设置')}</span>
-        </div>
-
-        <Card className="overflow-hidden">
-          {/* 截屏总开关：最高敏感度权限，默认关闭 */}
-          <div className="flex items-center py-3 px-4">
-            <div
-              className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                config?.captureEnabled ? 'bg-indigo-50' : 'bg-gray-50'
-              }`}
-            >
-              {config?.captureEnabled ? (
-                <Eye className="w-5 h-5 text-indigo-500" />
-              ) : (
-                <EyeOff className="w-5 h-5 text-gray-400" />
-              )}
-            </div>
-            <div className="flex-1 min-w-0 ml-3">
-              <div className="font-medium text-gray-900 text-sm">{t('开启截屏采集')}</div>
-              <div className="text-xs text-gray-400 mt-0.5">
-                {config?.captureEnabled ? t('已开启，设备会周期性上传屏幕画面') : t('默认关闭，开启前请阅读下方隐私说明')}
-              </div>
-            </div>
-            <Toggle
-              checked={config?.captureEnabled ?? false}
-              disabled={busyKey === 'captureEnabled' || !config}
-              label={t('截屏采集开关')}
-              onChange={() => {
-                if (!config) return
-                void saveConfig(
-                  { captureEnabled: !config.captureEnabled },
-                  !config.captureEnabled ? t('截屏采集已开启') : t('截屏采集已关闭'),
-                  'captureEnabled',
-                )
-              }}
-            />
-          </div>
-
-          {config && (
-            /* 手动截图**不**要求「屏幕洞察」开关，所以这里刻意只判 config 是否加载完，
-               不判 captureEnabled：截图是「按一次看一次」，和这一页的周期采集 + AI 分析不是
-               同一件事，后端也已撤掉门禁。能不能截到由孩子端的无障碍服务决定，截不到时
-               下发结果里会带设备回报的真实原因。 */
-            
-            <div className="mx-4 mb-3 flex items-center justify-between gap-3 border-t border-gray-50 pt-3">
-                <div className="text-xs text-gray-400 leading-relaxed">
-                  {t('想立刻看当前画面？点右侧下发一次截图，结果在「媒体」页。')}
-                </div>
-                <button
-                  type="button"
-                  disabled={busyKey === 'manualShot'}
-                  onClick={() => {
-                    void (async () => {
-                      setBusyKey('manualShot')
-                      try {
-                        await api.screenshot()
-                        toast.success(t('截图指令已下发，稍后到「媒体」页查看'))
-                      } catch (err: unknown) {
-                        toast.error(toUserMessage(err, t('截图指令下发失败')))
-                      } finally {
-                        setBusyKey(null)
-                      }
-                    })()
-                  }}
-                  className="flex-shrink-0 text-sm text-[#07c160] font-medium px-3 py-1.5 rounded-lg bg-green-50 active:bg-green-100 disabled:opacity-50"
-                >
-                  {t('立即截图')}
-                </button>
-              </div>
-          )}
-
-          {config?.captureEnabled && (
-            <div className="mx-4 mb-3 bg-red-50 border border-red-200 rounded-lg p-3">
-              <div className="flex items-start space-x-2">
-                <AlertTriangle className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
-                <div className="text-xs text-red-700 leading-relaxed space-y-1">
-                  <p className="font-medium text-sm">{t('开启后请注意：')}</p>
-                  <p>{t('· 孩子设备的屏幕画面会被')}<b>{t('周期性采集')}</b>{t('（当前每')} {config.captureIntervalSeconds}{t('秒一张， 每')}{config.framesPerBatch} {t('张打成一个包）。')}
-                  </p>
-                  <p>{t('· 截图会')}<b>{t('发送至 AI 服务进行分析')}</b>{t('，用于识别内容、统计局数与集数并生成提醒。')}
-                  </p>
-                  <p>{t('· 截图按')}<b>{t('留档')} {config.retentionDays} {t('天')}</b>{t('后自动删除，家长端')}<b>{t('不展示截图原图')}</b>{t('（儿童隐私约定），只能看到帧时间线（时间 + 应用名）。')}</p>
-                  <p>{t('· 确有需要时再开启，并事先告知孩子。')}</p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="mx-4 border-t border-gray-100" />
-
-          {/* 数值参数 */}
-          <div className="px-4 py-3 space-y-3">
-            {(Object.keys(NUMBER_RULES) as NumberFieldKey[]).map((field) => {
-              const rule = NUMBER_RULES[field]
-              return (
-                <div key={field} className="flex items-center space-x-2">
-                  <div className="flex-1 min-w-0">
-                    <span className="text-sm text-gray-700">{t(rule.label)}</span>
-                    <span className="text-[11px] text-gray-400 ml-1.5">
-                      {rule.min} ~ {rule.max} {t(rule.unit)}
-                    </span>
-                  </div>
-                  <input
-                    type="number"
-                    min={rule.min}
-                    max={rule.max}
-                    value={numberDrafts[field]}
-                    onChange={(e) =>
-                      setNumberDrafts((current) => ({ ...current, [field]: e.target.value }))
-                    }
-                    onBlur={() => void handleNumberBlur(field)}
-                    disabled={busyKey === field}
-                    aria-label={t(rule.label)}
-                    className="w-20 border border-gray-300 rounded-lg px-3 py-2 text-sm text-right focus:outline-none focus:border-[#07c160] disabled:bg-gray-50"
-                  />
-                  <span className="text-sm text-gray-500 w-6">{t(rule.unit)}</span>
-                </div>
-              )
-            })}
-          </div>
-
-          <div className="mx-4 border-t border-gray-100" />
-
-          {/* AI 分析开关与采样数 */}
-          <div className="flex items-center py-3 px-4">
-            <div className="flex-1 min-w-0">
-              <div className="font-medium text-gray-900 text-sm">{t('开启 AI 分析')}</div>
-              <div className="text-xs text-gray-400 mt-0.5">
-                {isAi ? t('已配置视觉模型，会对截图做真实分析') : t('模型未就绪，开启后仍只会做启发式推断')}
-              </div>
-            </div>
-            <Toggle
-              checked={config?.analyzeEnabled ?? false}
-              disabled={busyKey === 'analyzeEnabled' || !config}
-              label={t('AI 分析开关')}
-              onChange={() => {
-                if (!config) return
-                void saveConfig(
-                  { analyzeEnabled: !config.analyzeEnabled },
-                  !config.analyzeEnabled ? t('AI 分析已开启') : t('AI 分析已关闭'),
-                  'analyzeEnabled',
-                )
-              }}
-            />
-          </div>
-
-          <div className="mx-4 border-t border-gray-100" />
-
-          {/* 用屏幕内容出题 */}
-          <div className="flex items-center py-3 px-4">
-            <div className="flex-1 min-w-0">
-              <div className="font-medium text-gray-900 text-sm">{t('用屏幕内容出题')}</div>
-              <div className="text-xs text-gray-400 mt-0.5">
-                {config?.quizFromScreen
-                  ? t('答题解锁会用屏幕内容出题')
-                  : t('答题解锁只从题库取题')}
-              </div>
-            </div>
-            <Toggle
-              checked={config?.quizFromScreen ?? false}
-              disabled={busyKey === 'quizFromScreen' || !config}
-              label={t('用屏幕内容出题开关')}
-              onChange={() => {
-                if (!config) return
-                void saveConfig(
-                  { quizFromScreen: !config.quizFromScreen },
-                  !config.quizFromScreen ? t('已开启屏幕出题') : t('已关闭屏幕出题'),
-                  'quizFromScreen',
-                )
-              }}
-            />
-          </div>
-
-          <div className="mx-4 border-t border-gray-100" />
-
-          {/* 5 类提醒开关 */}
-          <div className="px-4 py-3">
-            <p className="text-xs text-gray-400 mb-1">{t('异常提醒类型')}</p>
-            {ALERT_SWITCHES.map((item, index) => (
-              <div key={String(item.key)}>
-                <div className="flex items-center py-2.5">
-                  <div className="flex-1 min-w-0">
-                    <span className="text-sm text-gray-800">{t(item.label)}</span>
-                    <p className="text-[11px] text-gray-400 mt-0.5">{t(item.desc)}</p>
-                  </div>
-                  <Toggle
-                    checked={Boolean(config?.[item.key])}
-                    disabled={busyKey === String(item.key) || !config}
-                    label={t('{{v0}}提醒开关', { v0: t(item.label) })}
-                    onChange={() => {
-                      if (!config) return
-                      const current = Boolean(config[item.key])
-                      void saveConfig(
-                        { [item.key]: !current },
-                        t('{{v0}}提醒{{v1}}', { v0: t(item.label), v1: current ? t('已关闭') : t('已开启') }),
-                        String(item.key),
-                      )
-                    }}
-                  />
-                </div>
-                {index < ALERT_SWITCHES.length - 1 && <div className="border-t border-gray-100" />}
-              </div>
-            ))}
-          </div>
-        </Card>
-
-        <div className="mt-2">
-          <div className="bg-white rounded-lg p-3 border border-gray-100">
-            <div className="flex items-start space-x-2">
-              <Info className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
-              <p className="text-xs text-gray-500 leading-relaxed">{t('这些开关都作用在孩子端，改动立即保存；设备下次上报时生效。关闭截屏后不再产生新的洞察批次。')}</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ---------------- 用量上限 ---------------- */}
-      <div className="px-3 mt-3">
-        <div className="mb-2 px-1">
-          <span className="text-sm font-medium text-gray-500">{t('用量上限')}</span>
-        </div>
-
-        <Card className="overflow-hidden">
-          {(Object.keys(BUDGET_KIND_META) as UsageBudgetKind[]).map((kind, kindIndex) => {
-            const meta = BUDGET_KIND_META[kind]
-            const KindIcon = meta.icon
-            const rows = budgets.filter((budget) => budget.kind === kind)
-            return (
-              <div key={kind}>
-                <div className="flex items-center px-4 pt-3 pb-2">
-                  <div className="w-10 h-10 rounded-lg bg-gray-50 flex items-center justify-center flex-shrink-0">
-                    <KindIcon className="w-5 h-5 text-gray-500" />
-                  </div>
-                  <div className="flex-1 min-w-0 ml-3">
-                    <div className="font-medium text-gray-900 text-sm">{t(meta.label)}</div>
-                    <div className="text-xs text-gray-400 mt-0.5">{t(meta.desc)}</div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => openBudgetDialog(kind)}
-                    className="text-xs text-[#07c160] flex items-center flex-shrink-0"
-                  >
-                    <Plus className="w-3.5 h-3.5 mr-0.5" />
-                    {t('设置')}
-                  </button>
-                </div>
-
-                {rows.length === 0 ? (
-                  <p className="px-4 pb-3 text-xs text-gray-400">
-                    {t('还没有设置')}{t(meta.label)}{t('上限，今天可无限')}{kind === 'game_round' ? t('玩') : t('看')}。
-                  </p>
-                ) : (
-                  rows.map((budget) => {
-                    const summary = enabledBudgets.find((entry) => entry.id === budget.id)
-                    const usedToday = summary?.usedToday ?? budget.usedToday
-                    const exceeded = summary?.exceeded ?? usedToday >= budget.dailyLimit
-                    // 同一类型可能同时存在「全部应用」和「指定应用」两条，无障碍标签要能区分
-                    const scope = budget.appName || t('全部应用')
-                    return (
-                      <div key={budget.id} className="flex items-center px-4 py-2.5">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center flex-wrap gap-1.5">
-                            <span className="text-sm text-gray-900">{scope}</span>
-                            {!budget.enabled && (
-                              <Badge className="bg-gray-100 text-gray-500 text-[10px]">{t('已停用')}</Badge>
-                            )}
-                            {budget.enabled && exceeded && (
-                              <Badge className="bg-red-100 text-red-700 text-[10px]">{t('已达上限')}</Badge>
-                            )}
-                          </div>
-                          <p className="text-[11px] text-gray-400 mt-0.5">
-                            {t('今日已用')} {usedToday} {t(meta.unit)}{t('/ 上限')}{budget.dailyLimit} {t(meta.unit)}
-                            {budget.enabled && summary ? t('（剩余 {{v0}}）', { v0: summary.remaining }) : ''}
-                          </p>
-                          {budget.enabled && exceeded && (
-                            <p className="text-[11px] text-red-600 mt-0.5">
-                              {t('已达上限，将自动下发锁屏指令')}
-                            </p>
-                          )}
-                        </div>
-
-                        <Toggle
-                          checked={budget.enabled}
-                          disabled={busyKey === `budget-${budget.id}`}
-                          label={t('{{v0}}上限开关（{{v1}}）', { v0: t(meta.label), v1: scope })}
-                          onChange={() => void handleToggleBudget(budget)}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => openBudgetDialog(kind, budget)}
-                          className="text-gray-300 hover:text-[#07c160] p-1.5 ml-1"
-                          aria-label={t('编辑{{v0}}上限（{{v1}}）', { v0: t(meta.label), v1: scope })}
-                        >
-                          <Pencil className="w-4 h-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setRemoveBudgetTarget(budget)}
-                          className="text-gray-300 hover:text-red-500 p-1.5"
-                          aria-label={t('删除{{v0}}上限（{{v1}}）', { v0: t(meta.label), v1: scope })}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    )
-                  })
-                )}
-
-                {kindIndex < Object.keys(BUDGET_KIND_META).length - 1 && (
-                  <div className="mx-4 border-t border-gray-100" />
-                )}
-              </div>
-            )
-          })}
-        </Card>
-
-        <p className="mt-2 px-1 text-[11px] text-gray-400 leading-relaxed">{t('局数与集数由 AI / 启发式分析统计，可能有误差；达到上限会自动下发锁屏指令。')}</p>
       </div>
 
       {/* ---------------- 洞察时间线 ---------------- */}
@@ -1504,148 +1048,119 @@ export function InsightsPage() {
         )}
       </div>
 
-      {/* ---------------- 编辑用量上限 ---------------- */}
-      <Dialog open={budgetDialogOpen} onOpenChange={setBudgetDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {editingBudget ? t('编辑{{v0}}上限', { v0: kindLabel(budgetForm.kind) }) : t('设置{{v0}}上限', { v0: kindLabel(budgetForm.kind) })}
-            </DialogTitle>
-          </DialogHeader>
+      {/* ---------------- 用量上限（只读：设置入口在首页） ---------------- */}
+      <div className="px-3 mt-3">
+        <div className="mb-2 px-1 flex items-center justify-between">
+          <span className="text-sm font-medium text-gray-500">{t('用量上限')}</span>
+          {/* 设置入口统一收到首页：三条限制是同一套「达到条件就锁屏」的交互，
+              拆在两个页面里家长得记住哪条在哪儿改。这里只负责展示今天的情况。 */}
+          <button
+            type="button"
+            onClick={() => navigate('/')}
+            className="text-xs text-[#07c160] font-medium"
+          >
+            {t('去首页设置')}
+          </button>
+        </div>
 
-          <div className="space-y-4">
-            <div>
-              <label className="text-sm text-gray-600 block mb-1.5">{t('限制类型')}</label>
-              <div className="grid grid-cols-2 gap-2">
-                {(Object.keys(BUDGET_KIND_META) as UsageBudgetKind[]).map((kind) => (
-                  <button
-                    key={kind}
-                    type="button"
-                    disabled={Boolean(editingBudget)}
-                    onClick={() => setBudgetForm((current) => ({ ...current, kind }))}
-                    className={`p-2.5 rounded-lg border text-left transition-colors disabled:opacity-60 ${
-                      budgetForm.kind === kind ? 'border-[#07c160] bg-green-50' : 'border-gray-200 hover:bg-gray-50'
-                    }`}
-                  >
-                    <span className="text-sm font-medium text-gray-900">{t(BUDGET_KIND_META[kind].label)}</span>
-                    <span className="block text-[11px] text-gray-500 mt-0.5">
-                      {t(BUDGET_KIND_META[kind].desc)}
-                    </span>
-                  </button>
-                ))}
-              </div>
-              {editingBudget && (
-                <p className="mt-1 text-[11px] text-gray-400">
-                  {t('编辑时不能改类型与应用，避免同一天重复计数。')}
-                </p>
-              )}
+        <Card className="overflow-hidden">
+          <div className="flex items-center px-4 py-3">
+            <div className="w-10 h-10 rounded-lg bg-gray-50 flex items-center justify-center flex-shrink-0">
+              <Timer className="w-5 h-5 text-gray-500" />
             </div>
-
-            <div>
-              <label className="text-sm text-gray-600 block mb-1.5" htmlFor="budget-app-name">{t('应用（留空 = 全部应用）')}</label>
-              <input
-                id="budget-app-name"
-                type="text"
-                value={budgetForm.appName}
-                disabled={Boolean(editingBudget)}
-                onChange={(e) => setBudgetForm((current) => ({ ...current, appName: e.target.value }))}
-                placeholder={t('例如 王者荣耀，留空 = 不限应用')}
-                maxLength={50}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#07c160] disabled:bg-gray-50 disabled:text-gray-500"
-              />
+            <div className="flex-1 min-w-0 ml-3">
+              <div className="flex items-center flex-wrap gap-1.5">
+                <span className="text-sm text-gray-900">{t('每日使用时长')}</span>
+                {timeLimit > 0 && timeUsed >= timeLimit && (
+                  <Badge className="bg-red-100 text-red-700 text-[10px]">{t('已达上限')}</Badge>
+                )}
+              </div>
+              <p className="text-[11px] text-gray-400 mt-0.5">
+                {timeLimit > 0
+                  ? t('今日已用 {{v0}} 分钟 / 上限 {{v1}} 分钟', { v0: timeUsed, v1: timeLimit })
+                  : t('还没有设置上限，今天可无限使用')}
+              </p>
             </div>
-
-            <div>
-              <label className="text-sm text-gray-600 block mb-1.5" htmlFor="budget-daily-limit">
-                {t('每日上限')}
-              </label>
-              <div className="flex items-center space-x-2">
-                <input
-                  id="budget-daily-limit"
-                  type="number"
-                  min={1}
-                  max={200}
-                  value={budgetForm.dailyLimit}
-                  onChange={(e) => setBudgetForm((current) => ({ ...current, dailyLimit: e.target.value }))}
-                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#07c160]"
-                />
-                <span className="text-sm text-gray-500">
-                  {t(BUDGET_KIND_META[budgetForm.kind].unit)}{t('/ 天')}</span>
-              </div>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {[1, 2, 3, 5, 10].map((preset) => (
-                  <Button
-                    key={preset}
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setBudgetForm((current) => ({ ...current, dailyLimit: String(preset) }))}
-                    className={budgetForm.dailyLimit === String(preset) ? 'border-[#07c160] text-[#07c160]' : ''}
-                  >
-                    {preset} {t(BUDGET_KIND_META[budgetForm.kind].unit)}
-                  </Button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex items-center py-1">
-              <div className="flex-1 min-w-0">
-                <span className="text-sm text-gray-800">{t('启用上限')}</span>
-                <p className="text-[11px] text-gray-400 mt-0.5">
-                  {t('启用后达到上限将自动下发锁屏指令')}
-                </p>
-              </div>
-              <Toggle
-                checked={budgetForm.enabled}
-                label={t('启用上限')}
-                onChange={() => setBudgetForm((current) => ({ ...current, enabled: !current.enabled }))}
-              />
-            </div>
-
-            {budgetFormError && (
-              <div className="flex items-start space-x-2 bg-red-50 border border-red-200 rounded-lg p-2.5">
-                <AlertTriangle className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
-                <p className="text-xs text-red-700">{budgetFormError}</p>
-              </div>
-            )}
           </div>
 
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setBudgetDialogOpen(false)} disabled={submittingBudget}>
-              {t('取消')}
-            </Button>
-            <Button
-              className="bg-[#07c160] hover:bg-[#06a050]"
-              onClick={() => void handleSubmitBudget()}
-              disabled={submittingBudget}
-            >
-              {submittingBudget ? t('保存中…') : t('保存')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          <div className="mx-4 border-t border-gray-100" />
 
-      {/* ---------------- 删除用量上限 ---------------- */}
-      <Dialog
-        open={Boolean(removeBudgetTarget)}
-        onOpenChange={(open) => !open && setRemoveBudgetTarget(null)}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t('删除用量上限')}</DialogTitle>
-          </DialogHeader>
-          <p className="text-gray-600">
-            {t('确定要删除「')}{removeBudgetTarget ? kindLabel(removeBudgetTarget.kind) : ''}
-            {removeBudgetTarget?.appName ? ` · ${removeBudgetTarget.appName}` : t(' · 全部应用')}{t('」这条上限吗？删除后不再限制、不再自动锁屏。')}</p>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRemoveBudgetTarget(null)}>
-              {t('取消')}
-            </Button>
-            <Button className="bg-red-500 hover:bg-red-600 text-white" onClick={() => void handleRemoveBudget()}>
-              {t('删除')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          {!insightsOn && (
+            <p className="px-4 py-3 text-xs text-amber-700 bg-amber-50 leading-relaxed">
+              {t('开启「屏幕洞察」后才有局数 / 集数统计，也才能按它们限制。')}
+            </p>
+          )}
+
+          {(Object.keys(BUDGET_KIND_META) as UsageBudgetKind[]).map((kind, kindIndex) => {
+            const meta = BUDGET_KIND_META[kind]
+            const KindIcon = meta.icon
+            const rows = budgets.filter((budget) => budget.kind === kind)
+            const usedToday = usage?.used?.[kind] ?? 0
+            return (
+              <div key={kind}>
+                <div className="flex items-center px-4 pt-3 pb-2">
+                  <div className="w-10 h-10 rounded-lg bg-gray-50 flex items-center justify-center flex-shrink-0">
+                    <KindIcon className="w-5 h-5 text-gray-500" />
+                  </div>
+                  <div className="flex-1 min-w-0 ml-3">
+                    <div className="font-medium text-gray-900 text-sm">{t(meta.label)}</div>
+                    <div className="text-xs text-gray-400 mt-0.5">
+                      {t('今日已数出 {{v0}} {{v1}}', { v0: usedToday, v1: t(meta.unit) })}
+                    </div>
+                  </div>
+                </div>
+
+                {rows.length === 0 ? (
+                  <p className="px-4 pb-3 text-xs text-gray-400">
+                    {t('还没有设置')}{t(meta.label)}{t('上限，今天可无限')}
+                    {kind === 'game_round' ? t('玩') : t('看')}。
+                  </p>
+                ) : (
+                  rows.map((budget) => {
+                    const summary = enabledBudgets.find((entry) => entry.id === budget.id)
+                    const used = summary?.usedToday ?? budget.usedToday
+                    const exceeded = summary?.exceeded ?? used >= budget.dailyLimit
+                    const scope = budget.appName || t('全部应用')
+                    return (
+                      <div key={budget.id} className="px-4 py-2.5">
+                        <div className="flex items-center flex-wrap gap-1.5">
+                          {budget.appName && (
+                            <AppIcon appName={budget.appName} className="w-6 h-6" letterClassName="text-[10px]" />
+                          )}
+                          <span className="text-sm text-gray-900">{scope}</span>
+                          {!budget.enabled && (
+                            <Badge className="bg-gray-100 text-gray-500 text-[10px]">{t('已停用')}</Badge>
+                          )}
+                          {budget.enabled && exceeded && (
+                            <Badge className="bg-red-100 text-red-700 text-[10px]">{t('已达上限')}</Badge>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-gray-400 mt-0.5">
+                          {t('今日已用')} {used} {t(meta.unit)}{t('/ 上限')}{budget.dailyLimit} {t(meta.unit)}
+                          {budget.enabled && summary ? t('（剩余 {{v0}}）', { v0: summary.remaining }) : ''}
+                        </p>
+                        {budget.enabled && exceeded && (
+                          <p className="text-[11px] text-red-600 mt-0.5">
+                            {t('已达上限，将自动下发锁屏指令')}
+                          </p>
+                        )}
+                      </div>
+                    )
+                  })
+                )}
+
+                {kindIndex < Object.keys(BUDGET_KIND_META).length - 1 && (
+                  <div className="mx-4 border-t border-gray-100" />
+                )}
+              </div>
+            )
+          })}
+        </Card>
+
+        <p className="mt-2 px-1 text-[11px] text-gray-400 leading-relaxed">{t('三条限制都是「达到上限就自动下发锁屏指令」；局数与集数由 AI / 启发式分析统计，可能有误差。')}</p>
+      </div>
+
+
       <FeatureTip id="insights" text={t('截图按留档天数自动删除；家长端只能看到「时间 + 应用名」的帧时间线，看不到原图。')} />
 
     </div>

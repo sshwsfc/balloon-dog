@@ -29,6 +29,7 @@ import {
 } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
 import { FeatureGate } from '@/components/FeatureGate'
+import { AppIcon } from '@/components/AppIcon'
 import { FeatureTip } from '@/components/FeatureTip'
 import type { CommandDispatchResult, DeviceApp, RemoteAction } from '@/types'
 import { useTranslation } from 'react-i18next'
@@ -327,7 +328,13 @@ export function RemoteHelpPage() {
                   onClick={() => void handleOpenApp(app)}
                   className="w-full flex items-center space-x-3 p-2.5 rounded-lg border border-gray-100 bg-gray-50 active:bg-gray-100 disabled:opacity-50"
                 >
-                  <AppWindow className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                  <AppIcon
+                    packageName={app.packageName}
+                    appName={app.appName}
+                    className="w-8 h-8"
+                    fallbackClassName="bg-gray-200 text-gray-500"
+                    letterClassName="text-xs"
+                  />
                   <span className="flex-1 min-w-0 text-left">
                     <span className="block text-sm text-gray-800 truncate">{app.appName}</span>
                     <span className="block text-[10px] text-gray-400 truncate">{app.packageName}</span>

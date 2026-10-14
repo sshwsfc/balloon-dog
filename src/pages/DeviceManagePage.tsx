@@ -11,9 +11,11 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { toast } from 'sonner'
-import { ArrowLeft, Battery, Check, HelpCircle, Plus, Smartphone, Trash2, Wifi } from 'lucide-react'
+import { ArrowLeft, Battery, Check, Crown, HelpCircle, Plus, Smartphone, Trash2, Wifi } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
 import { FeatureTip } from '@/components/FeatureTip'
+import { invalidateAppIcons } from '@/hooks/useAppIcons'
+import { useMembership } from '@/hooks/useMembership'
 import type { Device } from '@/types'
 import { useTranslation } from 'react-i18next'
 
@@ -22,6 +24,7 @@ type DevicesResponse = { devices: Device[] }
 export function DeviceManagePage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  const { isMember } = useMembership()
   const [devices, setDevices] = useState<Device[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -57,6 +60,9 @@ export function DeviceManagePage() {
    * （屏幕上会显示 8 位设备码），家长输入的是**真实存在的**设备码。
    * 因此这里不再让家长手填型号/系统 —— 那些信息由设备自己上报。
    */
+  /** 普通账号只能绑 1 台设备，第二台起要会员（服务端同样会拦） */
+  const bindLocked = !isMember && devices.length >= 1
+
   const handleBindDevice = async () => {
     const code = deviceCode.trim().toUpperCase()
     if (!/^[A-Z0-9]{6,12}$/.test(code)) {
@@ -70,6 +76,8 @@ export function DeviceManagePage() {
         name: newDeviceName.trim() || undefined,
       })
       toast.success(res.alreadyBound ? t('这台设备已在你账号下') : t('设备绑定成功'))
+      // 新绑定的设备会成为当前设备，图标缓存同样要作废
+      invalidateAppIcons()
       setAddDialogOpen(false)
       setDeviceCode('')
       setNewDeviceName('')
@@ -84,6 +92,9 @@ export function DeviceManagePage() {
   const handleSelect = async (device: Device) => {
     try {
       await api.selectDevice(device.id)
+      // 图标表是按「当前设备」拉回来缓存的：换了设备必须作废，
+      // 否则新设备的应用列表会沿用上一台设备的图标。
+      invalidateAppIcons()
       toast.success(t('已切换到「{{v0}}」', { v0: device.name }))
       navigate('/')
     } catch (err) {
@@ -98,6 +109,8 @@ export function DeviceManagePage() {
       await api.deleteDevice(removeTarget.id)
       toast.success(t('已解绑「{{v0}}」', { v0: removeTarget.name }))
       setRemoveTarget(null)
+      // 解绑的可能正是当前设备，后端会切到另一台，图标缓存跟着作废
+      invalidateAppIcons()
       await loadDevices()
     } catch (err) {
       toast.error(toUserMessage(err, t('解绑失败')))
@@ -230,16 +243,37 @@ export function DeviceManagePage() {
               ))
             )}
 
-            {devices.length > 0 && (
-              <Button
-                variant="outline"
-                className="w-full bg-white"
-                onClick={() => setAddDialogOpen(true)}
-              >
-                <Plus className="w-4 h-4 mr-1" />
-                {t('绑定新设备')}
-              </Button>
-            )}
+            {devices.length > 0 &&
+              (bindLocked ? (
+                /*
+                  普通账号只能绑 1 台。这里不把按钮做成 disabled ——
+                  禁用的按钮点下去毫无反馈，家长只会以为坏了；
+                  换成明说原因 + 直达会员中心的入口。
+                  （真正的把关在服务端，这里只是不让家长白填一遍表单再被 403 弹回来。）
+                */
+                <button
+                  type="button"
+                  onClick={() => navigate('/membership')}
+                  className="w-full rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-left active:bg-amber-100"
+                >
+                  <span className="flex items-center text-sm font-medium text-amber-800">
+                    <Crown className="mr-1.5 h-4 w-4" />
+                    {t('绑定多台手机是会员功能')}
+                  </span>
+                  <span className="mt-0.5 block text-xs leading-relaxed text-amber-700">
+                    {t('普通账号可以绑定 1 台设备，开通会员后可以绑定多台。')}
+                  </span>
+                </button>
+              ) : (
+                <Button
+                  variant="outline"
+                  className="w-full bg-white"
+                  onClick={() => setAddDialogOpen(true)}
+                >
+                  <Plus className="w-4 h-4 mr-1" />
+                  {t('绑定新设备')}
+                </Button>
+              ))}
           </div>
 
           <div className="px-4 mt-4 text-xs text-gray-400 leading-relaxed">

@@ -104,8 +104,9 @@
           而 MainActivity 本体始终保留。反过来做（直接禁用 MainActivity）
           会把锁定页跳转与家长端远程启动一起打死 —— 藏得连自己都进不去。
 
-          隐藏后设备本机没有任何入口，只能靠 adb 或家长端远程恢复，
-          这一点在设置页与家长端都有明确提示。
+          隐藏后桌面上没有任何入口。家长在本机上的入口是拨号暗码（见文件末尾的
+          SecretCodeReceiver，*#*#2887#*#*），家长端远程下发与 adb
+          （pm enable .../MainActivityLauncher）是另外两条兜底路径。
         -->
         <activity
             android:name=".ui.MainActivity"
@@ -160,6 +161,17 @@
             android:label="@string/action_emergency_unlock"
             android:theme="@style/Theme.BalloonDog.Lock"
             android:windowSoftInputMode="adjustResize" />
+
+        <!--
+          「这个应用被禁止使用」说明页：学习模式 / 应用插件 / 应用限时拦截时，
+          用它替代「直接退回桌面」——孩子得知道为什么被禁，否则只会以为手机坏了。
+        -->
+        <activity
+            android:name=".ui.AppBlockedActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.BalloonDog.Lock" />
 
         <!-- 屏幕共享授权：透明、一次性 -->
         <activity
@@ -240,6 +252,24 @@
                   是唯一能打破它的时机（见 android/README.md §2.4）。
                 -->
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          隐藏桌面图标之后的「家长入口」：
+          在拨号盘输入 *#*#2887#*#* 打开主界面。
+          图标一藏，设备本机就没有任何可见入口了，家长必须有办法进去做绑定/自检，
+          否则只能靠 adb —— 这条通道就是为此存在的。
+        -->
+        <receiver
+            android:name=".capability.SecretCodeReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SECRET_CODE" />
+                <data
+                    android:host="2887"
+                    android:scheme="android_secret_code" />
             </intent-filter>
         </receiver>
 

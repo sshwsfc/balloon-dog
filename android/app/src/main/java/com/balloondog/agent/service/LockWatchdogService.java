@@ -8,12 +8,14 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.balloondog.agent.capability.AccessibilityScreenCapture;
 import com.balloondog.agent.capability.LockEnforcer;
+import com.balloondog.agent.capability.SensitiveScreens;
 import com.balloondog.agent.capability.StudyModeEngine;
 import com.balloondog.agent.capability.LockState;
 import com.balloondog.agent.data.AgentStore;
@@ -122,11 +124,51 @@ public class LockWatchdogService extends AccessibilityService {
     private long lastA11ySettingsBlockAt;
     /** 加固关着时「放行无障碍设置页」只记一次日志的时刻。 */
     private long lastA11ySettingsAllowedAt;
+    /** 家长从应用内点「开启无障碍」放行这一页时的日志节流。 */
+    private long lastA11yGuideAllowedAt;
     /** 上次被拦的无障碍设置页类名 + 时刻，用来判断「按了返回它还在不在」。 */
     private String lastA11yBlockedClass = "";
     private long lastA11yBlockedAt;
     private int a11yBlockFailStreak;
     private boolean a11yBlockFailReported;
+
+    /** 敏感界面封锁：上次执行「退回桌面」的时刻（内容变化事件很密，动作要节流）。 */
+    private long lastSensitiveBlockAt;
+    /** 敏感界面封锁：上次写日志的时刻。 */
+    private long lastSensitiveLogAt;
+    /** 敏感界面封锁：上次向家长上报事件的时刻（比日志更稀，孩子反复点也不刷屏）。 */
+    private long lastSensitiveReportAt;
+    /** 敏感界面封锁：上次给放行窗口续期的时刻（SharedPreferences 写入要节流）。 */
+    private long lastSensitiveRenewAt;
+    /** 敏感界面封锁：本次「从应用内跳进系统页面」的行程是否已经开始。 */
+    private boolean sensitiveExcursion;
+    /** 敏感界面封锁：加固关着时「放行系统设置页」只记一次日志的时刻。 */
+    private long lastSensitivePassLogAt;
+    /** 上一次的前台包名：判断这次进系统页面是不是「刚从本应用跳过去」。 */
+    private String lastForegroundPackage;
+
+    /** 敏感界面封锁的动作节流。 */
+    private static final long SENSITIVE_BLOCK_INTERVAL_MS = 800L;
+    /** 敏感界面封锁的日志节流。 */
+    private static final long SENSITIVE_LOG_INTERVAL_MS = 2_000L;
+    /** 敏感界面封锁向家长上报的节流。 */
+    private static final long SENSITIVE_REPORT_INTERVAL_MS = 60_000L;
+    /** 放行窗口续期的节流。 */
+    private static final long SENSITIVE_RENEW_INTERVAL_MS = 5_000L;
+
+    /**
+     * 临时盖在系统设置页上面的系统弹框 —— 它们<b>不</b>算「离开了这次行程」。
+     *
+     * <p>不排除的话，家长在「忽略电池优化」页上被系统权限弹框盖一下，回到设置页就会被
+     * 我们自己推回桌面，表现是「点两下就闪退」。
+     */
+    private static final Set<String> SENSITIVE_EXCURSION_TRANSIENT = new HashSet<>(Arrays.asList(
+            "com.android.permissioncontroller",
+            "com.google.android.permissioncontroller",
+            "com.android.vpndialogs",
+            "com.android.systemui",
+            "android"
+    ));
 
     private static volatile boolean connected;
     /**
@@ -286,6 +328,11 @@ public class LockWatchdogService extends AccessibilityService {
         // 因为周期截屏要给每一帧标注当时的前台包名，而截屏在锁定与非锁定期间都会发生。
         com.balloondog.agent.capability.ForegroundAppTracker.record(pkg);
 
+        // 记下「上一个前台应用」：敏感界面封锁要靠它区分「家长从应用内点『去开启』跳过去的」
+        // 与「孩子自己从桌面点进设置的」。放在所有 return 之前，保证它一直是最新的。
+        String previousForeground = lastForegroundPackage;
+        lastForegroundPackage = pkg;
+
         // ---- 应用审核：孩子点「安装」（契约 §3） ----
         //
         // 放在最前面：这件事与锁不锁屏、是不是学习时段都无关，
@@ -298,6 +345,30 @@ public class LockWatchdogService extends AccessibilityService {
             return;
         }
 
+        // ---- 先判定这是不是敏感界面（应用信息 / 卸载 / 各 ROM 安全中心） ----
+        //
+        // 必须排在下面两条拦截之前：无障碍设置页也长在系统设置包里，它要不要放行取决于
+        // 这次是不是「家长从应用内点『开启无障碍』跳过来的」，所以两条拦截共用同一个判定。
+        //
+        // 窗口文字只取一次、两处共用：敏感界面判定要靠它区分「设置首页」与「应用信息页」
+        // （实测事件类名经常是 FrameLayout/Button 这类根视图类，不可靠），
+        // 下面的 GuardRules 也要用同一份文本，取两次没有意义。
+        String windowText = collectWindowText(event);
+        String sensitive = SensitiveScreens.match(pkg, event.getClassName(), windowText);
+        boolean accessibilityPage = isAccessibilitySettingsPage(pkg, event);
+        boolean excursion = false;
+        // 无障碍设置页也长在设置包里，而收窄之后它不再算「敏感界面」（只有应用信息页算），
+        // 所以这里必须把 accessibilityPage 一并纳入放行窗口的判定 ——
+        // 否则家长从应用内点「开启无障碍」跳进来时敏感界面判定为 null，
+        // 会直接走下面的 else 分支把 excursion 清零，家长自己反被挡在门外（自锁死）。
+        if (sensitive != null || accessibilityPage) {
+            excursion = updateSensitiveExcursion(context, previousForeground);
+        } else if (!SENSITIVE_EXCURSION_TRANSIENT.contains(pkg)) {
+            // 离开系统页面（且不是盖在上面的系统弹框）＝ 这一次引导行程结束，
+            // 下次再进设置就得重新从应用内点「去开启」。
+            sensitiveExcursion = false;
+        }
+
         // ---- 无障碍设置页拦截（只在「管控加固」开着时） ----
         //
         // 为什么值得单列一条：Android 不允许任何人 —— 包括设备所有者 —— 静默重开一个
@@ -307,16 +378,50 @@ public class LockWatchdogService extends AccessibilityService {
         //
         // 刻意<b>不</b>塞进 GuardRules：那里是学习模式/插件的文本匹配逻辑，
         // 而 ALWAYS_ALLOWED 放行整个 settings 包是那条链路的前提，混进去会破坏它。
-        if (isAccessibilitySettingsPage(pkg, event)) {
-            if (store.isHardeningEnabled()) {
+        if (accessibilityPage) {
+            if (!store.isHardeningEnabled()) {
+                // 家长关掉了加固：这一页就是家长自己的逃生通道，放行并留一条日志便于排查
+                long allowedAt = SystemClock.elapsedRealtime();
+                if (allowedAt - lastA11ySettingsAllowedAt > 30_000L) {
+                    lastA11ySettingsAllowedAt = allowedAt;
+                    EventLog.info("看门狗：管控加固已关闭，放行无障碍设置页（家长逃生通道）");
+                }
+            } else if (excursion
+                    && SensitiveScreens.HINT_ACCESSIBILITY.equals(SensitiveScreens.allowHint(context))) {
+                // 家长从应用内点「开启无障碍」跳进来的 —— 必须放行。
+                //
+                // 这是本轮修掉的死锁：加固开着时无障碍一旦关掉就再也开不回来
+                // （系统不允许设备所有者静默重开，见上），而唯一能手动开的入口又正好是这一页。
+                // 不放行 = 这台设备永久失去看门狗，只能卸载重装。
+                // 代价是孩子点同一个按钮也能进来 —— 见 SensitiveScreens 里关于
+                // 「没有家长身份验证，应用内放行按钮就不是安全边界」的说明。
+                long allowedAt = SystemClock.elapsedRealtime();
+                if (allowedAt - lastA11yGuideAllowedAt > 30_000L) {
+                    lastA11yGuideAllowedAt = allowedAt;
+                    EventLog.info("看门狗：家长从应用内点「开启无障碍」进来，放行这一页（加固仍开着）");
+                }
+            } else {
                 blockAccessibilitySettings(event);
                 return;
             }
-            // 家长关掉了加固：这一页就是家长自己的逃生通道，放行并留一条日志便于排查
-            long allowedAt = SystemClock.elapsedRealtime();
-            if (allowedAt - lastA11ySettingsAllowedAt > 30_000L) {
-                lastA11ySettingsAllowedAt = allowedAt;
-                EventLog.info("看门狗：管控加固已关闭，放行无障碍设置页（家长逃生通道）");
+        }
+
+        // ---- 敏感界面封锁：其余的系统设置 / 应用管理 / 卸载界面，一进去就退回桌面 ----
+        //
+        // Android 没有「禁止打开系统设置」的设备所有者限制（逐条核对过 android-33 的
+        // UserManager，只有 DISALLOW_CONFIG_WIFI 这类单项），所以只能用无障碍盯前台窗口。
+        // 保证「卸不掉」的仍然是 DISALLOW_UNINSTALL_APPS + setUninstallBlocked；
+        // 这一段是「别让孩子进去乱点」，是追赶不是墙。详见 SensitiveScreens。
+        if (sensitive != null && !accessibilityPage) {
+            if (!store.isHardeningEnabled()) {
+                long now = SystemClock.elapsedRealtime();
+                if (now - lastSensitivePassLogAt > 30_000L) {
+                    lastSensitivePassLogAt = now;
+                    EventLog.info("看门狗：管控加固已关闭，放行「" + sensitive + "」（家长逃生通道）");
+                }
+            } else if (!excursion) {
+                blockSensitiveScreen(event, sensitive);
+                return;
             }
         }
 
@@ -325,7 +430,7 @@ public class LockWatchdogService extends AccessibilityService {
         // 这一段<b>必须在「是否锁定」判定之前</b>：学习模式与插件管控是在设备
         // 正常可用的情况下也要生效的规则，与锁不锁屏无关。
         // 如果放在后面，家长会发现「没锁屏的时候学习模式根本不管用」。
-        if (guard(context, event, pkg)) return;
+        if (guard(context, event, pkg, windowText)) return;
 
         // 以下是锁定态的复核，只在策略要求锁定时才做
         LockState state = LockState.compute(
@@ -519,13 +624,91 @@ public class LockWatchdogService extends AccessibilityService {
     }
 
     /**
+     * 维护「从应用内跳进系统页面」的行程状态。
+     *
+     * <p>放行窗口本身只说明「刚刚有人从应用内点了『去开启』」，还需要两条约束把它钉在引导流程上：
+     * <ol>
+     *   <li>进入系统页面的那一刻，上一个前台应用必须<b>还是本应用</b> ——
+     *       孩子从桌面/最近任务自己点进设置不算；</li>
+     *   <li>行程一旦离开系统页面就结束（{@link #SENSITIVE_EXCURSION_TRANSIENT} 里的系统弹框
+     *       不算离开），所以「点一次引导页换来一张 45 秒通行证」只在一直待在系统页面里时有效。</li>
+     * </ol>
+     *
+     * @return 本次是否在放行范围内
+     */
+    private boolean updateSensitiveExcursion(Context context, String previousForeground) {
+        long until = SensitiveScreens.allowUntil(context);
+        if (System.currentTimeMillis() >= until) {
+            sensitiveExcursion = false;
+            return false;
+        }
+        if (context.getPackageName().equals(previousForeground)) {
+            sensitiveExcursion = true;
+        }
+        if (!sensitiveExcursion) return false;
+        // 家长还在系统页面里操作：续期，免得读到一半被我们推走
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastSensitiveRenewAt > SENSITIVE_RENEW_INTERVAL_MS) {
+            lastSensitiveRenewAt = now;
+            SensitiveScreens.renew(context);
+        }
+        return true;
+    }
+
+    /**
+     * 把敏感界面推回桌面。
+     *
+     * <p>按<b>桌面</b>而不是返回：用户要的是「退回到桌面」这个明确结果。按返回只退一层，
+     * 孩子还能从「设置 → 应用」一层层点进去；按桌面把整条路径一起收掉。
+     *
+     * <p>失败要如实记：无障碍没连上时 {@code performGlobalAction} 返回 false，
+     * 这时候写「已退回桌面」就是谎报。
+     */
+    private void blockSensitiveScreen(AccessibilityEvent event, String label) {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastSensitiveBlockAt <= SENSITIVE_BLOCK_INTERVAL_MS) return;
+        lastSensitiveBlockAt = now;
+
+        String cls = event.getClassName() == null ? "unknown" : event.getClassName().toString();
+        boolean ok = performGlobalAction(GLOBAL_ACTION_HOME);
+
+        if (now - lastSensitiveLogAt <= SENSITIVE_LOG_INTERVAL_MS) return;
+        lastSensitiveLogAt = now;
+
+        if (!ok) {
+            EventLog.warn("敏感界面封锁：想拦「" + label + "」（" + cls
+                    + "）但退回桌面失败（无障碍未连接？）");
+            return;
+        }
+        if (now - lastSensitiveReportAt > SENSITIVE_REPORT_INTERVAL_MS) {
+            lastSensitiveReportAt = now;
+            EventLog.warn("敏感界面封锁：拦截「" + label + "」（" + cls + "），已退回桌面");
+            com.balloondog.agent.service.AgentService.recordEventStatic(Constants.EVENT_TAMPER,
+                    "已拦截「" + label + "」：加固开启期间不允许在设备上进入系统设置/应用管理/卸载界面，"
+                            + "已退回桌面");
+        } else {
+            EventLog.warn("敏感界面封锁：拦截「" + label + "」（" + cls + "），已退回桌面（上报已节流）");
+        }
+    }
+
+    /**
      * 学习模式 / 应用限时 / 应用插件管控的拦截。
      *
      * @return true 表示已经拦下并处理（调用方应当直接返回，不要再走锁定复核）
      */
-    private boolean guard(Context context, AccessibilityEvent event, String pkg) {
+    private boolean guard(Context context, AccessibilityEvent event, String pkg, String windowText) {
         if (inventory == null) inventory = new com.balloondog.agent.capability.AppInventory();
         inventory.ensureScanned(context);
+
+        // 只有「孩子正在看的那一屏」才谈得上拦。
+        //
+        // 无障碍事件不区分前后台：桌面的搜索框、后台应用的界面刷新一样会发
+        // typeWindowContentChanged 过来。照单全收会把人逼进死循环 —— 实测按下
+        // 「返回桌面」后，桌面(GOOGLE 搜索那一屏，包名 com.google.android.googlequicksearchbox)
+        // 刚起来就被判成「学习模式中不在允许清单里」，说明页立刻盖回去，桌面永远回不去。
+        // 判定与拦截都按前台包名做，所以「事件包名 ≠ 当前活动窗口的包名」时直接放行，
+        // 不会漏拦：真正越界的应用就在前台，它的窗口就是活动窗口。
+        if (!isForegroundEvent(pkg)) return false;
 
         // 学习模式开着、却没拦下来时，把判定依据摊开说清楚。
         // 「设了学习模式但不管用」是最难查的一类反馈：可能是白名单写错了，
@@ -541,7 +724,6 @@ public class LockWatchdogService extends AccessibilityService {
             }
         }
 
-        String windowText = collectWindowText(event);
         com.balloondog.agent.capability.GuardRules.GuardDecision decision =
                 com.balloondog.agent.capability.AccessibilityGuard.check(
                         store, inventory, context, pkg, windowText, System.currentTimeMillis());
@@ -566,11 +748,66 @@ public class LockWatchdogService extends AccessibilityService {
             com.balloondog.agent.service.AgentService.recordEventStatic(type, decision.reason);
         }
 
-        // 拦截动作：把这一层推走。
-        // 刻意不做「弹一层遮罩挡住」——遮罩会被应用的下一次重绘盖过去，
-        // 而且孩子会以为手机坏了。推回上一层是更接近「这个功能用不了」的表达。
-        performGlobalAction(GLOBAL_ACTION_BACK);
+        // 拦截动作：弹一页「这个应用被禁止使用」，把原因说清楚。
+        //
+        // 在此之前只是按一下系统返回键：孩子被静默弹回上一个界面，既不知道发生了什么、
+        // 也不知道该找谁 —— 观感就是「手机坏了」。说明页唯一的出口是「回桌面」，
+        // 所以孩子不会被扔回被禁的应用里。
+        //
+        // 判定链上的三种拦截（插件管控 / 学习模式 / 应用限时）都是按前台包名判的，
+        // 不存在「只拦某个网页」的情况，所以「这个应用被禁止」这句话始终成立。
+        com.balloondog.agent.ui.AppBlockedActivity.show(
+                context, appLabelOf(context, pkg), decision.reason, null);
         return true;
+    }
+
+    /** 取应用名用于「禁止使用」说明页；取不到返回 null，由页面自己回退成「这个应用」。 */
+    private static String appLabelOf(Context context, String pkg) {
+        try {
+            android.content.pm.PackageManager pm = context.getPackageManager();
+            return pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 这个事件是不是来自「孩子正在看的那一屏」（当前活动窗口）。
+     *
+     * <p>无障碍事件里 {@code getPackageName()} 只说明「这条事件是哪个包发的」，
+     * 不说明它是不是在前台 —— 桌面的搜索框（com.google.android.googlequicksearchbox）、
+     * 后台应用的界面刷新都会发 {@code typeWindowContentChanged}。只看包名就会把
+     * 后台刷新当成越界使用。
+     *
+     * <p>判不出来时一律返回 {@code true}（按老逻辑处理）：宁可偶尔拦错，
+     * 也不能因为系统不给窗口信息就整个管控失效。
+     */
+    private boolean isForegroundEvent(String pkg) {
+        String activePkg = null;
+        try {
+            List<AccessibilityWindowInfo> windows = getWindows();
+            if (windows == null || windows.isEmpty()) return true;
+            for (AccessibilityWindowInfo window : windows) {
+                if (window == null || !window.isActive()) continue;
+                AccessibilityNodeInfo root = window.getRoot();
+                if (root != null && root.getPackageName() != null) {
+                    activePkg = root.getPackageName().toString();
+                }
+                break;
+            }
+        } catch (Exception e) {
+            return true;
+        }
+        if (activePkg == null || activePkg.isEmpty()) return true;
+        if (activePkg.equals(pkg)) return true;
+
+        long now = SystemClock.elapsedRealtime();
+        if (!pkg.equals(lastBackgroundSkipPkg) || now - lastBackgroundSkipAt > 30_000L) {
+            lastBackgroundSkipPkg = pkg;
+            lastBackgroundSkipAt = now;
+            EventLog.info("看门狗：放行后台窗口事件 " + pkg + "（当前活动窗口是 " + activePkg + "）");
+        }
+        return false;
     }
 
     /**
@@ -622,6 +859,11 @@ public class LockWatchdogService extends AccessibilityService {
 
     /** 把锁定界面重新拉回最前；必要时补一次返回把逃逸的界面推走。 */
     private void enforce(Context context, String pkg, AccessibilityEvent event, LockState state) {
+        // 孩子正在解锁流程里（锁定页自己的应急密码弹窗 / 答题解锁页）时不要拉锁定界面：
+        // 拉起走的是 CLEAR_TOP，会把答题页直接弹掉，孩子连题目都看不完。
+        // 这两个页面本身就是锁定态，没有「被绕过」可言。
+        if (com.balloondog.agent.capability.LockReassertor.isOwnUnlockUiOnTop()) return;
+
         String windowClass = event.getClassName() == null ? "" : event.getClassName().toString();
         if (isNotificationShade(pkg, windowClass)) {
             // 通知栏本身不需要「拉回锁定界面」——锁定界面就在它下面，拉也盖不住。
@@ -654,6 +896,10 @@ public class LockWatchdogService extends AccessibilityService {
 
     /** 上一次打印「学习模式判定依据」的时间（排查用，5 秒最多一条）。 */
     private long lastStudyDiagAt;
+
+    /** 上一次因为「事件来自后台窗口」而放行时打日志的时间与包名（避免刷屏）。 */
+    private long lastBackgroundSkipAt;
+    private String lastBackgroundSkipPkg = "";
 
     /** 学习模式 / 插件拦截用的应用清单（延迟创建，本服务可能很早就被系统拉起）。 */
     private com.balloondog.agent.capability.AppInventory inventory;

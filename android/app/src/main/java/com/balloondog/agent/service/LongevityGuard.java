@@ -97,6 +97,10 @@ public final class LongevityGuard {
      */
     public static boolean requestBatteryExemption(Context context) {
         try {
+            // 加固开启时系统页面默认会被看门狗推回桌面，先给自己开一张限时通行证
+            // （见 SensitiveScreens：这不是安全边界，只是让家长点得动这个按钮）
+            com.balloondog.agent.capability.SensitiveScreens.allowTemporarily(context,
+                    com.balloondog.agent.capability.SensitiveScreens.HINT_GENERIC);
             Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
             intent.setData(Uri.parse("package:" + context.getPackageName()));
             if (!(context instanceof Activity)) {

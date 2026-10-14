@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { BrandLogo } from '@/components/BrandLogo'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { toast } from 'sonner'
-import { User, Lock, MessageCircle, ShieldCheck, RefreshCw } from 'lucide-react'
+import { User, Lock, MessageCircle, ShieldCheck, RefreshCw, Gift } from 'lucide-react'
 import { useAuth } from '@/contexts/AuthContext'
 import { setAuthToken, userApi, wechatApi } from '@/services/api'
 import type { WechatQr } from '@/services/api'
@@ -21,7 +21,15 @@ export function LoginPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { login, register, smsLogin, sendCode, wechatPoll, wechatCreateQr, wechatDevScan } = useAuth()
 
-  const [mode, setMode] = useState<Mode>('login')
+  /**
+   * 邀请链接形如 `/login?mode=register&invite=XXXX`（由分享页生成）。
+   * 这里只做「显示 + 透传」，邀请码的校验与绑定全在服务端：
+   * 建号前校验（不存在 / 邀请人不活跃 / 与自己同手机号 → 直接拒绝），建号后才绑定。
+   */
+  const inviteCode = (searchParams.get('invite') ?? '').trim().toUpperCase()
+  const [mode, setMode] = useState<Mode>(
+    searchParams.get('mode') === 'register' || inviteCode ? 'register' : 'login',
+  )
   const [phone, setPhone] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -128,7 +136,7 @@ export function LoginPage() {
       return
     }
     setLoading(true)
-    const ok = await smsLogin(phone, verificationCode)
+    const ok = await smsLogin(phone, verificationCode, inviteCode || undefined)
     setLoading(false)
     if (ok) navigate('/', { replace: true })
   }
@@ -151,7 +159,7 @@ export function LoginPage() {
       return
     }
     setLoading(true)
-    const ok = await register(phone, password, verificationCode)
+    const ok = await register(phone, password, verificationCode, inviteCode || undefined)
     setLoading(false)
     if (ok) navigate('/', { replace: true })
   }
@@ -242,6 +250,18 @@ export function LoginPage() {
           </div>
 
           <div className="bg-white rounded-2xl shadow-xl p-5">
+            {inviteCode && (
+              <div className="mb-4 flex items-start gap-2 rounded-lg bg-orange-50 px-3 py-2.5">
+                <Gift className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" />
+                <div className="text-[11px] leading-relaxed text-orange-700">
+                  <p className="font-medium">{t('你正在通过好友的邀请链接注册')}</p>
+                  <p className="mt-0.5 text-orange-600/80">
+                    {t('邀请码 {{v0}}，注册并完成首次充值后，好友可获得返现', { v0: inviteCode })}
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* 模式切换 */}
             <div className="flex bg-gray-100 rounded-lg p-1 mb-5">
               {(

@@ -139,6 +139,14 @@ public final class LockReassertor {
         // 体验上还像设备坏了。安全上也没有任何增益：锁定界面就在最前，什么都操作不了。
         // 真正需要关屏的是「实际没锁住」（孩子已经绕过去了），那时走下面的兜底分支。
         if (force && actuallyLocked) {
+            // 孩子正在「解锁流程」里（答题页 / 应急解锁页）时绝不能补锁：
+            // LockScreenActivity.show() 带着 CLEAR_TOP，会把答题页直接弹掉 ——
+            // 实测就是「刚点进答题解锁，屏幕一亮就被扔回锁定页」。
+            // 这些页面本身就是锁定态的一部分，孩子并没有拿到设备，不需要补。
+            if (isOwnUnlockUiOnTop()) {
+                consecutiveFailures = 0;
+                return false;
+            }
             EventLog.warn("锁定复核（" + trigger + "）：屏幕被点亮，重新把锁定界面摆回最前");
             LockEnforcer.showLockUi(appContext, store, state);
             consecutiveFailures = 0;
@@ -192,7 +200,22 @@ public final class LockReassertor {
 
         // 锁定页（Activity 形态）在前台也算锁着。用 dumpsys 之外的方式判断代价太高，
         // 这里靠 LockScreenActivity 自己维护的静态标志。
-        return com.balloondog.agent.ui.LockScreenActivity.isShowing();
+        //
+        // 答题页 / 应急解锁页同样算「锁着」：它们是锁定流程的一部分，
+        // 孩子此刻并没有拿到设备，不该被当成「已经绕过去了」而触发补锁。
+        return isOwnUnlockUiOnTop();
+    }
+
+    /**
+     * 我们自己的「解锁流程」界面是否在最前。
+     *
+     * <p>{@link com.balloondog.agent.ui.LockScreenActivity}（锁定页，含它自己的应急密码弹窗）
+     * 与 {@link com.balloondog.agent.ui.QuizActivity}（答题解锁）。
+     * 两者都在同一进程里维护静态标志，查询零成本。
+     */
+    public static boolean isOwnUnlockUiOnTop() {
+        return com.balloondog.agent.ui.LockScreenActivity.isShowing()
+                || com.balloondog.agent.ui.QuizActivity.isShowing();
     }
 
     /** 供界面展示：当前是否真的锁着。 */

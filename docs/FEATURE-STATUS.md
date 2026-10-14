@@ -58,11 +58,11 @@
 | 答题解锁 | ✅ | ✅ | ✅ **真实执行** | 服务端出题（题库或屏幕题）→ 设备端锁定页答题 |
 | 模式切换（学习模式） | ✅ | ✅ | ✅ **真实执行** | 无障碍 + 前台包名白名单，**本地求值** |
 | 护眼设置 | ✅ | ✅ | ✅ **真实执行** | 连续用眼计时 → 注入锁定源 → **真锁屏** |
-| 微信 / QQ 功能管控 | ✅ | ✅ | ✅ **真实执行** | 无障碍 + 界面文本关键词匹配 → 按返回推走 |
+| 微信 / QQ 功能管控 | ✅ | ✅ | ✅ **真实执行** | 无障碍 + 界面文本关键词匹配 → 弹「应用已被禁止使用」说明页（原来只是静默按返回，孩子以为手机坏了） |
 | 周期截屏 + AI 洞察 | ✅ | ✅ | ✅ **真实执行** | 无障碍免授权截图优先（`AccessibilityScreenCapture`，API 30+）→ 打包上传 → 服务端分析，拿不到才回退常驻 MediaProjection。已上机验证：`ScreenFrame` 真的有行（20 秒内 14→16），采样全程 0 次授权页。`e2e-gaps` 第 10 节把它做成 8 项永久断言（配置回读、`pref capture_enabled=true`、logcat「已上传截屏包」、`GET /api/insights` 出现新行、路径日志「周期采样截图走无障碍免授权路径」、无「采样截图失败」、无系统授权页），2026-10-11 全绿 |
 | 局数 / 集数预算 | ✅ | ✅ | 🟡 **部分执行** | 服务端 AI 计数 + **设备端本地兜底**（`UsageBudget` 参与 `LockState` 判定）。配置下发已上机验证；**「离线兜底锁屏」只有编译/JVM 级**（构造不出 `used >= limit`，见 §3A） |
 | 应用审核 | ✅ | ✅ | 🟡 **部分执行** | 安装器识别 → 上报审批 → `DISALLOW_INSTALL_APPS` + 10 分钟批准窗口。`no_install_apps` 真的生效（孩子侧装不了）、审批链路真的通；但**走的是卸载确认页**，真安装页无法从 adb 构造（§3A） |
-| 应用限制（逐应用限时） | ✅ | ✅ | ✅ **真实执行** | `UsageStatsManager` 累计前台时长 → 超限按返回推走。**已修复并上机验证**：家长端从设备清单选应用（必须带 `packageName`）→ 设备拦截规则表真的落进带包名的规则 → 真的拦到了（logcat `看门狗：拦截 com.google.android.deskclock —— Clock 今日 1 分钟已用完`）、家长端「已用 529 秒」不再恒为 0。原先的「三层静默丢弃」见 §4.5 缺陷 1/2 |
+| 应用限制（逐应用限时） | ✅ | ✅ | ✅ **真实执行** | `UsageStatsManager` 累计前台时长 → 超限弹「应用已被禁止使用」说明页。**已修复并上机验证**：家长端从设备清单选应用（必须带 `packageName`）→ 设备拦截规则表真的落进带包名的规则 → 真的拦到了（logcat `看门狗：拦截 com.google.android.deskclock —— Clock 今日 1 分钟已用完`）、家长端「已用 529 秒」不再恒为 0。原先的「三层静默丢弃」见 §4.5 缺陷 1/2 |
 | 网址拦截 | ✅ | ✅ | 🟡 **部分执行** | `VpnService` 只接管 DNS：解析命中即回 NXDOMAIN。tun **真的建立**、系统 DNS 真的指向它；但**「某域名真被拦」无法在设备上断言**（隧道存在时所有域名都解析失败，区分不出「被拦」与「隧道不通」），解析逻辑只有 JVM 级证据（§3A） |
 | 远程拍照 | ✅ | ✅ | ✅ **真实执行** | Camera2 拍照 → 上传 → 回填 `mediaId` |
 | 屏幕截图 | ✅ | ✅ | ✅ **真实执行** | 优先无障碍 `takeScreenshot`（免授权，API 30+）→ 上传，拿不到才回退 MediaProjection。已上机验证（Android 13 模拟器，**全程无人点屏幕**）：指令 `succeeded`、68469 B JPEG 可下载、`MediaAsset.kind='screenshot'` 新增、授权框 0 次。`e2e-gaps` 第 8 节 9 项永久断言（`capabilities=129` 含 `CAPABILITY_CAN_TAKE_SCREENSHOT`、**关掉「屏幕洞察」也能截**、`succeeded`、走免授权路径、无「等待屏幕共享授权超时」、无系统授权页、媒体新增、102212 B 可下载、首两字节 `FFD8`）2026-10-11 全绿 |
@@ -74,7 +74,7 @@
 | 远程协助 | ✅ 键 | ✅ 入口 | ✅ **真实执行** | 无障碍静态桥执行预设动作；未连无障碍时**如实失败**。已上机验证：`home` 后前台真的回桌面、`open_app` 后前台真是它 |
 | 电话短信 | ✅ 键 | ✅ 入口 | ✅ **真实执行** | `CallLog`/`Sms` 读取 → 上报；未授权时**如实跳过**。已上机验证：造真数据 → 上报 → 服务端 `GET /api/calls|sms` 读到 |
 | 环境监听 | ✅ 键 | ✅ 键 | ✅ **真实执行** | `MediaRecorder` 5 分钟分段循环录音上传（1 小时安全阀）。已上机验证：录到 135159 字节 audio/mp4 且可下载。**但首次下发可能丢，见下方 ⚠️** |
-| 隐藏图标 | — | ✅ | ✅ **真实执行** | `activity-alias` 切换图标可见性；设置页给出恢复路径。已上机验证：入口真的不可解析、别名 `disabled`、关掉后恢复 |
+| 隐藏图标 | — | ✅ | ✅ **真实执行** | `activity-alias` 切换图标可见性，**默认就是隐藏**（`ChildDevice.hideIcon` 建表默认 `true` + 迁移 `20261013214520_hide_icon_default_true` 回填存量设备）；本机入口是拨号暗码 `*#*#2887#*#*`（`SecretCodeReceiver`），另有家长端远程恢复与 adb 两条兜底。已上机验证：置 `false` 后桌面入口 30 秒内可解析、置回 `true` 后入口消失、拨号广播 `经拨号入口（*#*#2887#*#*）打开主界面` 且 `MainActivity` 真的回到前台 |
 | 家庭成员 | — | ✅ 占位 | ⚪ **未实现** | 家长端显示为「未开放」灰态 |
 | 防杀 / 保活 | — | — | ✅ **真实执行** | 前台服务 + `START_STICKY` + `stopWithTask=false` + 双闹钟 + 持久化 Job + `LongevityGuard` 自愈；实测 `kill -9` 后 10 秒恢复 |
 | 防卸载 / 防恢复出厂 | ✅ | ✅ | ✅ **真实执行** | `setUninstallBlocked` + 受保护包（`setUserControlDisabledPackages`，API 30+）+ 20 条 `UserManager` 限制；实测三个系统按钮变灰、`pm uninstall`/`pm disable-user` 均被拒 |
@@ -158,7 +158,8 @@ if (config.studyApps.contains(pkg)) return null;
 服务端只下发**被家长改动过**的项，且**连同匹配关键词一起下发** ——
 所以设备端不需要内置一份插件目录，也就不存在"服务端加了插件、设备端还不知道"这种静默失效。
 
-设备端用无障碍读当前界面的可见文本与控件描述，命中关键词就按返回推走。
+设备端用无障碍读当前界面的可见文本与控件描述，命中关键词就弹一页「应用已被禁止使用」说明
+（`AppBlockedActivity`：应用名 + 原因 + 「返回桌面」；唯一出口是回桌面，不会被扔回被禁的应用）。
 关键词刻意选**页面级**的串（「确认支付」「收付款」而不是「支付」）以压低误伤。
 
 判定抽成了无 Android 依赖的 `GuardRules`，用合成界面文本逐条测试
@@ -211,16 +212,55 @@ FrameBatchUploader POST /api/agent/screen-batches
 | 改系统时间绕过作息 | 同上（`DISALLOW_CONFIG_DATE_TIME`；**不存在 `DISALLOW_CONFIG_TIMEZONE`**，时区与日期共用这一个 key） |
 | 锁定复核 | 每 3 秒核实"实际锁住了没"；**亮屏广播**立即把锁定界面重新摆到最前 |
 | 加固自检与自愈 | `OwnerHardening.apply()/audit()` 可枚举逐项清单（28 项，本轮实测 `26/28 项生效`）+ `LongevityGuard` 服务启动/每 5 分钟巡检/家长手动自检三次重新施加，缺口变化时发 `tamper` 事件 |
-| 无障碍被关 | **堵不掉**：DO 也无法强制开启（实测 `Permission denial: Device owners cannot update enabled_accessibility_services`）。**加固开启时会把「无障碍设置页」推走**（`LockWatchdogService.isAccessibilitySettingsPage()` → `GLOBAL_ACTION_BACK`，实测 `am start -a android.settings.ACCESSIBILITY_SETTINGS` 2 秒内被弹回桌面并留下 `tamper`；关掉加固后同一命令能正常进入 = 家长逃生通道）。**检测是秒级的**（`onUnbind` 一次性信号，实测同一秒 16:37:14.128），5 分钟巡检只是兜底；自愈做不到 → 上报 `tamper` → 悬浮窗兜底 |
+| 无障碍被关 | **堵不掉**：DO 也无法强制开启（实测 `Permission denial: Device owners cannot update enabled_accessibility_services`）。**加固开启时会把「无障碍设置页」推走**（`LockWatchdogService.isAccessibilitySettingsPage()` → `GLOBAL_ACTION_BACK`，实测 `am start -a android.settings.ACCESSIBILITY_SETTINGS` 2 秒内被弹回桌面并留下 `tamper`；关掉加固后同一命令能正常进入 = 家长逃生通道）。**唯一的放行口是「家长从应用内点『去开启』」**（`SensitiveScreens.allowTemporarily(…, HINT_ACCESSIBILITY)`，45 秒窗口）—— 不加这条会自锁死：加固默认开、无障碍一旦被关就再也进不去设置页重开。**检测是秒级的**（`onUnbind` 一次性信号，实测同一秒 16:37:14.128），5 分钟巡检只是兜底；自愈做不到 → 上报 `tamper` → 悬浮窗兜底 |
+| 进系统设置 / 应用管理 / 卸载界面 | **加固开启时「应用信息页 / 卸载界面」一进去就退回桌面**（`SensitiveScreens` + `LockWatchdogService.blockSensitiveScreen()`，按 `GLOBAL_ACTION_HOME`）。**设置首页是放行的** —— 第一版把 `com.android.settings` 整包封，结果本应用自己的授权引导页（无障碍/电池优化/悬浮窗/使用情况访问/应用详情）全长在设置包里，家长点「去开启」被自己推走，用户实测推翻后收窄。平台**没有**「禁止打开系统设置」的 DO 限制（逐条核对过 android-33 的 `UserManager`），所以这是拦截级而非限制级：**有约 0.1 秒延迟**，真正保证「卸不掉」的仍是上一行的 `setUninstallBlocked` + 受保护包。整包封：`packageinstaller` ×4、各 ROM 安全中心（小米/华为/OPPO/vivo/三星/一加）；设置包**只封应用信息页**，判据必须是**窗口文字**（实测 `event.getClassName()` 就是 `android.widget.FrameLayout`，不是页面名）：类名含 `appinfo`/`uninstall`、或文字里有「应用信息/应用详情」、或同时出现「强行停止」与「卸载」；`permissioncontroller` **只按类名封**（它同时承载权限对话框，整包封会把家长点「允许」的框推走）。放行窗口 45 秒 + 要求「进系统页面那一刻上一个前台还是本应用」，7 个授权入口各开一张。动作节流 800ms、日志 2s、上报 60s。**上机验证**（Android 13 模拟器）：设置首页停在 `SettingsHomepageActivity`、应用信息页与 `ACTION_DELETE` 都回到桌面，日志 `敏感界面封锁：拦截「应用信息」（android.widget.FrameLayout），已退回桌面`。**诚实边界**：放行窗口不校验身份（应用内没有可靠的「家长已认证」信号），而且它**不区分页面** —— 只要「进系统页那一刻上一个前台还是本应用」，应用信息页也会被放行（实测：先从应用内拉起再开应用信息页 → 页面留在前台；直接从桌面拉起 → 被拦下并回到桌面）。所以孩子点应用内的「去开启 / 应用详情」一样能走到应用信息页；但那页上的「强行停止 / 卸载 / 清除数据」由受保护包与设备所有者限制挡着 —— 放行的是「看这一页」，不是「改这一页」 |
 | 网址拦截 VPN 被断开 | 设备所有者把本应用钉成永久 VPN：`setAlwaysOnVpnPackage(admin, pkg, /* lockdown */ false)` + `no_config_vpn`。实测：开启 `webBlock` 后 41 秒 `always_on_vpn_app=com.balloondog.agent`、`mAlwaysOnVpnLockdown=false`、VPN 设置页被 `Blocked by your IT admin` 挡死；关闭后 10 秒 `已解除永久 VPN`。**不开 lockdown**（理由见 `android/README.md` §7.3）；**「下拉快捷开关的 VPN 磁贴能否断开」本机没有磁贴、未验证** |
 | 使用情况访问被关 | **授不了也补不回**（appop 型），但已接进巡检：限时功能在用时会发 `tamper` |
 
 实测（Android 13 / emulator-5554）：受保护包生效 —— `Uninstall`/`Force stop`/`Clear storage` 三个按钮 `enabled="false"`、`pm disable-user` 报 `Cannot disable a protected package`、`am force-stop` 后 PID 不变（同一命令杀系统时钟立刻生效）；`pm uninstall` → 普通状态 `Failure [DELETE_FAILED_USER_RESTRICTED]`（4 条变体实测同码），**锁屏（lock task）状态**下同一条命令变成 `Failure [DELETE_FAILED_APP_PINNED]`——两条独立拦截路径，两种状态都 exit 1；`pm hide` 回显 `Package com.balloondog.agent new hidden state: false`（exit 0 但没隐藏成功，PID/DO/无障碍全不变）；`pm clear` **本轮未实测**（会清掉绑定与授权、无法回滚，为不污染后续 agent 的验证刻意跳过）；`dpm remove-active-admin` → `SecurityException: Attempt to remove non-test admin`；`kill -9` 后自愈**必发生但耗时不是固定值**：实测 2 / 4 / 10 / 16 / 64 秒（连续被杀时 AMS 对 `START_STICKY` 服务做重启退避，60 秒主看门狗闹钟兜底）——只承诺「分钟级以内」，不承诺毫秒级（16:13:21 杀、16:13:31 `Agent 服务已启动`）。加固自检汇总：`26/28 项生效（2 项本机不支持）`（不支持的是模拟器跳过的 `no_debugging_features` 与 DO 写不进的 `app_auto_restriction_enabled`）；唯一持久缺口是电池优化白名单（无 DPM 静默 API）。**本轮另测**：`adb reboot` 后 `boot_completed=1` 与 agent pid 同在 **+21 秒**，DO 仍 `DeviceOwner,Affiliated`、受保护包与限制项都在、`PROJECT_MEDIA: allow` 跨重启保留；撤销「使用情况访问」的检测与恢复各 **T+284 秒**（`appops set GET_USAGE_STATS ignore` → tamper；`allow` → `管控已恢复正常`）；电池白名单缺口保持 10 分钟**没有**被反复当「新增」上报（此前那 13 条来自引入集合差分之前的旧构建）。**诚实边界**：`hardening_enabled` 目前**没有 UI 入口**（`AgentStore.setHardeningEnabled` 无调用者），家长逃生通道只在代码层成立。详见 `android/README.md` §2.5 / §2.10。
 
+### 2.8 会员体系（三档 + 动态定价）
+
+| 项 | 实现 |
+| --- | --- |
+| 三档 | `ordinary` / `member` / `super`，字段在 `User.membershipTier` + `membershipExpiresAt` |
+| 权益划分 | 会员 = `quizUnlock`（答题解锁）+ `remoteMonitor`（远程拍照/录像/录音/协助/通话短信/截屏）+ `multiDevice`（绑 >1 台）；超级会员 = 会员全部 + `aiInsight`（屏幕洞察 + AI 洞察 + 洞察配置页）。`ENTITLEMENTS` / `FEATURE_ENTITLEMENTS` 在 `server/src/features/membership/membership.constants.ts` |
+| 计费周期 | `monthly` / `yearly` / `auto_monthly`；同档续费**顺延**、升级**重新起算**、降级立即生效 |
+| 金额 | **不是写死的价目表**：`MembershipPlan.basePriceCents` × 后台可管的 `MembershipPricingRule`，按账号画像（首单/同档续费/设备数/注册天数/升级来源档位）实时算；纯函数引擎 `membership.pricing.ts`，折扣按**原价**算再相加，不可叠加的规则同单只取优先级最高一条，兜底 1 元 |
+| 受邀用户定价 | 会员价格与「买家是否被邀请注册」关联：邀请人拿到的返现是平台成本，所以**被邀请注册的账号价格更高**。常规定价算完后，把每条命中的 `MembershipReferralPriceRule`（后台 `/admin/membership/referral-rules` 可维护）各算一个价，**取两者中更高的**；`percent` 表示「在常规定价实付之上上浮 v%」、`amount` 加收固定金额、`fixed` 一口价（低于常规定价时不生效）；`firstPurchaseOnly` / `requireActiveReferral` 两个开关；命中不了会把**理由**下发给家长端而不是静默按原价；订存储 `referralRuleId`/`referralRuleName`/`referralSurchargeCents` 快照 |
+| 支付 | **目前是 mock**：`MEMBERSHIP_MOCK_PAY=true`（默认）时点「确认支付」直接开通，不接支付宝/微信；关掉后 `payOrder` 返回 503 |
+| 门禁 | 服务端 `membership.guard.ts` 的 `entitlementGate(key)` / `requireEntitlement` → **403 `MEMBERSHIP_REQUIRED`**（`detail` 带 `requiredTier`/`entitlement`/`currentTier`）；家长端据此渲染升级卡片而不是错误 toast |
+| 家长端 | [`/membership`](../src/pages/MembershipPage.tsx) 会员中心（状态卡、三周期报价、规则明细、模拟收银台、充值记录、连续包月开关）；`MembershipGate` / `MemberOnlyPage` 负责锁住的功能；「我的」页有入口 |
+| 后台 | `/admin/membership` 五页：统计 / 套餐 / 定价规则（含试算）/ 受邀用户定价（含试算）/ 订单 |
+
+**验证**：`npm run server:e2e:membership`（175 项，真实库、真算金额）+ 浏览器探针（家长端 46 项、
+管理后台 48 项，含会员中心五页与真实支付后档位立刻解锁）。**诚实边界**：支付渠道是 mock；`MEMBERSHIP_MOCK_PAY=false`
+时家长端只能看到「支付渠道尚未接入」。
+
+### 2.9 分享提成（邀请返现）
+
+| 项 | 实现 |
+| --- | --- |
+| 邀请码 | 每个账号自动生成 8 位码（字符集 `23456789ABCDEFGHJKMNPQRSTUVWXYZ`，去掉 `0/O/1/I/L` 便于口述与手抄）；`User.inviteCode` 唯一，`backfillInviteCodes()` 给老账号补发 |
+| 分享入口 | 邀请链接 `/login?mode=register&invite=CODE`（后端 `linkPath` + `publicBaseUrl()`）；家长端 `/referral` 给复制链接、微信/朋友圈分享文案、**当面扫码二维码**（复用 `QrBlock`）。**纯网页没有微信 JS-SDK 授权，分享按钮的真实行为是复制邀请文案**，不做点了没反应的按钮 |
+| 绑定 | 注册 / 短信登录都可带 `inviteCode`，**在建号之前校验**：码不存在、邀请人非 active、自己邀请自己 → 400，**不会先建出账号再报错**。活动暂停时**忽略邀请码照常注册**（一条过期的分享链接不该把好友的注册一起挡掉） |
+| 首充返现 | 按**有效充值人数**选档：0-3 人 50% / 4-9 人 40% / ≥10 人 20%（截图原文是「邀请人数 = 3 名」，实现成 0-3 人：只邀请 1 人的家长也该拿到返现）；月卡/季卡再保底 50%，年卡套单笔上限 75 元；基数是订单**实付**（含券抵扣后的金额），不是原价 |
+| 续费返现 | 被邀请好友后续每次付费都算续费奖励，比例**夹在 [20%, 50%]** 且单笔封顶 75 元 |
+| 券里程碑 | 邀请满 3 / 10 / 20 人各发 5 / 30 / 60 元券，超过 30 人**每满 30 人** 100 元；幂等靠 `(userId, sourceRef)` 唯一约束，可用于会员下单抵扣（券在**支付成功**时核销，押在待支付订单上时仍是未使用，同一张券不能同时押两笔订单） |
+| 结算 | 返现先落 `pending`，按**当月统计、次月 10-15 日发放**（`settleMonth` + `settleForUser` 惰性收敛，不依赖定时任务）；未结算金额**不计入**提现门槛 |
+| 提现 | 四道门槛：≥3 名有效充值好友 + 完成实名认证 + 已结算累计返现 ≥50 元 + 有可提现余额；`availableCents = 已结算 − 已提现 − 审核中`，申请后立刻冻结；提现单状态机单向 `pending → approved → paid` 或 `pending → rejected`，**后台人工审核** |
+| 实名 | 只存 `HMAC-SHA256(JWT_SECRET, 'id-card:' + 号码)` 与后 4 位，**不存明文**；校验 GB 11643 校验位与出生日期；同一证件不能实名第二个账号（409） |
+| 反作弊 | 自买自返、双方共用同一实名证件、1 小时内绑定 ≥5 人、提现审核超 3 天未处理，在后台「风险排查」里**只列出不自动处罚**（误伤正常家长的代价更大）；充值后退款走 `onOrderReversed` 取消或追回 |
+| 家长端 | [`/referral`](../src/pages/ReferralPage.tsx)：收益卡（总收益 / 待发放 / 已提现 / 待提现 / 邀请人数 / 已充值人数）、返现档位与「还差几人到下一档」、提现门槛逐条、邀请记录 / 返现明细 / 提现记录 / 我的优惠券四个 tab、实名与提现弹层、活动说明逐条；「我的」页有入口 |
+| 后台 | `/admin/referral` 八页：统计概览 / 提现审核 / 邀请记录 / 返现明细 / 优惠券 / 活动配置 / 规则与阶梯 / 风险排查；阶梯与券规则是**整表替换**（逐条改容易留下自相矛盾的表），保存时校验「必须有一档从 0 人开始」且区间不重叠 |
+
+**验证**：`npm run server:e2e:referral`（159 项，真实库、真算金额、真状态机；脚本开头与结尾都把
+活动配置与规则复位成平台默认值，避免一次中断污染下一轮）。**诚实边界**：返现与提现是**站内记账**，
+真实打款仍需人工在站外汇出；后台的提现「打款」只改状态，不调用任何支付渠道；风控只做提示，不做自动封禁。
+
 ---
 
 ## 3. 原先的「只存不用」缺口 —— 本轮补齐情况
-
 这一节是本文档存在的意义。原先有 9 项功能**家长端看起来是能用的，但孩子手机上不会发生任何事**；
 本轮把它们全部补齐，并**逐个上机验证**。下面每项都注明验证到了哪一层 ——
 「编译过 + 纯逻辑测过」与「真机跑过」是两件事，而**「真机跑过」也未必等于「端到端能用」**：
@@ -345,8 +385,20 @@ FrameBatchUploader POST /api/agent/screen-batches
 **原状**：家长端灰色「未开放」。
 
 **现在**：`activity-alias` + `IconHider` 切换启动器图标可见性（`DONT_KILL_APP`），
-设置页给出**恢复方式**（防止家长自己也找不到入口）。debug merged manifest 已确认
-`com.balloondog.agent.MainActivityLauncher` 存在。
+设置页给出**恢复方式**（防止家长自己也找不到入口）。
+
+- **默认就是隐藏**（`ChildDevice.hideIcon` 默认 `true`，迁移 `20261013214520_hide_icon_default_true`
+  同时把历史设备回填成 `true`）。孩子端设置页会写「桌面图标：已隐藏（拨号暗码可进入；家长端远程恢复
+  或 adb 可重新显示）」，家长端的隐藏/恢复弹窗里写明暗码。
+- 隐藏后本机入口是**拨号盘暗码 `*#*#2887#*#*`**（`capability/SecretCodeReceiver` +
+  `AndroidManifest.xml` 的 `android.provider.Telephony.SECRET_CODE` / host `2887`），
+  孩子端设置页也会显示这行提示。
+  ⚠️ 这个广播本身**没有发送方限制**，任何应用都能伪造，所以它只是「不显示在桌面上的入口」
+  这种便利性，**不是安全边界** —— 孩子打开主界面不等于绕过管控：真正的执行体是常驻服务 +
+  设备所有者策略，主界面只展示状态与自检。文档与家长端文案都已按这个口径改写。
+- ⚠️ 改 `schema.prisma` 的默认值后**必须 `npx prisma generate` 并重启后端**：否则运行时用的
+  还是旧 client 里内嵌的 schema，新设备照样拿到旧默认值（本轮真的踩到了 —— 改了 schema、
+  迁移也跑了，新注册设备的 `hideIcon` 却仍是 `false`，就是漏了这一步）。
 
 ### 3.9 ⛔ 同屏监控（实时投屏）—— 仍然明确不做
 
@@ -442,6 +494,9 @@ FrameBatchUploader POST /api/agent/screen-batches
 | 已修：`.gitignore` | `android/scripts/crosstest/.work/` 下 **22 个编译产物被 git 跟踪** | ✅ 已加 ignore 规则并 `git rm -r --cached`（**只动索引不删文件**）。现 crosstest 下被跟踪的只剩 12 个源文件 |
 | 已修：`android/README.md` §1.1 | 原文写「11 组接口」，漏了 `/agent/apps` 与 `/agent/events` | ✅ 已补齐为 17 组 |
 | 已修：截图「不好用」的两层根因（本轮的第 2 个重要新发现） | **缺陷 1（服务端门禁错挂）**：`server/src/features/devices/devices.service.ts` 的 `requestCapture()` 把 `screenshot` 挂到 `screenMonitor`（屏幕洞察，语义是「周期采集 + AI 分析」）上，家长按一次截图会被 400 挡回「请先开启「屏幕洞察」功能」；`FEATURE_DEFS`（`devices.constants.ts`）里**根本没有截图专用键**。家长端还有两处镜像门禁（`src/pages/HomePage.tsx` 的 `CAPTURE_FEATURE`、`src/pages/RemoteHelpPage.tsx` 与 `src/pages/InsightsPage.tsx` 的 `FeatureGate`）。**缺陷 2（设备端真正根因）**：`ScreenCapturer` 只有 MediaProjection 一条路，必须在孩子设备上点系统弹框「Start recording or casting with 气球狗守护?」，没人点就 20 秒超时（logcat `屏幕截图执行失败：等待屏幕共享授权超时，请在设备上点击「立即开始」`）；同一根因也打死了「屏幕洞察」的周期采样（`ScreenSampler.java` 调的就是 `ScreenCapturer.captureScreenshotLowRes`）。授权框被划掉后系统把 appop `PROJECT_MEDIA` 记成 `ignore`，家长侧表现就是「截图一直失败」。 | ✅ **已修并上机验证**：①服务端不再给截图加门禁（注释写清「FEATURE_DEFS 里没有截图开关，能不能截由设备端能力决定」，`remote_photo`/`start_recording`/`start_audio` 的映射未动），家长端 3 处镜像门禁一并撤掉；②新增 `capability/AccessibilityScreenCapture.java`（`AccessibilityService.takeScreenshot`，免授权）+ `accessibility_watchdog.xml` 加 `android:canTakeScreenshot="true"`，`ScreenCapturer.captureScreenshot*` 改为**先试无障碍、拿不到再回退 MediaProjection**；③`e2e-gaps` 新增「8. 屏幕截图」一节做永久回归。**实测（Android 13 模拟器，全程无人点屏幕）**：指令 `succeeded`、68469 B JPEG 可下载、`MediaAsset.kind='screenshot'` 新增、授权页 0 次（logcat `已通过无障碍接口截屏（免授权），66 KB`，耗时 ~270ms）；`ScreenFrame` 20 秒内 14→16。**诚实边界**：无障碍被系统记入 `Crashed services`（装包杀了服务进程）时 `takeScreenshot` 会持续回错误码 1，需重开一次无障碍开关；关掉无障碍就退回要点弹框的 MediaProjection；API 30 以下不可用。**全量回归（2026-10-11）**：`npm run android:e2e:gaps` → **131 通过 / 0 失败 / 2 跳过**（`EXIT_GAPS=0`），第 8 节截图 9 项、第 9 节录像 7 项、第 10 节周期采样 8 项全绿；跑测凭据 APK md5 `7c65b24b28e034b26250621dbc5a36fb`、脚本 md5 `6551098b84a72dac572360e88f25fe9a`、android 子树指纹 `1764100902f6cfee5cd35652e985b9cd4b5eddbf`（跑前跑后一致）。详见 `android/README.md` §10.5 |
+| **已修：绑定码每次重装都变，家长的绑定被清掉（本轮新发现）** | `AgentStore.ensureIdentity()` 用 `SecureRandom` **随机**生成 `deviceCode`（`CODE_ALPHABET` 里取 8 位）与 `deviceSecret`（两个 UUID），只存在 SharedPreferences 里。而服务端 `devicesService.registerAgent()`（`server/src/features/devices/devices.service.ts`）是按 `deviceCode` 找记录 + `bcrypt.compare(deviceSecret, existing.deviceSecretHash)` **认设备**，认出来就保留 `userId`（绑定不动）。于是设备端换个随机码 = 服务端当新设备 → 家长端多一台永远离线的幽灵设备，孩子手里这台要重新配对一次。 | ✅ **已修**：绑定码改为**按设备标识推导**（`seed = Settings.Secure.ANDROID_ID + "|" + 本地盐`，`sha256("balloondog/device-code\|"+seed)` 前 8 字节 % 32 映射到去混淆字母表，密钥取 `sha256("balloondog/device-secret\|"+seed)` 的 64 位十六进制；`ANDROID_ID` 在 Android 8+ 按签名+用户+设备作用域，重装与 OTA 都不变）。`resetIdentity()` 先换一个新盐，否则「重置设备身份」推出来的码与原来一样、等于没做；取不到 `ANDROID_ID` 的 ROM 退回随机实现并记日志。**上机验证（Android 13 模拟器）**：删掉 `device_code`/`device_secret`/`device_token`/`device_id`/`bound`/`identity_salt`/`agent_enabled` 七个键（等于全新安装）→ 进程重载后推出同一个码 `GYD6ZLW9` 与同一份密钥；用 Python 按公式外部复算（应用作用域的 SSAID `a90da458651b3fcb`，**不是** `settings get secure android_id` 的 `cc936b75408c48f`）逐位一致；服务端返回 `created:false`、`deviceId` 与 `userId=1`、`boundAt` **全部不变**。详见 `android/README.md` §5.5.1 |
+| **已修：全新安装不会自动连服务器注册，必须进一次设置页点保存（本轮新发现，最严重）** | `AgentStore.isAgentEnabled()` 原来默认 `false`（`prefs.getBoolean(KEY_AGENT_ENABLED, false)`），而 `MainActivity.selfHealIfServiceDied()` 只在它为真时才 `AgentService.start()`。全新安装时这个键**根本不存在** → 服务永不启动 → 不注册 → 家长端永远看不到设备。唯一能写入 `true` 的地方是 `SettingsActivity.save()`，所以「装上就是死的，进设置页点一次保存才活」。 | ✅ **已修**：`isAgentEnabled()` 缺省值改为 **`true`**（该键唯一的存在意义是「家长显式停止过」，显式停止会写 `false`）；`AgentApp.onCreate()` 先 `ensureIdentity()`，让设备码在任何界面出现之前就确定。**上机验证**：同上「全新安装」状态下**只**拉起 `MainActivity`（不碰设置页）→ logcat `检测到守护服务未在运行，正在自动恢复` → `Agent 服务已启动` → `注册成功（设备已存在，令牌已续订）`，`agent_enabled` 被写回 `true`。详见 `android/README.md` §5.4 / §5.5.1 |
+| 已修：`server/prisma/schema.prisma` 改了默认值但运行时 client 是旧的 | `hideIcon` 由 `@default(false)` 改成 `@default(true)` 后**只跑了迁移、没有重新生成 Prisma client、后端也没重启**，于是 `node_modules/.prisma/client/index.js` 里内嵌的 schema 仍是 `@default(false)`，Prisma 在 create 时显式发 `false`，新注册设备的图标依然不隐藏。 | ✅ 已 `npx prisma generate` + 触发后端重启；用一次性设备码走 `POST /api/agent/register` 实测新建记录 `hideIcon=true`（探针行已删）。**教训**：改 `schema.prisma` 的默认值 = 迁移 + `generate` + 重启，三件事缺一不可 |
 
 ### 4.3 设备端能力的诚实边界（不是 bug，是方案的天花板）
 
@@ -628,12 +683,15 @@ grep -rn "audioRecord\|remoteHelp\|callSms" --include=*.ts --include=*.tsx --inc
 | `android:e2e:mode`（23 项） | **学习模式真的拦住应用**、护眼/插件配置下发落盘 | 上机跑过 |
 | `android:e2e:screen`（21 项） | 截屏采集→上传→AI 分析→锁定复核 | 上机跑过 |
 | `android:crosstest` | 作息 2016 点、模式 3024 点、`GuardCheck` 16 项、**`PureLogicCheck` 63 项** | 本轮 EXIT=0 |
-| `server:smoke`（160 项） | 服务端全接口 | 本轮 160/160 |
+| `server:smoke`（162 项） | 服务端全接口 | 本轮 162/162 |
 | `server:e2e:mode`（64 项） | 模式/护眼/插件/事件/越权 | 上机跑过 |
 | `server:e2e:insights` + `:ai`（各 28 项） | 屏幕洞察与 AI 全链路 | 上机跑过 |
-| `e2e:parent` / `e2e:admin`（46 + 31 项） | 家长端与管理后台 | 本轮全绿 |
+| `server:e2e:icons`（32 项） | 应用图标上报→嗅探→签名 URL→缓存与鉴权 | 本轮 32/32 |
+| `server:e2e:membership`（175 项） | 动态定价、订单快照、三种周期、续费/升级、自动续费 CAS、门禁 403、受邀用户定价（含取最高价、后台 CRUD 与试算） | 本轮 175/175 |
+| `server:e2e:referral`（159 项） | 邀请码与绑定、首充阶梯、续费返现、券里程碑与幂等、实名哈希、次月结算、提现门槛与审核状态机、券抵扣、后台统计/规则/配置/风控 | 本轮 159/159 |
+| `e2e:parent` / `e2e:admin`（46 + 48 项） | 家长端与管理后台 | 本轮全绿 |
 | `e2e:ux`（122 项） | 首次引导三步、功能提示、英文界面、登录态健壮性 | 本轮全绿 |
-| `e2e:responsive`（5 视口 × **17 页**，各 84 项） | 响应式布局 | 本轮全绿 |
+| `e2e:responsive`（5 视口 × **20 页**，各 99 项） | 响应式布局 | 本轮全绿 |
 
 **教训**：§3.1 / §3.2 这类"仅存储"的功能，**端到端测试抓不到** ——
 因为断言的是"配置能下发、能落盘"，那确实通过了。

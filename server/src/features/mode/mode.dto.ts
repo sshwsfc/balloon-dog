@@ -104,6 +104,18 @@ export const reportAppsSchema = z.object({
         appName: z.string().trim().max(100).default(''),
         isSystem: z.boolean().default(false),
         isLaunchable: z.boolean().default(true),
+        /**
+         * 应用图标（PNG 原始字节的 base64），可选。
+         *
+         * 孩子端只在「图标的 sha256 变了」或「服务端还没这张图」时才带上，
+         * 所以老版本孩子端（完全不传这个字段）依然能正常上报清单 —— 图标为空，
+         * 家长端退回首字徽标。
+         */
+        icon: z
+          .string()
+          .max(24000, '单个应用图标的体积超出上限')
+          .regex(/^[A-Za-z0-9+/]+={0,2}$/, '应用图标必须是 base64')
+          .optional(),
       }),
     )
     .max(2000, '单次上报的应用数量超出上限'),

@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/button'
 import {
   Bell,
   ChevronRight,
+  Crown,
+  Gift,
   Image as ImageIcon,
   Lightbulb,
   LogOut,
@@ -17,7 +19,10 @@ import {
   User,
 } from 'lucide-react'
 import { LanguageSetting } from '@/components/LanguageSetting'
+import { MembershipBadge } from '@/components/MembershipGate'
 import { resetOnboarding, useOnboarding } from '@/hooks/useOnboarding'
+import { useMembership } from '@/hooks/useMembership'
+import { formatDateTime } from '@/lib/format'
 import { resetTips } from '@/hooks/useFeatureTips'
 import { useAuth } from '@/contexts/AuthContext'
 import { api, toUserMessage } from '@/services/api'
@@ -28,6 +33,7 @@ import { useTranslation } from 'react-i18next'
 export function ProfilePage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  const membership = useMembership()
   const { user, logout } = useAuth()
   const onboarding = useOnboarding()
   const onboardingDone = Boolean(onboarding.finishedAt)
@@ -162,6 +168,65 @@ export function ProfilePage() {
                 </button>
               </>
             )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* 会员入口：放在媒体之上，因为它是「为什么有些功能点不动」的答案 */}
+      <div className="px-3 mt-3">
+        <Card>
+          <CardContent className="p-0">
+            <button
+              type="button"
+              className="w-full flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors text-left"
+              onClick={() => navigate('/membership')}
+            >
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-amber-50 rounded-lg flex items-center justify-center">
+                  <Crown className="w-5 h-5 text-amber-500" />
+                </div>
+                <div>
+                  <div className="flex items-center space-x-1.5">
+                    <h4 className="font-medium text-gray-900 text-sm">{t('会员中心')}</h4>
+                    <MembershipBadge />
+                  </div>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {membership.isMember
+                      ? membership.status?.expiresAt
+                        ? t('有效期至 {{v0}}', { v0: formatDateTime(membership.status.expiresAt) })
+                        : t('已开通')
+                      : t('充值后解锁答题解锁、远程监控与 AI 洞察')}
+                  </p>
+                </div>
+              </div>
+              <ChevronRight className="w-5 h-5 text-gray-300" />
+            </button>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* 邀请返现入口：放在会员下面 —— 「会员要花钱」和「邀请能赚钱」是同一组心智 */}
+      <div className="px-3 mt-3">
+        <Card>
+          <CardContent className="p-0">
+            <button
+              type="button"
+              className="w-full flex items-center justify-between py-3 px-4 hover:bg-gray-50 active:bg-gray-100 transition-colors text-left"
+              onClick={() => navigate('/referral')}
+            >
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 bg-orange-50 rounded-lg flex items-center justify-center">
+                  <Gift className="w-5 h-5 text-orange-500" />
+                </div>
+                <div>
+                  <h4 className="font-medium text-gray-900 text-sm">{t('邀请返现')}</h4>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {t('邀请好友注册充值，最高返现 50%，次月发放')}
+                  </p>
+                </div>
+              </div>
+              <ChevronRight className="w-5 h-5 text-gray-300" />
+            </button>
           </CardContent>
         </Card>
       </div>

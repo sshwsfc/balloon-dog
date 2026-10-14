@@ -17,9 +17,10 @@ import com.balloondog.agent.data.EventLog;
  * <p>禁用时用 {@link PackageManager#DONT_KILL_APP}：不改动正在运行的进程，
  * 避免刚设好的守卫（无障碍服务）因为一次配置刷新被系统顺带重启。
  *
- * <p><b>必须让家长知道怎么找回来</b>：图标隐藏后，设备本机没有任何入口
- * （只能靠 adb 或家长端远程改配置）。设置页与家长端都要写明这一点，
- * 免得出现「家长自己也找不到、以为装丢了」。
+ * <p><b>必须让家长知道怎么找回来</b>：图标隐藏后，桌面上与本机设置里都没有入口。
+ * 本机入口是拨号暗码 {@code *#*#2887#*#*}（见 {@link SecretCodeReceiver}），
+ * 另外两条兜底是家长端远程改配置与 adb（{@code pm enable .../MainActivityLauncher}）。
+ * 设置页与家长端都要写明这一点，免得出现「家长自己也找不到、以为装丢了」。
  */
 public final class IconHider {
 
@@ -41,7 +42,8 @@ public final class IconHider {
             if (manager.getComponentEnabledSetting(alias) == desired) return;
             manager.setComponentEnabledSetting(alias, desired, PackageManager.DONT_KILL_APP);
             EventLog.success(hide
-                    ? "桌面图标已隐藏（可通过家长端远程恢复，或 adb 重新启用）"
+                    ? "桌面图标已隐藏（本机入口：拨号盘输入 " + SecretCodeReceiver.DIAL_CODE
+                    + "；也可由家长端远程恢复）"
                     : "桌面图标已恢复显示");
         } catch (Exception e) {
             // 少数 ROM 会拒绝改组件状态：如实记日志，不假装已经隐藏

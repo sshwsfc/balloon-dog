@@ -9,6 +9,8 @@ import CommandMonitorPage from './pages/CommandMonitor'
 import QuestionManagePage from './pages/QuestionManage'
 import QuizRecordPage from './pages/QuizRecords'
 import SmsAuditPage from './pages/SmsAudit'
+import MembershipPage from './pages/Membership'
+import ReferralPage from './pages/Referral'
 import AdminManagePage from './pages/AdminManage'
 import OperationLogPage from './pages/OperationLogs'
 import SettingsPage from './pages/Settings'
@@ -59,6 +61,8 @@ export default function AdminApp() {
         <Route path="questions" element={<QuestionManagePage />} />
         <Route path="quiz-records" element={<QuizRecordPage />} />
         <Route path="sms-codes" element={<SmsAuditPage />} />
+        <Route path="membership" element={<MembershipPage />} />
+        <Route path="referral" element={<ReferralPage />} />
         <Route
           path="admins"
           element={

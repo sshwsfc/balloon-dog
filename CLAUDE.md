@@ -26,16 +26,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm --prefix server run lint` - ESLint (backend)
 
 ### Testing
-- `npm run server:smoke` - End-to-end backend smoke test (160 assertions). Needs a running backend
+- `npm run server:smoke` - End-to-end backend smoke test (162 assertions). Needs a running backend
   and a seeded database. Covers auth, authorization, multi-user isolation, device binding, the full
   device-command queue round trip, and the admin console (token isolation, role split, audit). Its
   two throwaway parent accounts are deleted again in the last section.
 - `cd server && npm run agent:example` - Simulated child device that polls for and executes commands.
-- `npm run e2e` - Browser end-to-end test for both SPAs (77 checks) via CDP-driven headless Chrome;
+- `npm run server:e2e:icons` / `npm run server:e2e:membership` / `npm run server:e2e:referral` -
+  Feature-level backend e2e tests
+  (icons: 32 assertions; membership: 175; referral: 159). All need a running backend + seeded
+  database and clean up the throwaway parent/device they register. Membership covers dynamic
+  pricing, order snapshots, the three billing periods, auto-renew CAS, mock pay, and every
+  `403 MEMBERSHIP_REQUIRED` gate. Referral covers invite-code binding (validated **before** the
+  account is created), first-purchase tiers, renewal cashback, coupon milestones, next-month
+  settlement, the withdrawal gates and review state machine, and coupon redemption on membership
+  orders — and it resets the activity config / reward tiers to the platform defaults at both ends,
+  so an aborted run cannot poison the next one.
+- `npm run e2e` - Browser end-to-end test for both SPAs (94 checks) via CDP-driven headless Chrome;
   targets `http://localhost:2727` by default, so have `npm run preview:all` running (override with
   `APP_URL=http://localhost:5173` to run against the dev server instead).
   `--only=parent|admin|responsive|ux` runs one suite;
-  `e2e:responsive` walks 5 viewports × 17 routes, `e2e:ux` (122 checks) covers the first-run guide
+  `e2e:responsive` walks 5 viewports × 20 routes, `e2e:ux` (122 checks) covers the first-run guide
   (decoding the APK QR code with `BarcodeDetector`), per-feature tips, login centering, the English
   UI and session robustness. Running
   `e2e:responsive` requires a raised `RATE_LIMIT_MAX` (see `server/.env.example`) — it peaks at
@@ -137,6 +147,8 @@ These encode fixes for bugs the original mock server had — do not reintroduce 
 - `/profile` - [ProfilePage](src/pages/ProfilePage.tsx) - account and device list
 - `/devices` - [DeviceManagePage](src/pages/DeviceManagePage.tsx) - bind/select/unbind devices
 - `/quiz-unlock` - [QuizUnlockPage](src/pages/QuizUnlockPage.tsx) - quiz config, stats, records
+- `/membership` - [MembershipPage](src/pages/MembershipPage.tsx) - membership tiers, dynamic quotes, mock checkout
+- `/referral` - [ReferralPage](src/pages/ReferralPage.tsx) - invite code/link/QR, cashback tiers, withdrawals, coupons
 - `/media` - [MediaPage](src/pages/MediaPage.tsx) - photos/screenshots/recordings from the device
 
 `BottomNav` is rendered per-route (not globally) so immersive pages like `/login` do not show it.
@@ -151,6 +163,8 @@ These encode fixes for bugs the original mock server had — do not reintroduce 
 - `/admin/questions` - [QuestionManage](src/admin/pages/QuestionManage.tsx) - quiz bank CRUD
 - `/admin/quiz-records` - [QuizRecords](src/admin/pages/QuizRecords.tsx)
 - `/admin/sms-codes` - [SmsAudit](src/admin/pages/SmsAudit.tsx)
+- `/admin/membership` - [Membership](src/admin/pages/Membership.tsx) - 会员统计 / 套餐 / 定价规则（含试算）/ 受邀用户定价（含试算）/ 订单
+- `/admin/referral` - [Referral](src/admin/pages/Referral.tsx) - 分享提成统计 / 提现审核 / 邀请记录 / 返现明细 / 优惠券 / 活动配置 / 规则阶梯 / 风险排查
 - `/admin/admins` - [AdminManage](src/admin/pages/AdminManage.tsx) - super admin only
 - `/admin/logs` - [OperationLogs](src/admin/pages/OperationLogs.tsx)
 - `/admin/settings` - [Settings](src/admin/pages/Settings.tsx) - own password
@@ -168,7 +182,7 @@ import { Card } from '@/components/ui/card'
 - **UI Language**: All user-facing text is in Chinese (this is a Chinese parental control app)
 - **Responsive**: 页面最外层用 `.page-shell`（详见 [`docs/RESPONSIVE.md`](docs/RESPONSIVE.md)），
   栅格要给出 `sm:` / `lg:` 档位，导航统一走 `BottomNav`；横屏与宽屏都要能用。
-  验证：`npm run e2e:responsive`（5 档视口 × 17 个页面，每档 84 项）
+  验证：`npm run e2e:responsive`（5 档视口 × 20 个页面，每档 99 项）
 - **Component Exports**: Use named exports: `export function HomePage() {}`
 - **Styling**: WeChat-inspired UI with primary green `#07c160`, shadcn/ui, Tailwind CSS v4
 - **Error Handling**: try-catch with `toast.error(toUserMessage(error))`; type caught values as `unknown`

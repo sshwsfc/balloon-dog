@@ -107,8 +107,15 @@ public class SettingsActivity extends AppCompatActivity {
 
         sb.append("桌面图标：")
                 .append(com.balloondog.agent.capability.IconHider.isHidden(this)
-                        ? "已隐藏（本机无入口，需家长端远程恢复或 adb 启用 MainActivityLauncher）"
-                        : "显示中");
+                        ? "已隐藏（拨号暗码可进入；家长端远程恢复或 adb 可重新显示）"
+                        : "显示中")
+                .append('\n');
+        // 图标隐藏后本机唯一的入口就是系统拨号盘暗码：
+        // 家长拿着这台手机时要在设置页当场看到怎么进去，而不是只能翻文档。
+        // 暗码字面量只留在 SecretCodeReceiver.DIAL_CODE 一处，这里用占位符引用。
+        sb.append(getString(R.string.icon_hint_dial_entry,
+                com.balloondog.agent.capability.SecretCodeReceiver.DIAL_CODE))
+                .append('\n');
         binding.textPermissionState.setText(sb.toString());
     }
 

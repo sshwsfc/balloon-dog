@@ -53,11 +53,29 @@ import type {
   ScreenMonitorConfig,
   ScreenMonitorConfigPatch,
   ScreenMonitorUpdateResult,
+  CreateMembershipOrderResponse,
+  MembershipOrder,
+  MembershipOrderListResponse,
+  MembershipOverview,
+  MembershipStatus,
+  MembershipTier,
+  PayChannel,
+  PayMembershipOrderResponse,
+  PurchasableTier,
   SmsListResponse,
   StudySlotListResponse,
   StudySlotReplaceResult,
   UsageAlertListResponse,
   UsageAlertReadAllResult,
+  ReferralCoupon,
+  ReferralCouponListResponse,
+  ReferralIdentityResponse,
+  ReferralInvitee,
+  ReferralListResponse,
+  ReferralOverview,
+  ReferralReward,
+  ReferralWithdrawal,
+  ReferralWithdrawResponse,
   UsageAlertReadResult,
   UsageAlertType,
   UsageBudgetInput,
@@ -65,6 +83,7 @@ import type {
   UsageBudgetUpsertResult,
   UsageSummary,
   User,
+  WithdrawChannel,
 } from '@/types'
 import { tt } from '@/i18n'
 
@@ -77,7 +96,8 @@ interface ServerErrorBody {
   title?: string
   status?: number
   message?: string
-  detail?: string | null
+  /** 补充信息，形状随 title（错误码）而定，见 ApiError.detail 的注释 */
+  detail?: unknown
   errors?: { path: string; message: string }[] | null
   request_id?: string
 }
@@ -87,7 +107,12 @@ export class ApiError extends Error {
   readonly code: string
   /** 可直接展示给用户的中文提示 */
   readonly userMessage: string
-  readonly detail: string | null
+  /**
+   * 后端给的补充信息。**形状随 code 而定**（老接口是字符串，
+   * MEMBERSHIP_REQUIRED 是 { requiredTier, entitlement, currentTier }），
+   * 所以这里刻意是 unknown：要读就先用下面的类型守卫收窄。
+   */
+  readonly detail: unknown
   readonly fieldErrors: { path: string; message: string }[] | null
   readonly requestId?: string
 
@@ -95,7 +120,7 @@ export class ApiError extends Error {
     status: number
     code: string
     userMessage: string
-    detail?: string | null
+    detail?: unknown
     fieldErrors?: { path: string; message: string }[] | null
     requestId?: string
   }) {
@@ -297,6 +322,47 @@ const http = {
 // 认证
 // ============================================================
 
+// ============================================================
+// 分享提成（邀请返现）
+// ============================================================
+
+export const referralApi = {
+  /** 邀请返现总览：邀请码/链接、收益统计、阶梯规则、券、提现门槛、活动说明。 */
+  overview: () => http.get<ReferralOverview>('/referral'),
+
+  invitees: (options?: { page?: number; pageSize?: number }) =>
+    http.get<ReferralListResponse<ReferralInvitee>>('/referral/invitees', {
+      page: options?.page ?? 1,
+      pageSize: options?.pageSize ?? 20,
+    }),
+
+  rewards: (options?: { page?: number; pageSize?: number; status?: string }) =>
+    http.get<ReferralListResponse<ReferralReward>>('/referral/rewards', {
+      page: options?.page ?? 1,
+      pageSize: options?.pageSize ?? 20,
+      status: options?.status,
+    }),
+
+  coupons: (status?: string) =>
+    http.get<ReferralCouponListResponse>('/referral/coupons', { status: status ?? 'all' }),
+
+  /** 下单时能用的券（未使用、未过期）。 */
+  usableCoupons: () => http.get<{ success: boolean; coupons: ReferralCoupon[] }>('/referral/coupons/usable'),
+
+  withdrawals: (options?: { page?: number; pageSize?: number }) =>
+    http.get<ReferralListResponse<ReferralWithdrawal>>('/referral/withdrawals', {
+      page: options?.page ?? 1,
+      pageSize: options?.pageSize ?? 20,
+    }),
+
+  /** 实名认证。身份证号在服务端只以哈希形式落库。 */
+  verifyIdentity: (realName: string, idCard: string) =>
+    http.post<ReferralIdentityResponse>('/referral/identity', { realName, idCard }),
+
+  requestWithdrawal: (input: { amountCents?: number; channel: WithdrawChannel; account: string; note?: string }) =>
+    http.post<ReferralWithdrawResponse>('/referral/withdrawals', input),
+}
+
 export type SmsPurpose = 'register' | 'login' | 'bind'
 
 export interface SendCodeResult {
@@ -311,14 +377,15 @@ export const authApi = {
   sendCode: (phone: string, purpose: SmsPurpose = 'register') =>
     http.post<SendCodeResult>('/auth/send-code', { phone, purpose }),
 
-  register: (data: { phone: string; password: string; code: string; nickname?: string }) =>
+  // inviteCode 来自分享链接 /login?invite=XXXX；带上它注册即自动绑定邀请关系
+  register: (data: { phone: string; password: string; code: string; nickname?: string; inviteCode?: string }) =>
     http.post<AuthResponse>('/auth/register', data),
 
   login: (data: { phone: string; password: string }) =>
     // 登录失败时不要触发全局 401 跳转（本来就在登录页）
     request<AuthResponse>('/auth/login', { method: 'POST', body: data, skipUnauthorizedHandler: true }),
 
-  smsLogin: (data: { phone: string; code: string }) =>
+  smsLogin: (data: { phone: string; code: string; inviteCode?: string }) =>
     request<AuthResponse>('/auth/sms-login', { method: 'POST', body: data, skipUnauthorizedHandler: true }),
 
   logout: () => http.post<{ success: boolean }>('/auth/logout', {}),
@@ -962,6 +1029,79 @@ export const callSmsApi = {
 }
 
 // ============================================================
+// 会员 / 充值
+// ============================================================
+
+export const membershipApi = {
+  /** 会员中心：当前档位 + 每档套餐按这个账号算出来的价格。 */
+  overview: () => http.get<MembershipOverview>('/membership'),
+
+  orders: (options?: { page?: number; pageSize?: number }) =>
+    http.get<MembershipOrderListResponse>('/membership/orders', {
+      page: options?.page ?? 1,
+      pageSize: options?.pageSize ?? 20,
+    }),
+
+  /**
+   * 下单。金额由**服务端**按当前规则算好并快照进订单，
+   * 前端传的任何价格都会被忽略 —— 否则改一下请求体就能一分钱开会员。
+   */
+  createOrder: (planCode: string, payChannel: PayChannel, couponId?: string) =>
+    http.post<CreateMembershipOrderResponse>('/membership/orders', {
+      planCode,
+      payChannel,
+      /** 邀请返现拿到的抵扣券。金额仍由服务端算：券不能超过应付金额，也不会倒找钱。 */
+      ...(couponId ? { couponId } : {}),
+    }),
+
+  /** 模拟支付。真实接入后这里换成「拉起渠道收银台 + 轮询订单状态」。 */
+  payOrder: (orderNo: string, outcome: 'success' | 'fail' = 'success') =>
+    http.post<PayMembershipOrderResponse>(`/membership/orders/${orderNo}/pay`, { outcome }),
+
+  cancelOrder: (orderNo: string) =>
+    http.post<{ success: boolean; order: MembershipOrder }>(
+      `/membership/orders/${orderNo}/cancel`,
+    ),
+
+  /** 开启/关闭连续包月。 */
+  setAutoRenew: (enabled: boolean) =>
+    http.post<{ success: boolean; status: MembershipStatus }>('/membership/auto-renew', { enabled }),
+}
+
+/** 会员权益不足（HTTP 403 / MEMBERSHIP_REQUIRED）时后端给的结构。 */
+export interface MembershipRequiredDetail {
+  requiredTier: PurchasableTier
+  entitlement: string
+  currentTier: MembershipTier
+}
+
+/**
+ * 从任意错误里取出「缺哪一项会员权益」。
+ *
+ * 拿到非 null 就说明这不是 bug，而是该弹升级引导 —— 直接把 message
+ * 展示给家长即可（后端已经写成一句人话）。
+ */
+export function membershipRequiredDetail(error: unknown): MembershipRequiredDetail | null {
+  if (!(error instanceof ApiError) || error.code !== 'MEMBERSHIP_REQUIRED') return null
+  const detail = error.detail
+  if (!detail || typeof detail !== 'object') return null
+  const d = detail as Partial<MembershipRequiredDetail>
+  const requiredTier = d.requiredTier
+  if (requiredTier !== 'member' && requiredTier !== 'super') return null
+  return {
+    requiredTier,
+    entitlement: typeof d.entitlement === 'string' ? d.entitlement : '',
+    currentTier:
+      d.currentTier === 'member' || d.currentTier === 'super' ? d.currentTier : 'ordinary',
+  }
+}
+
+/** 是不是「该升级会员」而不是真错误。 */
+export function isMembershipRequired(error: unknown): boolean {
+  return membershipRequiredDetail(error) !== null
+}
+
+// ============================================================
 // 兼容聚合导出（既有页面用 `api.xxx` 的写法可继续使用）
 // ============================================================
 
@@ -1100,4 +1240,21 @@ export const api = {
   // 通话记录与短信
   getCallLogs: callSmsApi.calls,
   getSmsMessages: callSmsApi.sms,
+
+  // 会员 / 充值
+  getMembership: membershipApi.overview,
+  getMembershipOrders: membershipApi.orders,
+  createMembershipOrder: membershipApi.createOrder,
+  payMembershipOrder: membershipApi.payOrder,
+  cancelMembershipOrder: membershipApi.cancelOrder,
+  setMembershipAutoRenew: membershipApi.setAutoRenew,
+
+  // 分享提成
+  getReferral: referralApi.overview,
+  getReferralInvitees: referralApi.invitees,
+  getReferralRewards: referralApi.rewards,
+  getReferralCoupons: referralApi.coupons,
+  getReferralWithdrawals: referralApi.withdrawals,
+  verifyReferralIdentity: referralApi.verifyIdentity,
+  requestReferralWithdrawal: referralApi.requestWithdrawal,
 }

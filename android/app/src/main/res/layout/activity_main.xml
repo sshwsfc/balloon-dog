@@ -275,6 +275,23 @@
                 android:textColor="@color/text_secondary"
                 android:textSize="12sp" />
 
+            <!--
+              没有设备所有者时的显眼告警。这一条必须露在外面：
+              「一键开启权限」开不了它（只能在设备未添加账号时用 adb 设置），
+              如果只把它塞进「高级 / 诊断」，家长会以为清单全绿就已经防卸载了。
+            -->
+            <TextView
+                android:id="@+id/textTodoAlert"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_badge_warn"
+                android:padding="8dp"
+                android:text="@string/todo_alert_owner"
+                android:textColor="@color/danger_red"
+                android:textSize="12sp"
+                android:visibility="gone" />
+
             <View
                 android:layout_width="match_parent"
                 android:layout_height="1dp"

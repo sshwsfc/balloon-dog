@@ -59,6 +59,9 @@ public final class AppUsageTracker {
     /** 打开系统的「使用情况访问」设置页，让用户手动授权。 */
     public static void openSettings(Context context) {
         try {
+            // 加固开启时系统页面默认会被看门狗推回桌面，先给自己开一张限时通行证
+            // （见 SensitiveScreens：这不是安全边界，只是让家长点得动这个按钮）
+            SensitiveScreens.allowTemporarily(context, SensitiveScreens.HINT_GENERIC);
             Intent intent = new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             context.startActivity(intent);

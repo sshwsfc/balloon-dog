@@ -7,6 +7,10 @@ import { Button } from '@/components/ui/button'
 import { ToggleSwitch } from '@/components/ToggleSwitch'
 import { HeaderRefreshButton } from '@/components/HeaderRefreshButton'
 import { QuickActionBar, type QuickAction, type QuickActionGroup } from '@/components/QuickActionBar'
+import { AppIcon } from '@/components/AppIcon'
+import { MemberLockHint } from '@/components/MembershipGate'
+import { UsageLimits, type UsageLimitEdit } from '@/components/UsageLimits'
+import { useMembership } from '@/hooks/useMembership'
 import {
   Dialog,
   DialogContent,
@@ -169,6 +173,25 @@ const QUICK_ACTION_GROUPS: QuickActionGroup[] = TILE_GROUPS.map((group) => ({
 /** 第一次打开（或点了「恢复默认」）时放的两个：原来那两个写死的按钮。 */
 const DEFAULT_QUICK_ACTION_IDS = ['tempUnlock', 'quizUnlock']
 
+/**
+ * 九宫格 → 所需会员权益。
+ *
+ * 只列**会员专属**的格子：锁屏、时间规划、应用限制、护眼、模式、网页拦截、
+ * 应用审批都在基础功能里，任何账号都能用（过度设限会让普通用户体验残缺，
+ * 也不符合「会员 = 答题解锁 + 远程监控 + 多设备」这个划分）。
+ *
+ * 截图刻意不在表里 —— 它本来就不受功能开关管（见 CAPTURE_FEATURE 上方注释）。
+ */
+const TILE_ENTITLEMENTS: Record<string, string> = {
+  quizUnlock: 'quizUnlock',
+  insights: 'aiInsight',
+  remoteHelp: 'remoteMonitor',
+  callSms: 'remoteMonitor',
+  photo: 'remoteMonitor',
+  videoRecord: 'remoteMonitor',
+  audioRecord: 'remoteMonitor',
+}
+
 /** 设备事件类型 → 图标与配色。未知类型按灰色圆点兜底展示，不假装认识它。 */
 const EVENT_META: Record<string, { icon: typeof Lock; className: string }> = {
   unlock: { icon: Unlock, className: 'text-green-500' },
@@ -193,6 +216,13 @@ interface FeatureMeta {
   desc: string
   color: string
   bg: string
+  /**
+   * 这个开关属于哪项会员权益（不填＝基础功能，人人可用）。
+   *
+   * 与后端 `membership.constants.ts` 的 `FEATURE_ENTITLEMENTS` 一一对应：
+   * 后端才是真正的门禁，这里只是提前把锁画出来、给家长一个去开通的入口。
+   */
+  entitlement?: string
 }
 
 /**
@@ -202,16 +232,16 @@ interface FeatureMeta {
  * 不能合并成一个按钮（原实现把开关和动作套在同一个可点击区域里，一次点击发两次请求）。
  */
 const toggleFeatures: FeatureMeta[] = [
-  { id: 'quizUnlock', icon: BookOpen, name: '答题解锁', desc: '通过答题获得使用时长', color: 'text-amber-500', bg: 'bg-amber-50' },
-  { id: 'screenMonitor', icon: Eye, name: '屏幕洞察', desc: '周期截屏并交给 AI 分析', color: 'text-indigo-500', bg: 'bg-indigo-50' },
+  { id: 'quizUnlock', icon: BookOpen, name: '答题解锁', desc: '通过答题获得使用时长', color: 'text-amber-500', bg: 'bg-amber-50', entitlement: 'quizUnlock' },
+  { id: 'screenMonitor', icon: Eye, name: '屏幕洞察', desc: '周期截屏并交给 AI 分析', color: 'text-indigo-500', bg: 'bg-indigo-50', entitlement: 'aiInsight' },
   { id: 'modeSwitch', icon: Repeat, name: '模式切换', desc: '学习模式 / 普通模式', color: 'text-[#07c160]', bg: 'bg-green-50' },
   { id: 'eyeCare', icon: Eye, name: '护眼设置', desc: '连续用眼提醒与强制休息', color: 'text-cyan-500', bg: 'bg-cyan-50' },
   { id: 'appPlugin', icon: Puzzle, name: '功能管控', desc: '按应用关闭具体功能', color: 'text-violet-500', bg: 'bg-violet-50' },
-  { id: 'remotePhoto', icon: Camera, name: '远程拍照', desc: '远程拍摄照片', color: 'text-cyan-500', bg: 'bg-cyan-50' },
-  { id: 'remoteRecord', icon: Mic, name: '远程录音', desc: '远程录制音频', color: 'text-rose-500', bg: 'bg-rose-50' },
-  { id: 'videoRecord', icon: Video, name: '连续录像', desc: '持续视频录制', color: 'text-fuchsia-500', bg: 'bg-fuchsia-50' },
-  { id: 'remoteHelp', icon: Smartphone, name: '远程协助', desc: '远程操作帮助', color: 'text-pink-500', bg: 'bg-pink-50' },
-  { id: 'callSms', icon: MessageCircle, name: '电话短信', desc: '查看通话和短信', color: 'text-teal-500', bg: 'bg-teal-50' },
+  { id: 'remotePhoto', icon: Camera, name: '远程拍照', desc: '远程拍摄照片', color: 'text-cyan-500', bg: 'bg-cyan-50', entitlement: 'remoteMonitor' },
+  { id: 'remoteRecord', icon: Mic, name: '远程录音', desc: '远程录制音频', color: 'text-rose-500', bg: 'bg-rose-50', entitlement: 'remoteMonitor' },
+  { id: 'videoRecord', icon: Video, name: '连续录像', desc: '持续视频录制', color: 'text-fuchsia-500', bg: 'bg-fuchsia-50', entitlement: 'remoteMonitor' },
+  { id: 'remoteHelp', icon: Smartphone, name: '远程协助', desc: '远程操作帮助', color: 'text-pink-500', bg: 'bg-pink-50', entitlement: 'remoteMonitor' },
+  { id: 'callSms', icon: MessageCircle, name: '电话短信', desc: '查看通话和短信', color: 'text-teal-500', bg: 'bg-teal-50', entitlement: 'remoteMonitor' },
 ]
 
 /**
@@ -279,6 +309,7 @@ function formatCountdown(untilIso: string, now: number): string | null {
 export function HomePage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  const membership = useMembership()
 
   const [device, setDevice] = useState<Device | null>(null)
   const [features, setFeatures] = useState<Features | null>(null)
@@ -294,7 +325,8 @@ export function HomePage() {
 
   const [lockDialogOpen, setLockDialogOpen] = useState(false)
   const [tempUnlockDialogOpen, setTempUnlockDialogOpen] = useState(false)
-  const [timePlanDialogOpen, setTimePlanDialogOpen] = useState(false)
+  /** 统一的「用量上限」编辑弹窗：时长 / 局数 / 集数共用这一个入口 */
+  const [limitEdit, setLimitEdit] = useState<UsageLimitEdit | null>(null)
   const [appLimitDialogOpen, setAppLimitDialogOpen] = useState(false)
   const [appAuditDialogOpen, setAppAuditDialogOpen] = useState(false)
   const [webBlockDialogOpen, setWebBlockDialogOpen] = useState(false)
@@ -308,7 +340,6 @@ export function HomePage() {
   const [enablePrompt, setEnablePrompt] = useState<{ feature: string; label: string } | null>(null)
 
   const [tempUnlockMinutes, setTempUnlockMinutes] = useState('')
-  const [timePlanLimit, setTimePlanLimit] = useState('')
   /** 选中的应用**包名**：设备端按包名匹配前台窗口，展示名只是给人看的 */
   const [selectedPackage, setSelectedPackage] = useState('')
   const [selectedApp, setSelectedApp] = useState('')
@@ -478,23 +509,6 @@ export function HomePage() {
     if (ok) {
       setTempUnlockDialogOpen(false)
       setTempUnlockMinutes('')
-    }
-  }
-
-  const handleSetTimePlan = async () => {
-    const limit = Number.parseInt(timePlanLimit, 10)
-    if (!Number.isFinite(limit) || limit <= 0) {
-      toast.error(t('输入有效的时长'))
-      return
-    }
-    try {
-      await api.setTimePlan(limit)
-      toast.success(t('每日使用时长已设为 {{v0}} 分钟', { v0: limit }))
-      setTimePlanDialogOpen(false)
-      setTimePlanLimit('')
-      await loadData({ silent: true })
-    } catch (error) {
-      toast.error(toUserMessage(error))
     }
   }
 
@@ -675,6 +689,21 @@ export function HomePage() {
    * 而不是弹一个假的成功提示 —— 家长会按提示去做别的操作，错误反馈代价更高。
    */
   const handleTileAction = async (tile: GridTile) => {
+    /*
+      会员门禁放在最前面，一处拦全部入口。
+      为什么不用 disabled 的格子：家长点一下什么都不发生，只会以为是 bug；
+      这里给一句人话 + 一个直达会员中心的动作，比把入口藏起来强。
+    */
+    const requiredEntitlement = TILE_ENTITLEMENTS[tile.id]
+    if (requiredEntitlement && !membership.has(requiredEntitlement)) {
+      const tier = membership.requiredTierOf(requiredEntitlement) ?? 'super'
+      const tierName = t(tier === 'super' ? '超级会员' : '会员')
+      toast.info(t('「{{v0}}」是{{v1}}功能', { v0: t(tile.name), v1: tierName }), {
+        action: { label: t('去开通'), onClick: () => navigate('/membership') },
+      })
+      return
+    }
+
     switch (tile.id) {
       case 'mode':
         navigate('/mode')
@@ -683,7 +712,7 @@ export function HomePage() {
         navigate('/eye-care')
         return
       case 'timePlan':
-        setTimePlanDialogOpen(true)
+        setLimitEdit({ kind: 'time' })
         return
       case 'appLimit':
         handleOpenAppLimitDialog()
@@ -1045,9 +1074,7 @@ export function HomePage() {
                 <div className="flex items-start gap-3 mt-2 flex-wrap">
                   {activeApps.map(({ name, count }) => (
                     <div key={name} className="flex items-center space-x-1.5">
-                      <div className="w-7 h-7 rounded-lg bg-gray-100 flex items-center justify-center text-xs text-gray-600 font-medium">
-                        {name.slice(0, 1)}
-                      </div>
+                      <AppIcon appName={name} className="w-7 h-7" letterClassName="text-xs" />
                       <div className="leading-tight">
                         <div className="text-xs text-gray-700 max-w-[72px] truncate">{name}</div>
                         <div className="text-[10px] text-gray-400">{count} {t('次记录')}</div>
@@ -1087,6 +1114,22 @@ export function HomePage() {
             </div>
           </CardContent>
         </Card>
+      </div>
+
+      {/* ---------------- 用量上限：时长 / 局数 / 集数 ---------------- */}
+      <div className="px-3 mt-3">
+        <div className="mb-2 px-1">
+          <span className="text-sm font-medium text-gray-500">{t('用量上限')}</span>
+        </div>
+        <UsageLimits
+          features={features}
+          editing={limitEdit}
+          onEditingChange={setLimitEdit}
+          onChanged={() => loadData({ silent: true })}
+          onEnableInsights={async () => {
+            await turnFeatureOn('screenMonitor')
+          }}
+        />
       </div>
 
       {/* ---------------- 九宫格功能分组 ---------------- */}
@@ -1150,6 +1193,7 @@ export function HomePage() {
               const state = (features as unknown as Record<string, ToggleState | undefined>)[feature.id]
               const enabled = state?.enabled ?? false
               const busy = busyFeature === feature.id
+              const locked = feature.entitlement ? !membership.has(feature.entitlement) : false
 
               return (
                 <div key={feature.id}>
@@ -1158,18 +1202,38 @@ export function HomePage() {
                       <Icon className={`w-5 h-5 ${feature.color}`} />
                     </div>
                     <div className="flex-1 min-w-0 ml-3">
-                      <div className="font-medium text-gray-900 text-sm">{t(feature.name)}</div>
+                      <div className="flex items-center space-x-1.5">
+                        <span className="font-medium text-gray-900 text-sm">{t(feature.name)}</span>
+                        {feature.entitlement && (
+                          <MemberLockHint entitlementKey={feature.entitlement} />
+                        )}
+                      </div>
                       <div className="text-xs text-gray-400 mt-0.5 truncate">
-                        {enabled ? t(feature.desc) : t('未开启')}
+                        {locked ? t(feature.desc) : enabled ? t(feature.desc) : t('未开启')}
                       </div>
                     </div>
-                    <ToggleSwitch
-                      checked={enabled}
-                      busy={busy}
-                      disabled={busy}
-                      label={t('{{v0}}开关', { v0: t(feature.name) })}
-                      onChange={() => void handleToggleFeature(feature.id)}
-                    />
+                    {locked ? (
+                      /*
+                        锁住时**不渲染 ToggleSwitch**，而不是渲染一个 disabled 的开关：
+                        禁用开关点下去毫无反馈，家长会以为应用卡了。
+                        换成一个明确的「去开通」按钮，点一下就是他要的下一步。
+                      */
+                      <button
+                        type="button"
+                        onClick={() => navigate('/membership')}
+                        className="ml-2 flex-shrink-0 rounded-full bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 active:bg-amber-100"
+                      >
+                        {t('去开通')}
+                      </button>
+                    ) : (
+                      <ToggleSwitch
+                        checked={enabled}
+                        busy={busy}
+                        disabled={busy}
+                        label={t('{{v0}}开关', { v0: t(feature.name) })}
+                        onChange={() => void handleToggleFeature(feature.id)}
+                      />
+                    )}
                   </div>
                   {index < toggleFeatures.length - 1 && <div className="mx-4 border-t border-gray-100" />}
                 </div>
@@ -1423,51 +1487,6 @@ export function HomePage() {
         </DialogContent>
       </Dialog>
 
-      {/* ---------------- 屏幕时间 ---------------- */}
-      <Dialog open={timePlanDialogOpen} onOpenChange={setTimePlanDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t('屏幕时间限制')}</DialogTitle>
-          </DialogHeader>
-          <p className="text-gray-600 mb-4">{t('设置每日时长上限（分钟）')}</p>
-          <div className="grid grid-cols-3 gap-2 mb-4">
-            {[60, 120, 180, 240, 300, 360].map((min) => (
-              <Button
-                key={min}
-                variant="outline"
-                onClick={() => setTimePlanLimit(String(min))}
-                className={timePlanLimit === String(min) ? 'border-[#07c160] text-[#07c160]' : ''}
-              >
-                {min}{t('分钟')}
-              </Button>
-            ))}
-          </div>
-          <div className="flex items-center space-x-2">
-            <input
-              type="number"
-              min={1}
-              value={timePlanLimit}
-              onChange={(e) => setTimePlanLimit(e.target.value)}
-              placeholder={t('输入分钟数')}
-              className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#07c160]"
-            />
-            <span className="text-gray-500 text-sm">{t('分钟')}</span>
-          </div>
-          <p className="text-xs text-gray-500 mt-4">
-            {t('当前设置：')}{features.timePlan.dailyLimit > 0 ? t('{{v0}} 分钟/天', { v0: features.timePlan.dailyLimit }) : t('未设置')}
-            {t('，今日已用')} {features.timePlan.usedToday} {t('分钟')}
-          </p>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setTimePlanDialogOpen(false)}>
-              {t('取消')}
-            </Button>
-            <Button className="bg-[#07c160] hover:bg-[#06a050]" onClick={() => void handleSetTimePlan()}>
-              {t('确认')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       {/* ---------------- 应用限制 ---------------- */}
       <Dialog open={appLimitDialogOpen} onOpenChange={setAppLimitDialogOpen}>
         <DialogContent>
@@ -1525,8 +1544,14 @@ export function HomePage() {
                       active ? 'border-[#07c160] bg-green-50' : 'border-gray-200 bg-white'
                     }`}
                   >
-                    <div className="flex items-center justify-between space-x-2">
-                      <span className="text-sm font-medium text-gray-900 truncate">{appName}</span>
+                    <div className="flex items-center space-x-2">
+                      <AppIcon
+                        packageName={packageName}
+                        appName={appName}
+                        className="w-8 h-8 flex-shrink-0"
+                        letterClassName="text-xs"
+                      />
+                      <span className="flex-1 text-sm font-medium text-gray-900 truncate">{appName}</span>
                       <span className={`text-xs flex-shrink-0 ${over ? 'text-red-500' : 'text-gray-500'}`}>
                         {entry
                           ? t('今日已用 {{v0}} 分钟 / 上限 {{v1}} 分钟', { v0: usedMinutes, v1: entry.dailyLimit })
@@ -1604,7 +1629,10 @@ export function HomePage() {
               <p className="text-gray-600">{t('待审核应用：')}</p>
               {features.appAudit.pendingApps.map((app) => (
                 <div key={app} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                  <span className="font-medium text-sm">{app}</span>
+                  <span className="flex items-center space-x-2 min-w-0">
+                    <AppIcon appName={app} className="w-8 h-8 flex-shrink-0" letterClassName="text-xs" />
+                    <span className="font-medium text-sm truncate">{app}</span>
+                  </span>
                   <div className="flex space-x-2">
                     <Button size="sm" variant="outline" onClick={() => void handleAuditApp(app, false)}>
                       <X className="w-4 h-4" />
@@ -1706,15 +1734,18 @@ export function HomePage() {
             <div className="text-xs text-red-800 leading-relaxed space-y-1.5">
               <p className="font-medium text-sm">{t('隐藏后，孩子端也找不到这个应用')}</p>
               <p>
-                {t('图标、桌面入口、应用列表条目都会消失。')}<b>{t('孩子自己打不开，你也只能靠这个页面远程恢复')}</b>{t('； 设备离线或 Agent 出问题，就只能用 ADB（或设备所有者指令）重新启用组件。')}</p>
+                {t('图标、桌面入口、应用列表条目都会消失。')}<b>{t('不告诉孩子暗码，他自己打不开')}</b>{t('；设备离线或 Agent 出问题，可以用 ADB（或设备所有者指令）重新启用组件。')}</p>
               <p>{t('它只藏入口，不影响孩子在系统设置里停用或卸载（由设备所有者权限下的防卸载限制负责）。隐藏或恢复都需要孩子端在线，离线时指令会排队。')}</p>
+              <p className="font-medium">
+                {t('图标隐藏后，在孩子的拨号盘输入 *#*#2887#*#* 即可打开本应用。它只是「不显示在桌面上的入口」，不是安全边界（这条广播任何应用都能发），管控仍由常驻服务与设备所有者限制执行。')}
+              </p>
             </div>
           </div>
           <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div className="min-w-0">
               <div className="text-sm font-medium text-gray-900">{t('隐藏客户端图标')}</div>
               <div className="text-xs text-gray-500 mt-0.5">
-                {device.hideIcon ? t('已隐藏，孩子端没有入口') : t('当前显示在桌面上')}
+                {device.hideIcon ? t('已隐藏，仅可用拨号暗码进入') : t('当前显示在桌面上')}
               </div>
             </div>
             <ToggleSwitch

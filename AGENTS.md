@@ -34,17 +34,38 @@ architecture, full API reference, and the admin/auth design.
 - `npm --prefix server run lint` - Run ESLint (backend)
 
 ### Testing
-- `npm run server:smoke` - End-to-end backend smoke test (160 assertions: auth, authorization,
+- `npm run server:smoke` - End-to-end backend smoke test (162 assertions: auth, authorization,
   multi-user isolation, device binding, the full device-command queue round trip, and the admin
   console's auth isolation / role split / audit trail). Requires a running backend and a seeded
   database. It registers two throwaway parent accounts and deletes them again in its last section.
 - `cd server && npm run agent:example` - Run a simulated child device that polls for commands.
-- `npm run e2e` - Browser end-to-end test (parent app + admin console, 77 checks) driving headless
+- `npm run server:e2e:icons` - App-icon end-to-end test (32 assertions): a simulated device reports
+  icons, then the parent-side contract is checked — `hasIcon` / signed `iconUrl`, **no icon bytes in
+  the list payload**, signature enforcement (missing / tampered / cross-app / expired → 403), server-side
+  image sniffing, size caps, and the incremental rule that a re-report *without* `icon` must not wipe the
+  stored one. Needs a running backend and a seeded database; cleans up its throwaway device itself.
+  The same thing in the browser (real `<img>` decode on `/mode/apps`, `/app-plugins`, `/app-audit`) is
+  covered by `npm run e2e`.
+- `npm run server:e2e:membership` - Membership end-to-end test (175 assertions): registers a throwaway
+  parent (deleted at the end, orders and all), then drives the whole paid flow against the real
+  database — dynamic pricing (the test recomputes every rule's arithmetic independently), order
+  snapshots, the three billing periods, same-tier renewal extending the period while an upgrade
+  restarts it, auto-renew CAS, the `MEMBERSHIP_MOCK_PAY` switch, and every entitlement gate returning
+  `403 MEMBERSHIP_REQUIRED` with the right `requiredTier`. Needs a running backend and a seeded database.
+- `npm run server:e2e:referral` - Referral (invite-cashback) end-to-end test (159 assertions): registers
+  throwaway parents and deletes them again at the end. Drives invite-code generation, binding at
+  registration (a bad code must fail **before** the account is created), first-purchase tiers,
+  renewal cashback, coupon milestones, idempotency, the identity check (HMAC only, one ID per
+  account), lazy next-month settlement, the four withdrawal gates and the review state machine,
+  coupon redemption on membership orders, and the admin stats/rules/config/risk endpoints. It
+  **rewrites the activity config and the reward tiers to the platform defaults at both the start and
+  the end**, because an aborted run used to leave a paused activity behind and poison the next run.
+- `npm run e2e` - Browser end-to-end test (parent app + admin console, 94 checks) driving headless
   Chrome over CDP with no npm dependencies. Targets `http://localhost:2727` by default, so it needs
   `npm run preview:all` running; set `APP_URL=http://localhost:5173` to point it at the dev server
   instead. Override the
   browser with `CHROME_PATH`. Use `--only=parent` / `--only=admin` / `--only=responsive` /
-  `--only=ux` to run a single suite; `e2e:responsive` walks 5 viewports × 17 routes (84 checks per
+  `--only=ux` to run a single suite; `e2e:responsive` walks 5 viewports × 20 routes (99 checks per
   viewport) and `e2e:ux` (122 checks) covers the first-run guide (including the APK download QR
   code, which it decodes with `BarcodeDetector`), the per-feature tips, login centering, the
   English UI and session robustness. **`e2e:responsive` needs a raised

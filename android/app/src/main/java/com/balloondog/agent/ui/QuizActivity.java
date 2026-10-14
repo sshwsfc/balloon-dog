@@ -56,6 +56,36 @@ public class QuizActivity extends AppCompatActivity {
     private int selectedIndex = -1;
     private boolean answered;
 
+    /**
+     * 答题页当前是否在前台。
+     *
+     * <p>存在的理由是实测踩到的一个 bug：孩子从锁定页点「答题解锁」进入本页后，
+     * 亮屏 / 解锁广播会让 {@link com.balloondog.agent.capability.LockReassertor}
+     * 走一次「强制补锁」，而补锁调用的是 {@code LockScreenActivity.show()} ——
+     * 它的 {@code CLEAR_TOP} 会把本页直接弹掉，孩子连题目都看不完就被扔回锁定页。
+     *
+     * <p>和 {@code LockScreenActivity.showing} 一样，用同进程内的静态标志而不是
+     * 去问 WindowManager：精确、零成本，而且这里本来就不需要跨进程可见。
+     */
+    private static volatile boolean showing;
+
+    /** 答题页是否在前台（锁定复核据此判断「孩子正在解锁流程里」，不要打断）。 */
+    public static boolean isShowing() {
+        return showing;
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        showing = true;
+    }
+
+    @Override
+    protected void onPause() {
+        showing = false;
+        super.onPause();
+    }
+
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);

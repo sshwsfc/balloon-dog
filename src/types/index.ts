@@ -674,6 +674,15 @@ export interface DeviceApp {
   isSystem: boolean
   /** 有桌面图标、可启动的应用才值得管控 */
   isLaunchable: boolean
+  /** 服务端是否已经存了这张图标（老版本孩子端不上传图标时为 false） */
+  hasIcon: boolean
+  /**
+   * 图标地址，带签名，可以直接塞进 `<img src>`；没有图标时为 null。
+   *
+   * 签名 7 天有效，所以别把它存进 localStorage 长期用 ——
+   * 每次列表接口都会重新签发。
+   */
+  iconUrl: string | null
 }
 
 /** GET /api/device-apps */
@@ -872,7 +881,363 @@ export interface ApiErrorBody {
   title: string
   status: number
   message: string
-  detail: string | null
+  /** 形状随 title 而定（MEMBERSHIP_REQUIRED 是结构化对象），故为 unknown */
+  detail: unknown
   errors: { path: string; message: string }[] | null
   request_id?: string
+}
+
+// ============================================================
+// 会员体系
+// ============================================================
+
+/** 账号档位。ordinary 是默认档，注册即得。 */
+export type MembershipTier = 'ordinary' | 'member' | 'super'
+
+/** 可购买的档位：普通账号不是商品，只能通过到期退回来。 */
+export type PurchasableTier = 'member' | 'super'
+
+/** 计费周期：按月 / 按年 / 连续包月（自动续费）。 */
+export type BillingPeriod = 'monthly' | 'yearly' | 'auto_monthly'
+
+export type PayChannel = 'alipay' | 'wechat'
+
+export type MembershipOrderStatus = 'pending' | 'paid' | 'failed' | 'cancelled' | 'expired'
+
+/** 权益定义（后端 ENTITLEMENTS 的镜像）。 */
+export interface MembershipEntitlement {
+  key: string
+  label: string
+  minTier: PurchasableTier
+  description: string
+}
+
+/** 一条定价规则命中的结果：前端只用来展示「省了多少、为什么」。 */
+export interface PricingAdjustment {
+  ruleId: string
+  name: string
+  discountType: 'percent' | 'amount'
+  discountValue: number
+  /** 这条规则实际减掉的分（已经按原价算好，不是百分比） */
+  amountCents: number
+  note: string
+}
+
+/**
+ * 受邀用户定价的状态（会员价格 × 是否被邀请注册）。
+ *
+ * 被邀请注册的家长价格**更高**：邀请人要拿的那笔分享返现是平台出的，成本落在这张订单上。
+ * 结账价 = max(常规定价, 受邀加价)。
+ *
+ * `applied` 为 false 不代表没资格 —— 也可能是后台没配到能超过常规价的规则，
+ * 所以 `reason` 必须展示，否则家长会以为这个功能坏了。
+ */
+export interface ReferralPriceInfo {
+  /** 这个账号有没有资格走专享价（被邀请注册） */
+  applicable: boolean
+  /** 专享价最终有没有真的生效 */
+  applied: boolean
+  /** 一句话解释当前状态 */
+  reason: string
+  ruleId: string | null
+  ruleName: string
+  priceType: 'percent' | 'amount' | 'fixed' | null
+  priceValue: number
+  /** 加价基数：常规定价的实付价 */
+  baseCents: number
+  /** 命中的规则算出来的最高价；没命中为 null */
+  candidateCents: number | null
+  /** 比常规定价多收了多少分；0 表示没生效 */
+  surchargeCents: number
+  /** 结账价 = max(常规定价, candidateCents) */
+  finalCents: number
+  /** 一共命中几条规则（价格取的是最高的一条） */
+  matchedCount: number
+  note: string
+}
+
+/** 一个套餐在当前账号下的动态报价。 */
+export interface MembershipPlanQuote {
+  code: string
+  name: string
+  description: string
+  tier: PurchasableTier
+  period: BillingPeriod
+  periodLabel: string
+  months: number
+  recommended: boolean
+  originalCents: number
+  finalCents: number
+  discountCents: number
+  /** 折合每月多少分，用来横向比较年付与月付 */
+  monthlyEquivalentCents: number
+  adjustments: PricingAdjustment[]
+  referral: ReferralPriceInfo
+}
+
+export interface MembershipTierQuotes {
+  tier: PurchasableTier
+  label: string
+  plans: MembershipPlanQuote[]
+}
+
+export interface MembershipStatus {
+  tier: MembershipTier
+  tierLabel: string
+  /** 当前是否有生效的付费身份（ordinary 恒为 false） */
+  active: boolean
+  expiresAt: string | null
+  daysLeft: number | null
+  autoRenew: boolean
+  renewTier: PurchasableTier | null
+  startedAt: string | null
+  firstPaidAt: string | null
+  totalPaidCents: number
+  /** 当前档位已解锁的权益 key 列表 */
+  entitlements: string[]
+  nextTier: {
+    tier: PurchasableTier
+    label: string
+    missing: { key: string; label: string }[]
+  } | null
+}
+
+export interface MembershipOverview {
+  success: boolean
+  status: MembershipStatus
+  entitlements: MembershipEntitlement[]
+  tiers: MembershipTierQuotes[]
+  /** 后端是否在跑模拟支付（false 时支付接口会 503） */
+  mockPay: boolean
+}
+
+export interface MembershipOrder {
+  orderNo: string
+  planCode: string
+  tier: PurchasableTier
+  period: BillingPeriod
+  periodLabel: string
+  originalCents: number
+  amountCents: number
+  /** 抵扣用的邀请返现优惠券；没有则为 null */
+  couponId: string | null
+  couponCents: number
+  /** 本单命中的受邀定价规则名；没命中为空串 */
+  referralRuleName: string
+  /** 本单因受邀定价多收的分 */
+  referralSurchargeCents: number
+  adjustments: PricingAdjustment[]
+  payChannel: PayChannel
+  status: MembershipOrderStatus
+  transactionId: string | null
+  paidAt: string | null
+  expiresAt: string | null
+  createdAt: string
+}
+
+export interface MembershipOrderListResponse {
+  success: boolean
+  orders: MembershipOrder[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface CreateMembershipOrderResponse {
+  success: boolean
+  order: MembershipOrder
+}
+
+export interface PayMembershipOrderResponse {
+  success: boolean
+  order: MembershipOrder
+  status: MembershipStatus
+}
+
+// ============================================================
+// 分享提成（邀请返现）
+// ============================================================
+
+/** 邀请码用到的账号/关系状态。 */
+export type ReferralStatus = 'bound' | 'valid' | 'invalid'
+export type ReferralRewardKind = 'first_purchase' | 'renewal'
+export type ReferralRewardStatus = 'pending' | 'settled' | 'cancelled'
+export type ReferralWithdrawalStatus = 'pending' | 'approved' | 'paid' | 'rejected'
+export type ReferralCouponStatus = 'unused' | 'used' | 'expired'
+export type WithdrawChannel = 'alipay' | 'wechat' | 'bank'
+
+export interface ReferralConfig {
+  enabled: boolean
+  title: string
+  subtitle: string
+  notice: string
+  /** 逐条的活动说明，直接 map 渲染 */
+  noticeLines: string[]
+  shortPeriodMinRatePercent: number
+  longPeriodCapCents: number
+  renewalRatePercent: number
+  renewalCapCents: number
+  withdrawMinInvitees: number
+  withdrawMinCents: number
+  withdrawRequireVerified: boolean
+  settleDayStart: number
+  settleDayEnd: number
+}
+
+export interface ReferralStats {
+  invitedCount: number
+  validCount: number
+  rewardTotalCents: number
+  pendingCents: number
+  settledCents: number
+  cancelledCents: number
+  withdrawnCents: number
+  pendingWithdrawCents: number
+  availableCents: number
+  couponUnusedCount: number
+  couponUnusedCents: number
+  /** 本月已产生的返现（分，字符串避免大数精度问题） */
+  currentMonthCents: string
+  currentMonthLabel: string
+}
+
+export interface ReferralTier {
+  minInvitees: number
+  maxInvitees: number | null
+  ratePercent: number
+  current: boolean
+}
+
+export interface ReferralNextTier {
+  minInvitees: number
+  ratePercent: number
+  needInvitees: number
+}
+
+export interface WithdrawRequirement {
+  key: 'invitees' | 'verified' | 'amount' | 'balance'
+  label: string
+  met: boolean
+  current: string
+  required: string
+}
+
+export interface ReferralWithdrawEligibility {
+  eligible: boolean
+  availableCents: number
+  requirements: WithdrawRequirement[]
+  blockedReason: string
+}
+
+export interface ReferralIdentity {
+  verified: boolean
+  realName: string
+  idCardTail: string
+  idCardMasked: string
+}
+
+export interface ReferralReward {
+  rewardNo: string
+  kind: ReferralRewardKind
+  kindLabel: string
+  status: ReferralRewardStatus
+  statusLabel: string
+  baseAmountCents: number
+  ratePercent: number
+  amountCents: number
+  capApplied: boolean
+  settleMonth: string
+  settledAt: string | null
+  cancelReason: string
+  createdAt: string
+  inviteeName: string
+  inviteePhone: string
+}
+
+export interface ReferralCoupon {
+  id: string
+  amountCents: number
+  source: string
+  status: ReferralCouponStatus
+  statusLabel: string
+  expiresAt: string | null
+  usedAt: string | null
+  usedOrderNo: string | null
+  createdAt: string
+  usable: boolean
+}
+
+export interface ReferralInvitee {
+  id: string
+  nickname: string
+  phone: string
+  status: ReferralStatus
+  statusLabel: string
+  invalidReason: string
+  boundAt: string
+  validAt: string | null
+  rewardCents: number
+  rewardCount: number
+}
+
+export interface ReferralWithdrawal {
+  withdrawNo: string
+  amountCents: number
+  status: ReferralWithdrawalStatus
+  statusLabel: string
+  realName: string
+  idCardTail: string
+  channel: WithdrawChannel
+  channelLabel: string
+  account: string
+  userNote: string
+  reviewNote: string
+  createdAt: string
+  reviewedAt: string | null
+  paidAt: string | null
+}
+
+export interface ReferralOverview {
+  success: boolean
+  config: ReferralConfig
+  inviteCode: string
+  /** 相对路径，前端自己拼 window.location.origin */
+  linkPath: string
+  inviteLink: string
+  stats: ReferralStats
+  tiers: ReferralTier[]
+  currentTier: { minInvitees: number; maxInvitees: number | null; ratePercent: number } | null
+  nextTier: ReferralNextTier | null
+  withdraw: ReferralWithdrawEligibility
+  identity: ReferralIdentity
+  recentRewards: ReferralReward[]
+  recentCoupons: ReferralCoupon[]
+}
+
+export interface ReferralCouponListResponse {
+  success: boolean
+  items: ReferralCoupon[]
+  summary: {
+    unusedCount: number
+    unusedCents: number
+    usedCount: number
+    expiredCount: number
+  }
+}
+
+export interface ReferralListResponse<T> {
+  success: boolean
+  items: T[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface ReferralIdentityResponse extends ReferralIdentity {
+  success: boolean
+}
+
+export interface ReferralWithdrawResponse {
+  success: boolean
+  withdrawal: ReferralWithdrawal
 }

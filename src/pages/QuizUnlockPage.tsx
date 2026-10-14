@@ -7,13 +7,16 @@ import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { ArrowLeft, Settings, Clock, CheckCircle, XCircle, BookOpen, Image as ImageIcon, Play } from 'lucide-react'
 import { api } from '@/services/api'
+import { useMembership } from '@/hooks/useMembership'
 import { FeatureTip } from '@/components/FeatureTip'
+import { MembershipGate } from '@/components/MembershipGate'
 import type { QuizConfig, QuizStatistics, QuizRecord } from '@/types'
 import { useTranslation } from 'react-i18next'
 
 export function QuizUnlockPage() {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  const { isMember } = useMembership()
   const [loading, setLoading] = useState(true)
   const [config, setConfig] = useState<QuizConfig | null>(null)
   const [statistics, setStatistics] = useState<QuizStatistics | null>(null)
@@ -33,11 +36,12 @@ export function QuizUnlockPage() {
     { id: 'grade6', name: t('六年级教材') },
   ]
 
-  useEffect(() => {
-    loadData()
-  }, [])
-
   const loadData = async () => {
+    // 非会员不发请求：答题解锁整块归会员，服务端会 403
+    if (!isMember) {
+      setLoading(false)
+      return
+    }
     try {
       const [configData, statsData, recordsData] = await Promise.all([
         api.getQuizConfig(),
@@ -58,6 +62,15 @@ export function QuizUnlockPage() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    // 推进微任务再调用：loadData 会同步 setState，直接在 effect 体里调会被
+    // react-hooks/set-state-in-effect 拦下（仓库里 src/admin/hooks/useAsyncData.ts 同理）。
+    // isMember 是异步到的：只挂载时跑一次的话，会员状态回来之前那次请求就被短路掉了，
+    // 页面会永远停在「没读到配置」的空样子上。依赖 isMember，等它变 true 再拉一次。
+    void Promise.resolve().then(() => loadData())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMember])
 
   const handleToggleEnabled = async () => {
     if (!config) return
@@ -106,6 +119,26 @@ export function QuizUnlockPage() {
       random: t('随机出题'),
     }
     return typeMap[type] || type
+  }
+
+  if (!isMember) {
+    return (
+      <div className="page-shell page-shell--immersive">
+        <div className="page-header flex items-center border-b border-gray-200 bg-white px-4 py-3 [@media(max-height:520px)]:py-2 sm:px-5">
+          <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mr-2">
+            <ArrowLeft className="w-5 h-5" />
+          </Button>
+          <h1 className="text-xl font-medium text-gray-900 flex-1">{t('答题解锁')}</h1>
+        </div>
+        <div className="px-3 py-4">
+          <MembershipGate
+            entitlementKey="quizUnlock"
+            title={t('答题解锁是会员功能')}
+            description={t('开通会员后，可以配置答题规则、奖励时长，并查看孩子的答题记录。')}
+          />
+        </div>
+      </div>
+    )
   }
 
   if (loading) {

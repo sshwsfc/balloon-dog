@@ -68,3 +68,19 @@ export class ValidationError extends AppError {
     super('校验失败', 'VALIDATION_ERROR', 422);
   }
 }
+
+/**
+ * 会员权益不足。
+ *
+ * 单独一个 code（而不是复用 FORBIDDEN）：家长端要靠它把「无权限」和
+ * 「这个功能要开通会员」区分开 —— 前者是 bug，后者要弹升级引导。
+ * detail 里带上所需档位与权益名，前端不用再猜是哪一项。
+ */
+export class MembershipRequiredError extends AppError {
+  constructor(
+    message: string,
+    detail: { requiredTier: string; entitlement: string; currentTier: string },
+  ) {
+    super(message, 'MEMBERSHIP_REQUIRED', 403, true, detail);
+  }
+}

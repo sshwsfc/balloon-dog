@@ -27,6 +27,8 @@ export const registerSchema = z.object({
     .max(64, '密码最多 64 位'),
   code: codeSchema,
   nickname: z.string().trim().max(30).optional(),
+  /** 邀请码（分享提成）。填错要当场报错，不能先建号再悄悄丢掉邀请关系。 */
+  inviteCode: z.string().trim().max(16).optional(),
 });
 
 /** 登录：支持手机号或邮箱（前端传 phone 即可，identifier 兼容邮箱登录）。 */
@@ -45,6 +47,8 @@ export const loginSchema = z
 export const smsLoginSchema = z.object({
   phone: phoneSchema,
   code: codeSchema,
+  /** 首次自动注册时同样可以带上邀请码。 */
+  inviteCode: z.string().trim().max(16).optional(),
 });
 
 /** 微信扫码轮询 */

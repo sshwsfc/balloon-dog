@@ -417,6 +417,11 @@ public class AgentApi {
     public void reportApps(String baseUrl,
                            java.util.List<com.balloondog.agent.capability.AppInventory.AppEntry> apps)
             throws ApiException {
+        // 图标以 base64 塞在同一个请求里。服务端的 JSON 上限是 4MB，
+        // 这里留足余量：超过 3MB 就不再带图标，宁可少几张图也不能让整份清单上报失败。
+        final int iconBudgetChars = 3_000_000;
+        int iconChars = 0;
+
         JSONArray array = new JSONArray();
         for (com.balloondog.agent.capability.AppInventory.AppEntry a : apps) {
             JSONObject o = new JSONObject();
@@ -425,6 +430,11 @@ public class AgentApi {
                 o.put("appName", a.appName);
                 o.put("isSystem", a.isSystem);
                 o.put("isLaunchable", a.isLaunchable);
+                if (a.icon != null && a.icon.length > 0 && iconChars < iconBudgetChars) {
+                    String encoded = android.util.Base64.encodeToString(a.icon, android.util.Base64.NO_WRAP);
+                    o.put("icon", encoded);
+                    iconChars += encoded.length();
+                }
             } catch (Exception ignored) {
                 // 常量 key
             }

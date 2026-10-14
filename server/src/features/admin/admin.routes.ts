@@ -5,6 +5,8 @@ import { authenticateAdmin, requireSuperAdmin } from '../../middleware/auth';
 import { config } from '../../config';
 import { adminAudit } from './admin.audit';
 import * as controller from './admin.controller';
+import { membershipAdminRoutes } from '../membership/membership.admin.routes';
+import { referralAdminRoutes } from '../referral/referral.admin.controller';
 
 /**
  * /api/admin —— 管理后台专用接口。
@@ -85,6 +87,12 @@ adminRoutes.post('/sms-codes/purge', ah(controller.purgeSmsCodes));
 
 // 操作日志
 adminRoutes.get('/logs', ah(controller.listLogs));
+
+// 会员：套餐 / 定价规则 / 订单 / 统计
+adminRoutes.use('/membership', membershipAdminRoutes);
+
+// 分享提成：邀请关系 / 返现 / 优惠券 / 提现审核 / 规则
+adminRoutes.use('/referral', referralAdminRoutes);
 
 // 管理员账号管理：仅超级管理员
 adminRoutes.get('/admins', ah(controller.listAdmins));

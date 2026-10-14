@@ -196,13 +196,36 @@ async function main() {
   });
   check('未知功能标识被拒（400）', badFeature.status === 400, `实际 ${badFeature.status}`);
 
+  // 基础功能的开关：任何账号都能开。
+  // 不能拿 screenMonitor 当「合法功能」的例子 —— 它要超级会员（`FEATURE_ENTITLEMENTS`），
+  // 免费账号按下去是 403 MEMBERSHIP_REQUIRED，这条断言会变成在测会员门禁。
   const toggle = await req('PUT', '/features', {
     token: parentToken,
-    body: { feature: 'screenMonitor', enabled: true },
+    body: { feature: 'webBlock', enabled: true },
   });
-  check('切换合法功能成功', toggle.status === 200);
+  check('切换合法功能成功', toggle.status === 200, JSON.stringify(toggle.body).slice(0, 120));
   const afterToggle = await req('GET', '/features', { token: parentToken });
-  check('切换结果已持久化', afterToggle.body?.screenMonitor?.enabled === true);
+  check('切换结果已持久化', afterToggle.body?.webBlock?.enabled === true);
+
+  // 会员门禁：免费账号进不了超级会员专属的功能（完整口径在 server:e2e:membership）
+  // 错误体里 `title` 才是机器可判别的错误码（`message` 是给用户看的中文句子）。
+  //
+  // 用 userB（刚注册的免费账号）而不是 parentToken：parentToken 是种子里的演示账号
+  // `13800138000`，而 `prisma/seed.ts` 故意把它设成超级会员（十年有效期），拿它验
+  // 「免费账号被拦」会直接测反。走 `/insights` 是因为它在路由上挂了
+  // `entitlementGate('aiInsight')`，不需要先绑设备就能验到门禁本身。
+  const gated = await req('GET', '/insights', { token: userB.token });
+  check(
+    '会员专属功能对免费账号返回 403 MEMBERSHIP_REQUIRED',
+    gated.status === 403 && gated.body?.title === 'MEMBERSHIP_REQUIRED',
+    `实际 ${gated.status} / ${JSON.stringify(gated.body).slice(0, 140)}`,
+  );
+  const gatedDetail = gated.body?.detail;
+  check(
+    '门禁带上 requiredTier（前端据此引导开通）',
+    gatedDetail?.requiredTier === 'super' && gatedDetail?.entitlement === 'aiInsight',
+    JSON.stringify(gatedDetail),
+  );
 
   const timePlan = await req('PUT', '/features/time-plan', {
     token: parentToken,

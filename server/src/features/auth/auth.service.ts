@@ -7,6 +7,7 @@ import * as wechat from './auth.wechat';
 import { signUserToken } from '../../shared/tokens';
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors';
 import { logger } from '../../logger';
+import { referralService } from '../referral/referral.service';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -74,13 +75,26 @@ export const authService = {
     return sendVerificationCode(phone, purpose);
   },
 
-  /** 注册：查重 → 校验验证码（消费）→ 落库 → 签发令牌。 */
-  async register(phone: string, password: string, code: string, nickname?: string): Promise<{
+  /**
+   * 注册：查重 → 校验验证码（消费）→ 落库 → 签发令牌。
+   *
+   * 邀请码在建号**之前**解析：填错了要当场 400，不能先建出账号再丢掉邀请关系
+   * （家长会坚持说自己填了，而数据库里查不到任何痕迹）。
+   */
+  async register(
+    phone: string,
+    password: string,
+    code: string,
+    nickname?: string,
+    inviteCode?: string,
+  ): Promise<{
     token: string;
     user: PublicUser;
   }> {
     const existing = await authRepo.findByPhone(phone);
     if (existing) throw new ConflictError('该手机号已注册，请直接登录');
+
+    const inviterId = await referralService.resolveInviteCode(inviteCode, phone);
 
     // 先校验验证码：通过即消费，避免出现「码用掉了但账号没建成」的重复提交歧义
     await verifyCode(phone, 'register', code);
@@ -93,7 +107,13 @@ export const authService = {
       avatar: defaultAvatar(phone),
     });
 
-    logger.info({ msg: 'user registered', userId: user.id, phone });
+    if (inviterId) {
+      await referralService.bindReferral(user.id, inviterId, inviteCode ?? '');
+    }
+    // 新账号立刻发邀请码：家长注册完进「邀请返现」页不该看到一个空码
+    await referralService.ensureInviteCode(user.id);
+
+    logger.info({ msg: 'user registered', userId: user.id, phone, invited: Boolean(inviterId) });
     return { token: signUserToken(user.id), user: toPublic(user) };
   },
 
@@ -113,20 +133,30 @@ export const authService = {
   },
 
   /** 验证码登录：验证码正确 → 按手机号查/建用户（首次自动注册）。 */
-  async smsLogin(phone: string, code: string): Promise<{ token: string; user: PublicUser; isNew: boolean }> {
+  async smsLogin(
+    phone: string,
+    code: string,
+    inviteCode?: string,
+  ): Promise<{ token: string; user: PublicUser; isNew: boolean }> {
     await verifyCode(phone, 'login', code);
     let user = await authRepo.findByPhone(phone);
     let isNew = false;
     if (!user) {
+      // 与密码注册同一条路径：先解析邀请码（错了就 400），再建号
+      const inviterId = await referralService.resolveInviteCode(inviteCode, phone);
       user = await authRepo.create({
         phone,
         passwordHash: await randomPasswordHash(),
         nickname: phoneNickname(phone),
         avatar: defaultAvatar(phone),
       });
+      if (inviterId) {
+        await referralService.bindReferral(user.id, inviterId, inviteCode ?? '');
+      }
       isNew = true;
       logger.info({ msg: 'user auto-registered via sms login', userId: user.id, phone });
     }
+    await referralService.ensureInviteCode(user.id);
     assertUserActive(user);
     return { token: signUserToken(user.id), user: toPublic(user), isNew };
   },

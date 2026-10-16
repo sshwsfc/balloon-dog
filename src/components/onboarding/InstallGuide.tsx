@@ -126,9 +126,9 @@ export function InstallGuide() {
           <div className="flex gap-2.5 rounded-lg border border-gray-100 bg-white p-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-orange-400" />
             <div className="min-w-0">
-              <p className="text-xs font-medium text-gray-900">{t('安装后要求开「无障碍服务」')}</p>
+              <p className="text-xs font-medium text-gray-900">{t('装完还要开一批授权，尤其别漏「设备管理器」')}</p>
               <p className="mt-0.5 text-[11px] leading-relaxed text-gray-500">
-                {t('孩子端要靠无障碍服务执行「返回桌面」「最近任务」这类远程协助动作，靠设备管理员实现防卸载。这些都是功能必需，不会读取聊天内容。')}
+                {t('孩子端第一次打开会列出待办清单：无障碍服务、悬浮窗、电池白名单、使用情况访问，以及「设备管理器」。前几项决定管不管得住，设备管理器决定「会不会被卸掉」——没开它，孩子长按桌面上的图标就能直接卸载。下一步会带你在孩子手机上走完这张清单。')}
               </p>
             </div>
           </div>

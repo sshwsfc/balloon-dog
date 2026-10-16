@@ -4,11 +4,13 @@ import android.content.Context;
 
 import com.balloondog.agent.data.AgentStore;
 
+import java.util.List;
+
 /**
  * 学习模式 / 应用插件管控 / 应用限时在无障碍服务里的**编排**部分。
  *
  * <p>它只负责四件事：取规则与今日用量（{@link AgentStore}）、查「这个包是不是可启动应用」
- * （{@link AppInventory}）、拼出当前窗口的可见文本、按固定顺序串起三个判定。
+ * （{@link AppInventory}）、把当前窗口采集成一串 {@link WindowNode}、按固定顺序串起三个判定。
  * 真正的判定在 {@link GuardRules} 里 —— 那个类没有任何 Android 依赖，
  * 因此可以被逐条测试（模拟器上没有微信，端到端复现不出插件拦截的场景）。
  *
@@ -19,6 +21,8 @@ import com.balloondog.agent.data.AgentStore;
  * <ul>
  *   <li><b>按可见文本匹配</b>：应用改版改了文案就会漏拦。所以规则给的是
  *       <b>一组</b>候选词而不是一条精确文本，且由服务端随配置下发，便于集中修正。</li>
+ *   <li><b>入口拦点击、页面拦整屏</b>：入口行命中只吃掉这一次点击（见 {@link #checkClick}），
+ *       只有真的进了功能页才整屏拦 —— 否则同一页上家长允许的功能会被一起废掉。</li>
  *   <li><b>只能拦界面，拦不住内容</b>：WebView、游戏画布里的东西看不见。</li>
  *   <li><b>有延迟</b>：无障碍事件到达、判定的耗时约几百毫秒，快速滑动可能闪过一帧。</li>
  *   <li><b>关掉无障碍权限即失效</b> —— 但关权限本身会被看门狗与设备所有者限制挡住。</li>
@@ -32,14 +36,20 @@ public final class AccessibilityGuard {
     /**
      * 判定当前这一屏该不该拦。
      *
-     * @param pkg        前台包名
-     * @param windowText 当前窗口的可见文本
-     * @param now        当前时间（毫秒），学习模式求值要用
-     * @return 拦截决定；null 表示放行
+     * <p>插件管控的**入口级**命中不在这里处理：孩子只是点了一下入口行，还没进功能页，
+     * 整屏拦截会把同一页上家长允许的其它功能一起废掉。那种命中交给
+     * {@link #checkClick} 在点击事件里处理。
+     *
+     * @param pkg         前台包名
+     * @param windowTitle 当前窗口标题（可能为 null）
+     * @param nodes       当前窗口的可见文本节点，见 {@link WindowNode}
+     * @param now         当前时间（毫秒），学习模式求值要用
+     * @return 拦截决定（{@code entry == false}）；null 表示放行
      */
     public static GuardRules.GuardDecision check(AgentStore store, AppInventory inventory,
                                                  Context context, String pkg,
-                                                 String windowText, long now) {
+                                                 String windowTitle, List<WindowNode> nodes,
+                                                 long now) {
         if (pkg == null || pkg.isEmpty()) return null;
 
         // 本应用自己的界面（锁定页 / 答题页 / 设置页 / 应急解锁）永远放行，
@@ -47,8 +57,8 @@ public final class AccessibilityGuard {
         if (pkg.equals(context.getPackageName())) return null;
 
         GuardRules.GuardDecision plugin =
-                GuardRules.matchPluginRules(store.getPluginRules(), pkg, windowText);
-        if (plugin != null) return plugin;
+                GuardRules.matchPluginRules(store.getPluginRules(), pkg, windowTitle, nodes);
+        if (plugin != null && !plugin.entry) return plugin;
 
         GuardRules.GuardDecision study = GuardRules.matchStudyMode(store.getModeConfig(),
                 inventory.isLaunchable(pkg), inventory.isHome(pkg), pkg, now);
@@ -59,6 +69,24 @@ public final class AccessibilityGuard {
         // 缓存由 AgentService 的 ticker 定期刷新（见 AppUsageTracker）。
         return GuardRules.matchAppLimit(store.getAppLimitRules(), store.getAppUsageToday(),
                 inventory.isLaunchable(pkg), inventory.isHome(pkg), pkg);
+    }
+
+    /**
+     * 只判「入口」：无障碍点击事件（{@code TYPE_VIEW_CLICKED}）专用。
+     *
+     * <p>返回非 null 说明孩子刚点在一个被家长关闭的入口行上 —— 调用方要做的只有一件事：
+     * 立刻把这一下按回去（返回键），**不要**弹整屏的「应用被禁止使用」。
+     * 之所以在点击时才判、而不是「发现页一打开就拦」，是因为后者会连
+     * 家长允许的「扫一扫」一起挡在发现页外面。
+     */
+    public static GuardRules.GuardDecision checkClick(AgentStore store, Context context,
+                                                      String pkg, List<WindowNode> nodes) {
+        if (pkg == null || pkg.isEmpty()) return null;
+        if (pkg.equals(context.getPackageName())) return null;
+
+        GuardRules.GuardDecision decision =
+                GuardRules.matchPluginRules(store.getPluginRules(), pkg, null, nodes);
+        return (decision != null && decision.entry) ? decision : null;
     }
 
     /** 供设置页展示：当前是不是学习模式。 */

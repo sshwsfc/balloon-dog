@@ -316,7 +316,7 @@ export function ProfilePage() {
                   </h4>
                   <p className="text-xs text-gray-400 mt-0.5">
                     {onboardingDone
-                      ? t('重新走一遍 3 步绑定流程')
+                      ? t('重新走一遍 4 步绑定流程')
                       : t('接着上次继续')}
                   </p>
                 </div>

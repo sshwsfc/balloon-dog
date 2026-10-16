@@ -24,6 +24,7 @@ import { Button } from '@/components/ui/button'
 import { api, toUserMessage } from '@/services/api'
 import { isWechatBrowser, scanWithWechat } from '@/lib/wechat'
 import { InstallGuide } from '@/components/onboarding/InstallGuide'
+import { AuthorizeGuide } from '@/components/onboarding/AuthorizeGuide'
 import { ScanCodeDialog } from '@/components/onboarding/ScanCodeDialog'
 import { AgentInstallCard } from '@/components/onboarding/AgentInstallCard'
 import {
@@ -50,8 +51,23 @@ const HIGHLIGHTS = [
 const STEP_TITLES: Record<OnboardingStepId, string> = {
   welcome: '欢迎使用气球狗',
   install: '在孩子手机上装好孩子端',
+  authorize: '在孩子手机上开启授权',
   bind: '输入绑定码完成绑定',
   done: '设置完成',
+}
+
+/**
+ * 顶部步骤点上的短标签。
+ *
+ * 四步并排时，手机上每列只有 ~80px，完整标题（「在孩子手机上装好孩子端」）会被压成三行
+ * 并把页头顶高一截。页头的 h1 仍然用完整标题，这里只求一眼能认出走到哪了。
+ */
+const STEP_SHORT_TITLES: Record<OnboardingStepId, string> = {
+  welcome: '欢迎',
+  install: '装孩子端',
+  authorize: '开授权',
+  bind: '填绑定码',
+  done: '完成',
 }
 
 export function OnboardingPage() {
@@ -63,8 +79,8 @@ export function OnboardingPage() {
   const totalSteps = ONBOARDING_STEPS.length
   const currentIndex = ONBOARDING_STEPS.indexOf(current)
   /**
-   * 'done' 是走完三步之后的庆功页，不在 ONBOARDING_STEPS 里，indexOf 会返回 -1。
-   * 直接用会让页头显示「第 0 / 3 步」、进度条算出负数，所以在这里落回最后一步。
+   * 'done' 是走完四步之后的庆功页，不在 ONBOARDING_STEPS 里，indexOf 会返回 -1。
+   * 直接用会让页头显示「第 0 / 4 步」、进度条算出负数，所以在这里落回最后一步。
    */
   const stepNumber = current === 'done' ? totalSteps : currentIndex + 1
   const progressPercent =
@@ -217,8 +233,8 @@ export function OnboardingPage() {
                 >
                   {done ? <Check className="h-3.5 w-3.5" /> : index + 1}
                 </div>
-                <span className={`text-[10px] ${active ? 'text-[#07c160]' : 'text-gray-400'}`}>
-                  {t(STEP_TITLES[step])}
+                <span className={`text-[10px] leading-tight ${active ? 'text-[#07c160]' : 'text-gray-400'}`}>
+                  {t(STEP_SHORT_TITLES[step])}
                 </span>
               </div>
             )
@@ -268,6 +284,9 @@ export function OnboardingPage() {
         )}
 
         {current === 'install' && <InstallGuide />}
+
+        {/* 授权这一步单独成屏：装完不等于装得住，卸载缺口就出在这里（详见 AuthorizeGuide 的注释） */}
+        {current === 'authorize' && <AuthorizeGuide />}
 
         {current === 'bind' && (
           <div className="space-y-4">

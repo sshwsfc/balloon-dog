@@ -496,7 +496,12 @@ export const modeService = {
       byPackage.get(s.packageName)!.plugins.push({
         key: def.key,
         enabled: s.enabled,
-        keywords: def.keywords,
+        label: def.label,
+        entryTexts: def.entryTexts,
+        pageTexts: def.pageTexts,
+        anywhereTexts: def.anywhereTexts,
+        // 老版本设备端只认 keywords，缺了它整条规则会被丢掉（插件管控静默失效）
+        keywords: def.entryTexts,
       });
     }
 

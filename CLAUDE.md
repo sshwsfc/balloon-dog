@@ -73,7 +73,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   targets `http://localhost:2727` by default, so have `npm run preview:all` running (override with
   `APP_URL=http://localhost:5173` to run against the dev server instead).
   `--only=parent|admin|responsive|ux` runs one suite;
-  `e2e:responsive` walks 5 viewports × 27 routes (134 per viewport), `e2e:ux` (128 checks) covers the first-run guide
+  `e2e:responsive` walks 5 viewports × 27 routes (134 per viewport), `e2e:ux` (134 checks) covers the four-step
+  first-run guide (the 3rd step is the child-side authorization checklist, `设备管理器` being the required item)
   (decoding the APK QR code with `BarcodeDetector`), per-feature tips, login centering, the English
   UI and session robustness. Running
   `e2e:responsive` requires a raised `RATE_LIMIT_MAX` (see `server/.env.example`) — it peaks at

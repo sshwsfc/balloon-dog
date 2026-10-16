@@ -181,7 +181,8 @@ architecture, full API reference, and the admin/auth design.
   instead. Override the
   browser with `CHROME_PATH`. Use `--only=parent` / `--only=admin` / `--only=responsive` /
   `--only=ux` to run a single suite; `e2e:responsive` walks 5 viewports × 27 routes (134 checks per
-  viewport) and `e2e:ux` (128 checks) covers the first-run guide (including the APK download QR
+  viewport) and `e2e:ux` (134 checks) covers the **four-step** first-run guide (download QR +
+  the child-side authorization checklist, where 「设备管理器」 is the one required item) (including the APK download QR
   code, which it decodes with `BarcodeDetector`), the per-feature tips, login centering, the
   English UI and session robustness. **`e2e:responsive` needs a raised
   `RATE_LIMIT_MAX`**: it does 90 full page reloads, peaking at 300+ requests/minute, and being

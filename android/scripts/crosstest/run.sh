@@ -67,6 +67,7 @@ javac -nowarn -cp "$WORK/out" -d "$WORK/out" -encoding UTF-8 \
   "$HERE"/stubs/android/util/*.java \
   "$AGENT_SRC/model/PluginRule.java" \
   "$AGENT_SRC/model/AppLimitRule.java" \
+  "$AGENT_SRC/capability/WindowNode.java" \
   "$AGENT_SRC/capability/GuardRules.java" \
   "$HERE/GuardCheck.java"
 java -Duser.timezone="$TZ" -cp "$WORK/out" GuardCheck

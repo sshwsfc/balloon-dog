@@ -28,6 +28,13 @@ import java.util.Set;
  * <p><b>它是追赶，不是墙。</b>目标页面会先出现一小会儿再被推走。真正保证「卸不掉」的
  * 仍然是上面那两条设备所有者限制，不要把这个类当成卸载防护的唯一依靠。
  *
+ * <p><b>没有设备所有者时，还有一道闸：激活设备管理器。</b>三档对照是实测出来的
+ * （Android 13，同一份 APK）：两者都没有 → 卸载成功；只激活设备管理器 →
+ * {@code UninstallFinish: … DELETE_FAILED_DEVICE_POLICY_MANAGER}；设备所有者 →
+ * {@code DELETE_FAILED_USER_RESTRICTED} + {@code no_uninstall_apps}。
+ * 但「激活设备管理器」本身就只是一个可以关掉的开关（设置 → 安全 → 设备管理应用），
+ * 所以那一页也纳入了本类的封锁范围，见 {@link #ADMIN_PAGE_WORDS}。
+ *
  * <p><b>放行窗口是必需的，不是可选项。</b>本应用自己就要用系统设置页来完成授权
  * （无障碍开关、忽略电池优化、悬浮窗、使用情况访问、应用详情）。没有放行窗口的话，
  * 「一键开启权限」会把自己刚拉起来的页面立刻推走，家长看到的是「按钮点了没反应」。
@@ -121,6 +128,43 @@ public final class SensitiveScreens {
     /** 卸载按钮文案。 */
     private static final String[] UNINSTALL_WORDS = {"卸载", "Uninstall", "UNINSTALL"};
 
+    /**
+     * 「设备管理应用」列表页（以及已激活管理员的详情页）的标题词。
+     *
+     * <p><b>为什么必须封这一页。</b>非设备所有者的设备上，「激活设备管理器」是唯一能挡住
+     * 「长按图标 → 卸载」的东西（实测：未激活时卸载会成功，激活后系统直接回
+     * {@code DELETE_FAILED_DEVICE_POLICY_MANAGER}）。但它只是<b>一道闸</b>：孩子走到
+     * 「设置 → 安全 → 设备管理应用」把它关掉，卸载就又可行了。这一页就是那个开关所在的地方。
+     *
+     * <p>文案取自设备上的 Settings APK（{@code aapt2 dump resources} 的 zh-rCN/default）：
+     * 列表页标题 = {@code manage_device_admin} =「设备管理应用」/ "Device admin apps"；
+     * 已激活详情页的标题 = {@code active_device_admin_msg} =「设备管理应用」/"Device admin app"
+     * —— 中文里这两句同源，所以中文靠下面的「停用」按钮词区分不出来，只能一起封。
+     */
+    private static final String[] ADMIN_PAGE_WORDS = {
+            "设备管理应用", "设备管理器", "Device admin apps", "Device administrators"
+    };
+
+    /** 停用按钮：孩子点的就是它（{@code remove_device_admin} / {@code remove_and_uninstall_device_admin}）。 */
+    private static final String[] ADMIN_DEACTIVATE_WORDS = {
+            "停用此设备管理应用", "停用并卸载",
+            "Deactivate this device admin app", "Deactivate & uninstall"
+    };
+
+    /**
+     * 「启用」设备管理器那一页的文案：<b>必须放行</b>。
+     *
+     * <p>家长从本应用点「去开启设备管理器」打开的正是这一页（
+     * {@code LockController.requestAdmin} → {@code ACTION_ADD_DEVICE_ADMIN}）。
+     * 中文的提示语是「要启用此设备管理应用吗？」—— 它<b>包含</b>「设备管理应用」，
+     * 如果只按上面的标题词判，这一页会被自己的看门狗推走，等于把这个权限彻底关死
+     * （放行窗口虽然能兜住，但不该让唯一的开通路径依赖一张 45 秒的通行证）。
+     */
+    private static final String[] ADMIN_ACTIVATE_WORDS = {
+            "要启用此设备管理应用吗", "启用此设备管理应用", "启用此管理应用",
+            "Activate this device admin app", "Activate device admin app", "Activate this admin app"
+    };
+
     private static boolean containsAny(String haystack, String[] needles) {
         if (haystack == null || haystack.isEmpty()) return false;
         for (String needle : needles) {
@@ -171,7 +215,12 @@ public final class SensitiveScreens {
         // 正在点的操作一起推走。而孩子想卸载守护软件，唯一必须进的就是「应用信息」页 ——
         // 那里才有卸载与强行停止按钮。
         if (SETTINGS_PACKAGES.contains(pkg)) {
+            // 「启用设备管理器」页先放行：它是家长开通这条防线的唯一入口，
+            // 中英文案里都含「设备管理应用 / Device admin app」，只能靠动词把它摘出来。
+            if (containsAny(windowText, ADMIN_ACTIVATE_WORDS)) return null;
             if (lower.contains("uninstall")) return "应用卸载";
+            if (containsAny(windowText, ADMIN_DEACTIVATE_WORDS)) return "停用设备管理器";
+            if (containsAny(windowText, ADMIN_PAGE_WORDS)) return "设备管理应用";
             boolean appInfo = lower.contains("appinfo") || lower.contains("installedapp")
                     || containsAny(windowText, APP_INFO_TITLES)
                     || (containsAny(windowText, FORCE_STOP_WORDS)

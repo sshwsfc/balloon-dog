@@ -209,7 +209,7 @@ min-h-screen pb-20 bg-gray-100
 | --- | --- |
 | `npm run e2e:parent` | 120 项全部通过（§5.1 家庭成员 5 项 + §5.2 孩子档案 5d 节 10 项 + §5.3 合规 5e 节 10 项 + §5.4 支付管线 5f 节 11 项 + §5.5 帮助与反馈 5g 节 28 项 + 绑定对话框下载入口 5h 节 10 项） |
 | `npm run e2e:admin` | 80 项全部通过（含 §5.4 的后台支付四页 5b 节 10 项与 §5.5 的运营三页 5c 节 22 项） |
-| `npm run e2e:ux` | 128 项全部通过（含三步引导：QR 会被 `BarcodeDetector` 真解码一遍） |
+| `npm run e2e:ux` | 134 项全部通过（含四步引导：QR 会被 `BarcodeDetector` 真解码一遍） |
 | `npm run server:smoke` | 167 项全部通过 |
 | `npm run build` / `npm run lint` | 通过（lint 的 23 条 `react-hooks/set-state-in-effect` 是既有的，本轮没有新增） |
 

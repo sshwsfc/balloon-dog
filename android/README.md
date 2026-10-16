@@ -357,10 +357,16 @@ BadTokenException: Unable to add window -- token null is not valid; is your acti
   且随配置下发，便于集中修正。看不见 WebView / 游戏画布里的内容。
 - **有延迟**：无障碍事件到达 + 判定约几百毫秒，快速滑动可能闪过一帧。
 - **关掉无障碍权限即失效** —— 但关权限本身会被看门狗与设备所有者限制挡住（见 §2.2）。
-- **拦截动作是「弹一页说明」**，不是静默按返回：原来是按一下系统返回键，
+- **整应用 / 功能页的拦截动作是「弹一页说明」**，不是静默按返回：原来是按一下系统返回键，
   孩子被静默弹回上一层，既不知道发生了什么、也不知道该找谁，观感就是「手机坏了」。
   现在拉起 `AppBlockedActivity`（一页说明，唯一出口是「回桌面」，所以不会被扔回被禁的应用），
   同时照常写日志、给家长端发 `app_blocked` / `plugin_blocked` 事件。
+  **插件入口**是唯一的例外：孩子只是点了一下列表里的一行，不该被推去桌面，
+  所以那一层只按返回 —— 代价是「点了没反应」是唯一反馈（Android 11 起后台应用弹 Toast
+  会被系统丢掉，要可靠提示得再做一个 `TYPE_ACCESSIBILITY_OVERLAY` 浮层，本轮没做）。
+- **三个「伪包名」目标（`__payment__` / `__appstore__` / `__browser__`）目前拦不住**：
+  设备端按「规则包名 == 前台包名」匹配，而前台包名不可能等于伪包名，
+  那 22 条规则永不命中 —— 家长端却列了出来。本轮只修语义，需要真机逐条验收后再改。
 - **只判当前活动窗口**：无障碍事件不区分前后台 —— 桌面的搜索框
   （`com.google.android.googlequicksearchbox`）、后台应用的界面刷新一样会发
   `typeWindowContentChanged`。照单全收会把「桌面自己刷新」当成「桌面被拉到前台」，
@@ -368,6 +374,28 @@ BadTokenException: Unable to add window -- token null is not valid; is your acti
   现在 `isForegroundEvent()` 会取 `getWindows()` 里 `isActive()` 那个窗口的根包名比对，
   不一致直接放行（30 秒最多记一条 `看门狗：放行后台窗口事件 …（当前活动窗口是 …）`）；
   判不出窗口信息时按老逻辑处理，宁可偶尔拦错，也不能因为系统不给窗口就让管控整体失效。
+
+#### 插件管控分三层：入口 / 功能页 / 页面内标志物
+
+只按「整窗文本 contains 关键词」判，会把两件不同的事混在一起 —— 实测只关「朋友圈」时：
+进微信「发现」页就被整屏拦（家长允许的扫一扫、看一看一起用不了）、
+聊天里对方发一句含「朋友圈」的消息也会被拦、提示语还写着「微信已被禁止使用」。
+现在一个功能配三组匹配文本、三种动作（`GuardRules.matchPluginRules`）：
+
+| 层 | 怎么认 | 命中后 |
+| --- | --- | --- |
+| 入口 `entryTexts` | 文本落在**可点击**的节点上（列表行整行可点，内部的 TextView 不可点） | `handlePluginEntryClick` 吃掉这次点击 + `GLOBAL_ACTION_BACK`，页面不动 |
+| 功能页 `pageTexts` | 命中窗口标题，或**顶部标题条上不可点击、不在列表里**的文本 | 整屏拦，弹 `AppBlockedActivity.showFeature(...)`（标题「这个功能已被家长关闭」） |
+| 标志物 `anywhereTexts` | 任意位置的**整串**（如「请输入支付密码」） | 整屏拦 |
+
+节点结构（能不能点 / 在不在列表里 / 在不在顶部）由 `WindowNode` 从节点树里带出来，
+`LockWatchdogService.snapshotWindow()` 一次采集同时给出「扁平文本 + 窗口标题 + 节点快照」
+（扁平文本仍旧给敏感界面判定用，采集遍历只有一遍）。
+判定顺序是「标志物 → 功能页 → 入口」，**先命中先返回**：走到入口那一层，
+说明孩子还没进功能页 —— 所以入口这次命中的是「门」而不是「房间」。
+
+> 弱词（「支付」「额度」）只许进 `entryTexts` / `pageTexts`：放进 `anywhereTexts`，
+> 聊天里提一句就会把整个微信拦掉。数据侧由 `server:e2e:mode` 的断言钉住。
 
 #### 为什么插件判定被抽成纯函数
 
@@ -821,13 +849,27 @@ BroadcastQueue: Exported Denial: sending Intent { act=android.intent.action.USER
 被封的界面（`SensitiveScreens.match()`）：
 
 - **系统设置包**（`com.android.settings`、`com.android.settings.intelligence`、
-  `com.google.android.settings.intelligence`）：**只封「应用信息页」，不整包封**。
+  `com.google.android.settings.intelligence`）：**只封三处页面，不整包封** ——
+  「应用信息页 / 卸载界面」和「设备管理应用（停用设备管理器的地方）」。
   判据是**页面文字** —— `event.getClassName()` 实测经常是 `android.widget.FrameLayout` /
   `Button` 这类根视图类，**不是**承载页面的 Activity 名，只按类名根本分不出
   「设置首页」和「应用信息页」。命中条件（任一）：
   1. 类名含 `appinfo` / `installedapp`，或类名含 `uninstall`；
   2. 窗口文字里有「应用信息 / 应用详情 / App info / App details」；
-  3. 窗口文字里**同时**出现「强行停止」与「卸载」（只有应用信息页才同时有这两个按钮）。
+  3. 窗口文字里**同时**出现「强行停止」与「卸载」（只有应用信息页才同时有这两个按钮）；
+  4. 窗口文字里有「设备管理应用 / 设备管理器 / Device admin apps / Device administrators」，
+     或「停用此设备管理应用 / 停用并卸载 / Deactivate this device admin app / Deactivate & uninstall」。
+     **但含「启用」字样的那一页先放行**（见下）—— 中文的启用提示是
+     「要启用此设备管理应用吗？」，字面上**包含**「设备管理应用」，不排除掉就等于把开通路径自己关死。
+     > 这些文案不是猜的：`aapt2 dump resources` 直接读设备上的 Settings APK
+     > （`zh-rCN` 与 `default` 两组值）得到 —— 列表页标题 `manage_device_admin`、
+     > 已激活详情页 `active_device_admin_msg`、停用按钮 `remove_device_admin`、
+     > 启用按钮 `add_device_admin`、启用提示 `add_device_admin_msg`。
+     >
+     > **为什么要封这一页**：非设备所有者时，「激活设备管理器」是唯一挡住
+     > 「长按桌面图标 → 卸载」的东西（三档实测见 §2.10 A 表），而它自身就是一个
+     > 能被孩子关掉的开关 —— 这一页就是那个开关的所在。按住它，孩子就没法把这道闸抬起来。
+
 - **整包封**：`com.android.packageinstaller` / `com.google.android.packageinstaller` /
   `com.miui.packageinstaller` / `com.samsung.android.packageinstaller`，
   以及各 ROM 的「安全中心 / 应用管理」——`com.miui.securitycenter`、`com.huawei.systemmanager`、
@@ -840,7 +882,8 @@ BroadcastQueue: Exported Denial: sending Intent { act=android.intent.action.USER
 
 > **收窄不会削弱防护**：加固开着时，改 Wi-Fi / 语言 / 日期时间 / 私有 DNS / VPN / 飞行模式
 > 本来就由设备所有者限制硬挡（§2.10 A 表），孩子点进设置首页也改不动。
-> 真正需要「用拦截补一层」的只有卸载与强行停止，而它们只在应用信息页上。
+> 真正需要「用拦截补一层」的只有三件事：卸载、强行停止、**关掉设备管理器**
+> —— 前两件只在应用信息页上，第三件在「设备管理应用」那一页上。
 
 被拦到时：`GLOBAL_ACTION_HOME` 退回桌面（**不是**按返回 —— 按返回只退一层，孩子还能从
 「设置 → 应用」一层层点进去），并写一条中文告警 + 发一条 `tamper` 设备事件。
@@ -897,10 +940,33 @@ adb shell dumpsys accessibility | grep "Bound services"
 | `am start -a android.settings.SETTINGS`（**设置首页，应当放行**） | 停在 `com.android.settings/.homepage.SettingsHomepageActivity` ✔ |
 | `am start -a android.settings.APPLICATION_DETAILS_SETTINGS -d package:com.balloondog.agent`（应用信息页） | 回到桌面，日志`敏感界面封锁：拦截「应用信息」（android.widget.FrameLayout），已退回桌面` |
 | `am start -a android.intent.action.DELETE -d package:com.balloondog.agent`（卸载界面） | 回到桌面 |
+| `am start -n 'com.android.settings/.Settings$DeviceAdminSettingsActivity'`（设备管理应用列表页） | 回到桌面，日志`敏感界面封锁：拦截「设备管理应用」（android.widget.FrameLayout），已退回桌面`（重复 3 次都一样） |
 
 第二条同时**印证了「必须靠窗口文字判定」这个设计**：事件给出的类名就是
 `android.widget.FrameLayout`，而不是 `.applications.InstalledAppDetails` 这类页面名 ——
 只按类名根本分不出设置首页与应用信息页。
+
+> 设备管理器这两页的标题在界面上是 **`content-desc`**（`com.android.settings:id/collapsing_toolbar`
+> 的 `content-desc="Device admin apps"`），不是 `text` —— 靠 `LockWatchdogService.collectNodeText()`
+> 把 `getContentDescription()` 也收进来才判得出来。只收 `getText()` 会漏判。
+
+**「停用页被拦 / 启用页放行」这两条只做到文案级验证，没做端到端**，原因是这两页在本工程
+能用的模拟器上没法直达：
+
+- `am start … DeviceAdminAdd --es android.app.extra.DEVICE_ADMIN …` **不行** —— 这个 extra 要的是
+  `ComponentName`（`--ecn`），而这台模拟器的 `am` 没有 `--ecn`；用 `--es` 传字符串时
+  `DeviceAdminAdd.onCreate` 拿不到 extra 会立刻 `finish()`，于是「谁在最前面」其实是**列表页**，
+  用它验证会得到假阳性。
+- 唯一的界面路径是先过列表页 —— 而列表页正是被我们拦掉的那一页。
+
+所以这两页的判据是**文案级**的：把关掉拦截（`settings delete secure enabled_accessibility_services`
+＋ `accessibility_enabled 0`）后从列表页真实点进去，`uiautomator dump` 拿到两页的原文 ——
+启用页含 `Activate device admin app?` 与 `Activate this device admin app`、停用页含
+`Deactivate this device admin app`（并且**不含** `Device admin apps`，所以停用页是靠
+`ADMIN_DEACTIVATE_WORDS` 才命中的）；`match()` 里「启用」判定排在封禁判定**之前**，所以启用页
+一定先被放行。就算这条排除将来失效，家长走应用内「去开启设备管理器」也是
+`LockController.requestAdmin()` → `allowTemporarily()` 先开 45 秒通行证，仍然进得去。
+
 
 加固关掉时（`hardening_enabled` 删掉＝回到默认 `true`）上面后两条**都停在原页面**，
 日志`管控加固已关闭，放行「应用信息」（家长逃生通道）`；重新打开加固后又被拦下。
@@ -987,14 +1053,23 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 1. 打开「气球狗守护」，界面顶部会显示 **8 位绑定码**（例如 `RS4B63PG`）——
    它按**本机标识推导**而来（见 5.5.1），卸载重装后还是同一个，家长的绑定不会掉；
-   App 一打开就会自动连服务器注册，**不需要**先进设置页点一次保存；
+   App 一打开就会自动连服务器注册，**不需要**先进设置页点一次保存。
+   「需要开启」卡片这时会列出 **9 行待办**并给出「一键开启权限」，第一件要让家长做的事
+   写在最上面（见 §5.7）；
 2. 点「申请采集权限」试拍一张，确认截图链路可用 —— 无障碍在跑时它走**免授权**路径，
    不会弹任何框；只有无障碍不可用时才会弹系统授权框（`MediaProjection` 兜底，见 10.5）；
-3. 点「激活设备管理器」（**必须**，否则 `lockNow()` 调不动，锁屏会退化成应用内遮罩）；
+3. 点「激活设备管理器」（**建议**，非设备所有者时它是**唯一**能挡住卸载的一道闸；
+   它同时也是 `lockNow()` 的前提，没激活时锁屏会退化成应用内遮罩）；
 4. 点「授予悬浮窗权限」（Android 10+ 后台弹锁定页需要它）；
 5. 点「忽略电池优化」（否则息屏后长轮询会被 Doze 冻结，表现为「点了锁屏半天没反应」）；
 6. 点 **「启动守护」**；
 7. 在家长端「设备管理 → 绑定设备」里输入那个绑定码完成配对。
+
+> 第 1 步的 9 行待办里，**只有前两行是「防卸载的闸」**：设备所有者（`setUninstallBlocked`
+> + `DISALLOW_UNINSTALL_APPS`，只能用电脑 `adb` 开，见 §3.4）与设备管理器（激活后卸载前必须先停用它，
+> 而「停用它」的那一页在 §2.11 的封锁名单里）。其余各行（无障碍、运行时权限、悬浮窗、
+> 使用情况访问、电池白名单）决定的是**管得住管不住**，不是**卸得掉卸不掉** ——
+> 所以界面把两道闸放在最前面，并在两者都没生效时直接显示红色告警条。
 
 > **运行时权限（定位 / 相机 / 麦克风 / 通话记录 / 短信 / 通知）**：
 > 设为设备所有者后由 `PermissionGranter.grantAsDeviceOwner()` **静默自授**，孩子端看不到弹框；
@@ -1307,24 +1382,30 @@ seed   = Settings.Secure.ANDROID_ID + "|" + 本地盐
 | --- | --- |
 | 运行状态 | 守护在不在跑、今日已用、启动/停止守护 |
 | 绑定家长 | 未绑定：**大字绑定码** + 二维码 + 复制按钮 + 「家长端 → 设备管理 → 绑定设备」；已绑定：压成一行 |
-| 需要开启 | 8 行待办 + 顶部「一键开启权限」+ 未开通设备所有者时的**显眼告警条** |
+| 需要开启 | 9 行待办 + 顶部「一键开启权限」+ 未开通设备所有者/设备管理器时的**显眼告警条** |
 | 应急与修复 | 应急解锁密码、立即自检并恢复守护 |
 | 高级 / 诊断（默认收起） | 权限与能力、防护与保活、加固逐项明细、服务器、日志 —— **原功能一条没删，只是不再挡在首屏** |
 
-「需要开启」的每一行 = 图标 + 名称 + 一句话原因 + **实时状态徽标** + 操作按钮，
-覆盖**防卸载保护（置顶，需要「设备所有者」，详见 §3.4）**、无障碍（锁定/拦截/免授权截图的前提）、
+「需要开启」的每一行 = 图标 + 名称 + 一句话原因 + **实时状态徽标** + 操作按钮，前两行是两道
+**防卸载的闸**（设备所有者 → 设备管理器，见下），然后是锁定/拦截/免授权截图的前提（无障碍）、
 运行时权限（合成一行显示 `N/M`）、悬浮窗、使用情况访问、电池优化白名单，以及两项**可选**能力
 （屏幕采集、网址拦截 —— 家长没开时显示琥珀色「可选」，不写成「未开启」，避免制造焦虑）。
 
-> **为什么「防卸载保护」必须置顶并单独告警**：Android 不允许普通应用阻止自己被卸载，
-> 唯一手段是设备所有者 + `DISALLOW_UNINSTALL_APPS`/`setUninstallBlocked`（见 §3.4）。
-> 也就是说，**没开通设备所有者时，清单里其余项全绿也挡不住卸载**。
+> **两道防卸载的闸，以及为什么设备管理器也要进清单**：Android 不允许普通应用阻止自己被卸载。
+> 设备所有者（`setUninstallBlocked` + `DISALLOW_UNINSTALL_APPS`）是最强的一道，但只能用电脑
+> `adb` 在设备没添加账号前设置，绝大多数家长根本开不了它（§3.4）。第二道是**设备管理器**：
+> 激活后系统会在卸载前要求先停用它，`pm uninstall` 会被拒（`DELETE_FAILED_DEVICE_POLICY_MANAGER`，
+> 三档实测见 §2.10 A 表）。而它自己就是一个能被孩子关掉的开关（在「设置 → 安全 →
+> 设备管理应用」里，所以那一页也在 §2.11 的封锁名单上）。
+>
 > 早期版本把设备所有者只写在「高级 / 诊断 → 锁屏能力」里，家长看到首页
 > 「5/5 已开启」全绿就会以为防护已经生效 —— 这是实实在在的谎报，所以现在：
-> ①它计入必备项分母（`REQUIRED_TODO_COUNT = 6`）；②没开时在清单里显示红色告警条
-> `textTodoAlert`「防卸载未生效：现在孩子可以直接卸载本应用」；③只差它一项时，
-> 「一键开启权限」旁边的说明改成「未开启「设备所有者」，孩子可直接卸载本应用（需用电脑开通）」，
-> 而不会落到「权限都已开启，无需操作」。
+> ①两道闸都计入必备项分母（`REQUIRED_TODO_COUNT = 7`）；②两道闸都没生效时在清单顶部显示
+> 红色告警条（`textTodoAlert`：没设备所有者时「防卸载未生效：现在孩子可以直接卸载本应用」，
+> 有所有者但没管理器时提示「未激活「设备管理器」：这台设备还没设成设备所有者，孩子长按桌面
+> 图标就能卸载本应用」）；③只差管理器一项时，「一键开启权限」会先弹一句
+> `请在系统弹框里点「激活」——这是唯一能挡住卸载的一步`，然后直接拉起系统激活页，
+> 而不是落到「权限都已开启，无需操作」。
 
 三处刻意的设计：
 
@@ -1332,12 +1413,15 @@ seed   = Settings.Secure.ANDROID_ID + "|" + 本地盐
   `isConnected()`、运行时权限问 `PermissionGranter.missing()`、使用情况访问走
   `PermissionGranter.isSpecialGranted()`，`onResume()` 之后每 2 秒重渲染一次。
   验证方式是可复现的：`adb shell appops set com.balloondog.agent GET_USAGE_STATS ignore`
-  之后界面应从「6/6 已开启」变成「5/6 已开启」且该行变「未开启 / 去开启」，`allow` 后翻回来。
+  之后界面应从「7/7 已开启」变成「6/7 已开启」且该行变「未开启 / 去开启」，`allow` 后翻回来。
 - **无障碍既没开也没连上时显示「启动中」而不是「已开启」**：`isEnabledInSettings()` 读的是
   系统开关，服务重连的那几秒它可能为真而服务并未在跑，此时说「已开启」是在撒谎。
-- **「一键开启权限」以无障碍为前提**：无障碍没开时按钮直接置灰并写明「请先开启无障碍」——
-  否则家长点下去只会拿到一串「需要手动开启」，却不知道为什么。已开时按
-  「设备所有者静默代授运行时权限 → 拿不到就回退系统弹框 → 特殊权限 → 电池白名单」执行，
+- **「一键开启权限」以无障碍为前提，但会先把「设备管理器」这道闸补上**：无障碍没开时按钮
+  直接置灰并写明「请先开启无障碍」—— 否则家长点下去只会拿到一串「需要手动开启」，却不知道为什么。
+  无障碍已开时，若其余必备项都好了、只差设备管理器（`requiredDoneExceptOwnerAndAdmin()`），
+  按下按钮不进入一键流程，而是弹一句「请在系统弹框里点「激活」——这是唯一能挡住卸载的一步」
+  并直接拉起系统激活页（`LockController.requestAdmin()`，内部先开 45 秒放行通行证）。
+  否则按「设备所有者静默代授运行时权限 → 拿不到就回退系统弹框 → 特殊权限 → 电池白名单」执行，
   每一步都如实汇总还差几项；悬浮窗/使用情况访问在多数 ROM 上系统会拒绝代授，
   这时**明说需要手动开启**，不谎报成功。
 

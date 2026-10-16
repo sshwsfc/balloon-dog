@@ -144,6 +144,8 @@
 
     <string name="todo_name_owner">防卸载保护</string>
     <string name="todo_reason_owner">需要「设备所有者」权限</string>
+    <string name="todo_name_admin">设备管理器</string>
+    <string name="todo_reason_admin">没开设备所有者时，靠它挡住卸载</string>
     <string name="todo_name_accessibility">无障碍服务</string>
     <string name="todo_reason_accessibility">锁定与拦截靠它执行</string>
     <string name="todo_name_runtime">定位/相机/录音等</string>
@@ -161,11 +163,14 @@
 
     <string name="one_key_hint_need_accessibility">请先开启无障碍</string>
     <string name="one_key_hint_need_owner">未开启「设备所有者」，孩子可直接卸载本应用（需用电脑开通）</string>
+    <string name="one_key_hint_need_admin">离防卸载只差这一步：点右边按钮激活「设备管理器」</string>
     <string name="one_key_hint_ready">无障碍已开，可一键开启其余权限</string>
     <string name="one_key_hint_all_done">权限都已开启，无需操作</string>
-    <string name="todo_alert_owner">防卸载未生效：现在孩子可以直接卸载本应用</string>
+    <string name="todo_alert_owner">防卸载未生效：现在孩子可以直接卸载本应用（开启下面的「设备管理器」即可挡住）</string>
+    <string name="todo_alert_admin">未激活「设备管理器」：这台设备还没设成设备所有者，孩子长按桌面图标就能卸载本应用（点下面的「设备管理器」开启即可挡住）</string>
     <string name="action_one_key_grant">一键开启权限</string>
     <string name="action_one_key_done">权限已全部开启</string>
+    <string name="toast_grant_admin">请在系统弹框里点「激活」——这是唯一能挡住卸载的一步</string>
     <string name="toast_one_key_need_accessibility">请先开启无障碍服务</string>
     <string name="toast_one_key_owner">已由设备所有者静默开启</string>
     <string name="toast_one_key_dialog">其余权限请在系统弹窗里点「允许」</string>

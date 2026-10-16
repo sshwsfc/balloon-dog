@@ -78,6 +78,19 @@ export function AgentInstallCard({
         </a>
       </section>
 
+      {/*
+        「装上了」不等于「卸不掉」：这一段专门提醒下一步的授权清单。
+        只在引导页（非 compact）显示 —— 绑定对话框在横屏手机上只有 320–420px，
+        多一块说明就会把绑定码输入框挤出屏幕（见上面 compact 的注释）。
+      */}
+      {!compact && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-2.5">
+          <p className="text-[11px] leading-relaxed text-amber-800">
+            {t('装完先别走：孩子端第一次打开会列出一张授权清单，其中「设备管理器」必须开——没开它，孩子长按桌面上的图标就能直接把应用卸载掉。下一步会带你走完。')}
+          </p>
+        </div>
+      )}
+
       {withTroubleshooting && (
         <div className="overflow-hidden rounded-xl border border-gray-100 bg-white">
           <button

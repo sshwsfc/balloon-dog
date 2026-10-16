@@ -12,16 +12,22 @@ import { useSyncExternalStore } from 'react'
  * 也天然绕开「在 effect 里同步 setState」的 lint 问题。
  */
 
-export type OnboardingStepId = 'welcome' | 'install' | 'bind' | 'done'
+export type OnboardingStepId = 'welcome' | 'install' | 'authorize' | 'bind' | 'done'
 
 /**
- * 引导只有三步：认识它并下载安装包 → 装到孩子手机上 → 输入绑定码完成配对。
+ * 引导一共四步：认识它并下载安装包 → 装到孩子手机上 → **在孩子手机上开启授权**
+ * → 输入绑定码完成配对。
  *
- * 'done' 刻意不放在这个数组里：它是走完三步之后的庆功页，不是「一步」，
- * 放进去会让顶部进度点变成 4 个、并且让「第 x / y 步」的分母虚高。
- * firstPendingStep 在三步都做完时会返回 'done'，页面据此渲染庆功页。
+ * 'authorize' 是后补的一步，起因是用户实测反馈「长按桌面图标就直接把守护软件卸载了」：
+ * 装完 APK 只是把应用放进手机，**会不会被卸掉取决于孩子端首页那份授权清单**，
+ * 尤其是「设备管理器」——没开它，非设备所有者时卸载前连一句提醒都没有。
+ * 这一步原先只是「安装说明」里的一句附注，家长十有八九会跳过，所以提成了独立一步。
+ *
+ * 'done' 刻意不放在这个数组里：它是走完四步之后的庆功页，不是「一步」，
+ * 放进去会让顶部进度点变成 5 个、并且让「第 x / y 步」的分母虚高。
+ * firstPendingStep 在四步都做完时会返回 'done'，页面据此渲染庆功页。
  */
-export const ONBOARDING_STEPS: OnboardingStepId[] = ['welcome', 'install', 'bind']
+export const ONBOARDING_STEPS: OnboardingStepId[] = ['welcome', 'install', 'authorize', 'bind']
 
 interface OnboardingState {
   /** 已完成的步骤 */

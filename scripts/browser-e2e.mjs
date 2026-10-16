@@ -2522,7 +2522,7 @@ async function testUx(cdp) {
     await cdp.shot(`/tmp/ux-onboarding-${vp.width}x${vp.height}.png`)
   }
 
-  // ---------- 2b. 三步引导的内容（改版后新增） ----------
+  // ---------- 2b. 四步引导的内容（改版后新增） ----------
   /*
    * 用户原话：「下载安装包不用显示下载按钮，显示一下二维码……两个手机同一个 wifi
    * 的方式行不通，去掉……绑定码输入框后面加一个扫一扫图标」。
@@ -2530,7 +2530,7 @@ async function testUx(cdp) {
    * 绑定步骤的输入框与扫一扫图标**只在还没绑设备时**渲染（已经绑过则显示
    * 「你已经绑定好设备了」），所以这里把 /api/devices 打桩成空列表来复现新用户。
    */
-  section('UX · 新手引导三步')
+  section('UX · 新手引导四步')
   await cdp.send(
     'Emulation.setDeviceMetricsOverride',
     { width: 390, height: 844, deviceScaleFactor: 2, mobile: true },
@@ -2565,7 +2565,7 @@ async function testUx(cdp) {
   const stepLabel = await cdp.eval(
     `((document.body.innerText.match(/第 \\d+ \\/ \\d+ 步/) || [''])[0])`,
   )
-  check('引导页是三步（不含庆功页）', stepLabel === '第 1 / 3 步', `实得「${stepLabel}」`)
+  check('引导页是四步（不含庆功页）', stepLabel === '第 1 / 4 步', `实得「${stepLabel}」`)
 
   /*
    * 认二维码不能靠「path 数量多」：qrcode.react v4 只画两条 path（底色 + 模块），
@@ -2668,7 +2668,29 @@ async function testUx(cdp) {
   check('第二步首推「扫上一步的二维码」', install.hasScanMethod === true)
   check('已去掉「两台手机连同一个 WiFi」这条路', install.hasWifi === false)
 
-  // 第三步：绑定码输入框 + 右侧扫一扫图标
+  // 第三步：授权清单 —— 重点是「设备管理器」必须显式列出（用户报的「长按图标就能卸载」）
+  await cdp.clickText('下一步')
+  await sleep(600)
+  const authorize = await cdp.eval(`(() => {
+    const text = document.body.innerText;
+    return {
+      isAuthorize: text.includes('在孩子手机上开启授权'),
+      hasAdminRequired: text.includes('设备管理器') && text.includes('必做'),
+      hasUninstallRisk: text.includes('长按桌面上的守卫图标'),
+      hasHowTo: text.includes('一键开启权限'),
+      hasA11y: text.includes('无障碍服务'),
+      hasBindInput: !!document.getElementById('onboarding-code'),
+    };
+  })()`)
+  check('第三步是授权清单', authorize.isAuthorize === true, await cdp.eval('document.body.innerText.slice(0, 80)'))
+  check('第三步把「设备管理器」标成必做的一项', authorize.hasAdminRequired === true)
+  check('第三步讲清没开设备管理器的后果（长按图标即可卸载）', authorize.hasUninstallRisk === true)
+  check('第三步给出「一键开启权限 → 系统激活页」这条路', authorize.hasHowTo === true)
+  check('第三步同时提到无障碍服务等其余授权', authorize.hasA11y === true)
+  check('第三步还没到绑定输入框', authorize.hasBindInput === false)
+  await cdp.shot('/tmp/ux-onboarding-authorize.png')
+
+  // 第四步：绑定码输入框 + 右侧扫一扫图标
   await cdp.clickText('下一步')
   await sleep(600)
   const bind = await cdp.eval(`(() => {
@@ -2683,7 +2705,7 @@ async function testUx(cdp) {
       insideRight: !!ir && r.left > ir.left + ir.width / 2 && r.right <= ir.right + 1,
     };
   })()`)
-  check('第三步有绑定码输入框', (await cdp.eval(`!!document.getElementById('onboarding-code')`)) === true)
+  check('第四步有绑定码输入框', (await cdp.eval(`!!document.getElementById('onboarding-code')`)) === true)
   check(
     '绑定码输入框后面有扫一扫图标',
     bind.has === true && bind.visible === true,
@@ -2734,7 +2756,7 @@ async function testUx(cdp) {
     cdp.sessionId,
   )
   await cdp.eval(`localStorage.setItem('balloon_dog_onboarding_v1', JSON.stringify({
-    completed: ['welcome', 'install', 'bind'],
+    completed: ['welcome', 'install', 'authorize', 'bind'],
     finishedAt: new Date().toISOString(),
   }))`)
 

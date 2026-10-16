@@ -87,7 +87,7 @@
 | 站内通知 | — | ✅ | ✅ **真实执行** | 四类事件（设备失联 / 管控失效 / 安全区进出 / 申请装应用）、会员到期提醒与「今日任务」完成真的写进 `Notification` 表：未读角标、消息中心、逐类开关。**关掉某一类之后服务端就不再产生它**（写入侧过滤，不是前端隐藏），所以角标与列表永远一致。微信服务号模板消息**已真的能发**（`NotificationDelivery` 投递表 + 重试上限 3 + 令牌失效重取；四个环境变量齐了才 `configured`、微信扫码登录过一次才 `bound`，没配好时只是静默待发而非丢失）；厂商推送**不适用**（家长端是网页，没有原生 SDK 可接）并如实带原因。验证：`server:e2e:notifications` 69/69 + `server:e2e:wechat` 52/52 + 家长端 UI 全绿 |
 | 家庭成员 | — | ✅ 占位 | ⚪ **未实现** | 家长端显示为「未开放」灰态 |
 | 防杀 / 保活 | — | — | ✅ **真实执行** | 前台服务 + `START_STICKY` + `stopWithTask=false` + 双闹钟 + 持久化 Job + `LongevityGuard` 自愈；实测 `kill -9` 后 10 秒恢复 |
-| 防卸载 / 防恢复出厂 | ✅ | ✅ | ✅ **真实执行** | `setUninstallBlocked` + 受保护包（`setUserControlDisabledPackages`，API 30+）+ 20 条 `UserManager` 限制；实测三个系统按钮变灰、`pm uninstall`/`pm disable-user` 均被拒 |
+| 防卸载 / 防恢复出厂 | ✅ | ✅ | ✅ **真实执行** | `setUninstallBlocked` + 受保护包（`setUserControlDisabledPackages`，API 30+）+ 20 条 `UserManager` 限制；实测三个系统按钮变灰、`pm uninstall`/`pm disable-user` 均被拒。**第二道闸（本轮新增）**：设备管理器 —— 三档实测为「设备所有者 → `pm uninstall` 报 `DELETE_FAILED_USER_RESTRICTED`」「只激活设备管理器 → 报 `DELETE_FAILED_DEVICE_POLICY_MANAGER`，交互式卸载也会 `UninstallFinish: Uninstall failed because com.balloondog.agent is a device admin`」「两者都没 → 卸载成功」（后者正是用户报的「长按桌面图标就能卸载」）。因此设备管理器被提成孩子端首页「需要开启」的第 2 行（`TODO_ADMIN`，`REQUIRED_TODO_COUNT = 7`），只差它一项时「一键开启权限」会直接拉起系统激活页；关掉它的那一页（设置 → 安全 → 设备管理应用）同时被纳入敏感界面封锁（见下一节的表） |
 
 > ⚠️ **一个曾经横跨所有指令型功能的缺陷（已修）**：设备端 E2E 发现，
 > **任意指令都可能被一条已经断开的旧长轮询连接抢领，然后永久卡在 `dispatched`** ——
@@ -165,12 +165,21 @@ if (config.studyApps.contains(pkg)) return null;
 
 ### 2.4 微信 / QQ 功能管控
 
-服务端只下发**被家长改动过**的项，且**连同匹配关键词一起下发** ——
+服务端只下发**被家长改动过**的项，且**连同匹配文本一起下发** ——
 所以设备端不需要内置一份插件目录，也就不存在"服务端加了插件、设备端还不知道"这种静默失效。
 
-设备端用无障碍读当前界面的可见文本与控件描述，命中关键词就弹一页「应用已被禁止使用」说明
-（`AppBlockedActivity`：应用名 + 原因 + 「返回桌面」；唯一出口是回桌面，不会被扔回被禁的应用）。
-关键词刻意选**页面级**的串（「确认支付」「收付款」而不是「支付」）以压低误伤。
+每个功能配**三组**匹配文本 + 三种动作（判定顺序：标志物 → 功能页 → 入口）：
+
+| 组 | 匹配什么 | 命中后 |
+| --- | --- | --- |
+| `entryTexts` | 可点击的列表行（「发现」页上那一行「朋友圈」） | 吃掉这次点击 + 按返回（不弹整屏页） |
+| `pageTexts` | 功能页标题（窗口标题 / 顶部标题条上不可点击的文本） | 整屏拦，弹「这个功能已被家长关闭」说明页 |
+| `anywhereTexts` | 任意位置的整串标志物（「请输入支付密码」） | 整屏拦 |
+
+弱词（「支付」「额度」）只许进 `entryTexts` / `pageTexts`：放进 `anywhereTexts` 会让
+「聊天里提一句支付」把整个微信拦掉（这正是改动前的真实误伤，见 §3A 的说明）。
+整应用被禁时说明页标题是「应用已被禁止使用」，功能级拦截时是「这个功能已被家长关闭」
+（`AppBlockedActivity` 的两种标题；唯一出口都是回桌面，不会被扔回被禁的应用）。
 
 判定抽成了无 Android 依赖的 `GuardRules`，用合成界面文本逐条测试
 （`GuardCheck`，16 项）—— 因为模拟器里没装微信，端到端复现不出"朋友圈被打开"。
@@ -223,7 +232,7 @@ FrameBatchUploader POST /api/agent/screen-batches
 | 锁定复核 | 每 3 秒核实"实际锁住了没"；**亮屏广播**立即把锁定界面重新摆到最前 |
 | 加固自检与自愈 | `OwnerHardening.apply()/audit()` 可枚举逐项清单（28 项，本轮实测 `26/28 项生效`）+ `LongevityGuard` 服务启动/每 5 分钟巡检/家长手动自检三次重新施加，缺口变化时发 `tamper` 事件 |
 | 无障碍被关 | **堵不掉**：DO 也无法强制开启（实测 `Permission denial: Device owners cannot update enabled_accessibility_services`）。**加固开启时会把「无障碍设置页」推走**（`LockWatchdogService.isAccessibilitySettingsPage()` → `GLOBAL_ACTION_BACK`，实测 `am start -a android.settings.ACCESSIBILITY_SETTINGS` 2 秒内被弹回桌面并留下 `tamper`；关掉加固后同一命令能正常进入 = 家长逃生通道）。**唯一的放行口是「家长从应用内点『去开启』」**（`SensitiveScreens.allowTemporarily(…, HINT_ACCESSIBILITY)`，45 秒窗口）—— 不加这条会自锁死：加固默认开、无障碍一旦被关就再也进不去设置页重开。**检测是秒级的**（`onUnbind` 一次性信号，实测同一秒 16:37:14.128），5 分钟巡检只是兜底；自愈做不到 → 上报 `tamper` → 悬浮窗兜底 |
-| 进系统设置 / 应用管理 / 卸载界面 | **加固开启时「应用信息页 / 卸载界面」一进去就退回桌面**（`SensitiveScreens` + `LockWatchdogService.blockSensitiveScreen()`，按 `GLOBAL_ACTION_HOME`）。**设置首页是放行的** —— 第一版把 `com.android.settings` 整包封，结果本应用自己的授权引导页（无障碍/电池优化/悬浮窗/使用情况访问/应用详情）全长在设置包里，家长点「去开启」被自己推走，用户实测推翻后收窄。平台**没有**「禁止打开系统设置」的 DO 限制（逐条核对过 android-33 的 `UserManager`），所以这是拦截级而非限制级：**有约 0.1 秒延迟**，真正保证「卸不掉」的仍是上一行的 `setUninstallBlocked` + 受保护包。整包封：`packageinstaller` ×4、各 ROM 安全中心（小米/华为/OPPO/vivo/三星/一加）；设置包**只封应用信息页**，判据必须是**窗口文字**（实测 `event.getClassName()` 就是 `android.widget.FrameLayout`，不是页面名）：类名含 `appinfo`/`uninstall`、或文字里有「应用信息/应用详情」、或同时出现「强行停止」与「卸载」；`permissioncontroller` **只按类名封**（它同时承载权限对话框，整包封会把家长点「允许」的框推走）。放行窗口 45 秒 + 要求「进系统页面那一刻上一个前台还是本应用」，7 个授权入口各开一张。动作节流 800ms、日志 2s、上报 60s。**上机验证**（Android 13 模拟器）：设置首页停在 `SettingsHomepageActivity`、应用信息页与 `ACTION_DELETE` 都回到桌面，日志 `敏感界面封锁：拦截「应用信息」（android.widget.FrameLayout），已退回桌面`。**诚实边界**：放行窗口不校验身份（应用内没有可靠的「家长已认证」信号），而且它**不区分页面** —— 只要「进系统页那一刻上一个前台还是本应用」，应用信息页也会被放行（实测：先从应用内拉起再开应用信息页 → 页面留在前台；直接从桌面拉起 → 被拦下并回到桌面）。所以孩子点应用内的「去开启 / 应用详情」一样能走到应用信息页；但那页上的「强行停止 / 卸载 / 清除数据」由受保护包与设备所有者限制挡着 —— 放行的是「看这一页」，不是「改这一页」 |
+| 进系统设置 / 应用管理 / 卸载界面 | **加固开启时「应用信息页 / 卸载界面」一进去就退回桌面**（`SensitiveScreens` + `LockWatchdogService.blockSensitiveScreen()`，按 `GLOBAL_ACTION_HOME`）。**设置首页是放行的** —— 第一版把 `com.android.settings` 整包封，结果本应用自己的授权引导页（无障碍/电池优化/悬浮窗/使用情况访问/应用详情）全长在设置包里，家长点「去开启」被自己推走，用户实测推翻后收窄。平台**没有**「禁止打开系统设置」的 DO 限制（逐条核对过 android-33 的 `UserManager`），所以这是拦截级而非限制级：**有约 0.1 秒延迟**，真正保证「卸不掉」的仍是上一行的 `setUninstallBlocked` + 受保护包。整包封：`packageinstaller` ×4、各 ROM 安全中心（小米/华为/OPPO/vivo/三星/一加）；设置包**只封应用信息页**，判据必须是**窗口文字**（实测 `event.getClassName()` 就是 `android.widget.FrameLayout`，不是页面名）：类名含 `appinfo`/`uninstall`、或文字里有「应用信息/应用详情」、或同时出现「强行停止」与「卸载」；`permissioncontroller` **只按类名封**（它同时承载权限对话框，整包封会把家长点「允许」的框推走）。放行窗口 45 秒 + 要求「进系统页面那一刻上一个前台还是本应用」，7 个授权入口各开一张。动作节流 800ms、日志 2s、上报 60s。**上机验证**（Android 13 模拟器）：设置首页停在 `SettingsHomepageActivity`、应用信息页与 `ACTION_DELETE` 都回到桌面，日志 `敏感界面封锁：拦截「应用信息」（android.widget.FrameLayout），已退回桌面`。**新增：设备管理应用页面**（非设备所有者时「激活设备管理器」是唯一挡住卸载的一道闸，所以关掉它的那个开关必须封）—— 列表页 `com.android.settings/.Settings$DeviceAdminSettingsActivity` 实测被拦（日志 `拦截「设备管理应用」（android.widget.FrameLayout）`，重复 3 次一致），判据同时收 `text` 与 `content-desc`（该页标题 `Device admin apps` 只有 `content-desc`）；命中词表取自设备上的 Settings APK（`aapt2 dump resources` 的 `zh-rCN` + `default`）：列表页 `manage_device_admin`、停用按钮 `remove_device_admin`、启用按钮 `add_device_admin`；且**「启用」页必须先放行**（中文提示「要启用此设备管理应用吗？」字面包含「设备管理应用」），靠 `ADMIN_ACTIVATE_WORDS` 排除。**验证等级：列表页设备级 ✅；停用页/启用页为文案级**（`am` 无 `--ecn`，`DeviceAdminAdd` 拿不到 `ComponentName` extra 会立刻 `finish()`，唯一的界面路径又要先过被拦的列表页；两页原文用 uiautomator 取到 —— 启用页含 `Activate device admin app?`、停用页含 `Deactivate this device admin app`）。**诚实边界**：放行窗口不校验身份（应用内没有可靠的「家长已认证」信号），而且它**不区分页面** —— 只要「进系统页那一刻上一个前台还是本应用」，应用信息页也会被放行（实测：先从应用内拉起再开应用信息页 → 页面留在前台；直接从桌面拉起 → 被拦下并回到桌面）。所以孩子点应用内的「去开启 / 应用详情」一样能走到应用信息页；但那页上的「强行停止 / 卸载 / 清除数据」由受保护包与设备所有者限制挡着 —— 放行的是「看这一页」，不是「改这一页」 |
 | 网址拦截 VPN 被断开 | 设备所有者把本应用钉成永久 VPN：`setAlwaysOnVpnPackage(admin, pkg, /* lockdown */ false)` + `no_config_vpn`。实测：开启 `webBlock` 后 41 秒 `always_on_vpn_app=com.balloondog.agent`、`mAlwaysOnVpnLockdown=false`、VPN 设置页被 `Blocked by your IT admin` 挡死；关闭后 10 秒 `已解除永久 VPN`。**不开 lockdown**（理由见 `android/README.md` §7.3）；**「下拉快捷开关的 VPN 磁贴能否断开」本机没有磁贴、未验证** |
 | 使用情况访问被关 | **授不了也补不回**（appop 型），但已接进巡检：限时功能在用时会发 `tamper` |
 
@@ -450,6 +459,7 @@ FrameBatchUploader POST /api/agent/screen-batches
 | §3.1 网址拦截 | ✅ | ✅ 19 项 | **🟡 只到基础设施层** | 已证：屏蔽域名落盘、服务在跑、日志「网址拦截已启动：上游 DNS fec0::3,10.0.2.3,223.5.5.5,119.29.29.29,8.8.8.8」、**tun 真建立**（`dumpsys connectivity` 里 `InterfaceName: tun0` + `DnsAddresses: [ /10.111.222.1 ]`）。**「某个域名真被拦」做不出设备级断言**：隧道一存在，`adb shell` 对**所有**域名（含未屏蔽的 bing.com/wikipedia.org）一律 `unknown host`，无法区分「被拦」和「隧道不通」，且期间 logcat 里没有任何「已拦截 <域名>」——shell 的查询压根没走到拦截器。DNS 解析逻辑只有 JVM 级证据（`PureLogicCheck` 覆盖 `DnsMessage`/`DomainBlocker`） |
 | §3.4 局数预算 | ✅ | — | **🟡 只到一半** | 已证：家长端 API 建预算 HTTP 200 → pref `game_rounds_limit=3`/`game_rounds_enabled=true` → 权威计数 `used=0/3` → 未达上限时 `mLockTaskModeState=NONE`。**「离线兜底锁屏」只有编译/JVM 级**（`LockEnforcer.java:103` 的 `budgetLockReason` → `LockState.Reason.BUDGET`）：`used` 只能由服务端 AI 推算（`insights.service.ts:827`），家长 API（`upsertBudgetSchema`）只收 `dailyLimit`（最小 1），构造不出 `used >= limit` |
 | §3.9 同屏监控 | — | — | — | 明确不做 |
+| §2.10/§2.11 两道防卸载闸 + 设备管理器页封锁（本轮新增） | ✅ | — | **🟡 部分** | 已证：孩子端首页「需要开启」从 8 行变 **9 行**，第 2 行是「设备管理器 / 没开设备所有者时，靠它挡住卸载」，DO 设备 uiautomator dump 实测为「已开启」、进度 `5/7`、红色告警条正确隐藏；「设置 → 设备管理应用」列表页实测被拦（日志 `拦截「设备管理应用」（android.widget.FrameLayout）`，重复 3 次一致）；三档卸载防护（DO / 仅设备管理器 / 两者都没）各有原字串证据。**没验证到的部分**：①「只激活设备管理器（非 DO）」时的首页告警条 + 「一键开启权限 → 弹激活页」这条点击路径 —— 需要第二台非 DO 设备，本轮模拟器磁盘只剩 5.5G、`-wipe-data` 报 `Not enough space to create userdata partition`，建不出新 AVD；②停用页/启用页的封锁只有**文案级**证据（`am` 没有 `--ecn`，`DeviceAdminAdd` 拿不到 `ComponentName` extra 会立刻 `finish()`，唯一的界面路径又要先过被拦的列表页） |
 
 **两条显式跳过（不是通过，也不是失败）** —— 套件里的 `⏭` 是刻意设计的，文件注释写着：
 「把没跑过的断言写成通过，比没有测试更糟 —— 后面的人会以为这条链路上已经有设备级证据了」：
@@ -794,8 +804,21 @@ FrameBatchUploader POST /api/agent/screen-batches
 
 - **学习模式与插件管控靠无障碍**（按界面可见文本匹配），不是系统 API：
   应用改版换文案会漏拦；看不见 WebView 内容与游戏画布；有几百毫秒延迟；关掉无障碍权限即失效。
-- **插件关键词匹配没有端到端验证**：模拟器里没装微信/QQ，端到端复现不出来，
-  由 `GuardCheck` 的 16 项覆盖判定逻辑。
+- **插件匹配没有端到端验证**：模拟器里没装微信/QQ，端到端复现不出来，
+  由 `GuardCheck` 的 27 项（插件段 11 项）覆盖判定逻辑。
+- **三个伪包名目标（`__payment__` / `__appstore__` / `__browser__`）现在拦不住**：
+  设备端按「规则包名 == 前台包名」匹配，伪包名不可能等于真实前台包名，那 22 条规则永不命中，
+  而家长端把它们列了出来 —— 需要真机逐条验收后再展开（改语义那一轮刻意没动）。
+- **「学习模式专用桌面」让 `android:e2e:mode` 的学习模式 5 项失效**（2026-10-16 实测）：
+  接管桌面后 `KEYCODE_HOME` 停在自家 Activity（或系统弹「选择桌面」，因为 launcher 与
+  `StudyHomeActivity` 同为 HOME 候选），脚本「启动靶子应用 → 看它是否被拦回」的观测点全被
+  自家界面占住，`看门狗：拦截 …不在允许清单` 那条日志等不到，于是 5 项判失败。
+  同一轮还发现并修掉一个真崩溃：`activity_study_home.xml` 的两个按钮缺 `layout_height`，
+  一进学习模式 `StudyHomeActivity` 就 `InflateException` 崩溃并被系统反复重启（已补属性，
+  25 项里从 16 通过升到 20 通过）。**学习模式的拦截本身是否仍然可靠，需要在干净设备上单独复验**
+  （本轮手动复验时设备刚被脚本解绑、配置下发不下去，没拿到证据，故不下结论）。
+- **插件入口拦截的唯一反馈是「点了没反应」**：Android 11 起后台应用弹 Toast 会被系统丢掉，
+  可靠提示要再做一个 `TYPE_ACCESSIBILITY_OVERLAY` 浮层（未做）。家长端照常收到 `plugin_blocked`。
 - **网址拦截曾经只拦 DNS**（R3 §4.1 之前）：IP 直连、已缓存 IP、DoH/DoT 都拦不到。R3 起地址层已补上（见 §3G），仍未覆盖「换一个没被拦的加密解析器、应用自己写死的无关 IP、已建立的连接」。
 - **护眼「距离 / 姿势提醒」没做**：「学习模式专用桌面」没做。
 - **应用审核不是系统级审批**：它是「无障碍识别 + 设备所有者限制」的近似。
@@ -970,17 +993,17 @@ grep -rn "audioRecord\|remoteHelp\|callSms" --include=*.ts --include=*.tsx --inc
 | 套件 | 覆盖 | 状态 |
 | --- | --- | --- |
 | `android:e2e`（83 项） | 协议闭环、锁定、Kiosk、倒计时、最高强度档、保活、重启安全阀 | 上机跑过 |
-| `android:e2e:mode`（23 项） | **学习模式真的拦住应用**、护眼/插件配置下发落盘 | 上机跑过 |
+| `android:e2e:mode`（25 项） | 护眼/插件配置下发落盘（含**设备端解析新格式**的 3 项）、**学习模式拦住应用** | 20/25：插件与护眼全过；学习模式的 5 项因「学习模式专用桌面接管桌面」而失效（见下方边界） |
 | `android:e2e:screen`（21 项） | 截屏采集→上传→AI 分析→锁定复核 | 上机跑过 |
-| `android:crosstest` | 作息 2016 点、模式 3024 点、`GuardCheck` 16 项、**`PureLogicCheck` 198 项**（含抗篡改时钟 20 项、自动解锁探测 8 项、孩子端剩余时长 15 项、知情说明 17 项、网址拦截 41 项、学习模式专用桌面 14 项、孩子端今日任务 15 项）+ **第 7 步说明页与清单逐条对照** | 本轮 EXIT=0 |
+| `android:crosstest` | 作息 2016 点、模式 3024 点、`GuardCheck` 27 项、**`PureLogicCheck` 198 项**（含抗篡改时钟 20 项、自动解锁探测 8 项、孩子端剩余时长 15 项、知情说明 17 项、网址拦截 41 项、学习模式专用桌面 14 项、孩子端今日任务 15 项）+ **第 7 步说明页与清单逐条对照** | 本轮 EXIT=0 |
 | `server:smoke`（167 项） | 服务端全接口 | 本轮 167/167 |
-| `server:e2e:mode`（64 项） | 模式/护眼/插件/事件/越权 | 上机跑过 |
+| `server:e2e:mode`（68 项） | 模式/护眼/插件（含三组匹配文本与弱词位置）/事件/越权 | 上机跑过 |
 | `server:e2e:insights` + `:ai`（各 28 项） | 屏幕洞察与 AI 全链路 | 上机跑过 |
 | `server:e2e:icons`（32 项） | 应用图标上报→嗅探→签名 URL→缓存与鉴权 | 本轮 32/32 |
 | `server:e2e:membership`（180 项） | 动态定价、订单快照、三种周期、续费/升级、自动续费 CAS、门禁 403、受邀用户定价（含取最高价、后台 CRUD 与试算、家长端隐蔽性） | 本轮 180/180 |
 | `server:e2e:referral`（159 项） | 邀请码与绑定、首充阶梯、续费返现、券里程碑与幂等、实名哈希、次月结算、提现门槛与审核状态机、券抵扣、后台统计/规则/配置/风控 | 本轮 159/159 |
 | `e2e:parent` / `e2e:admin`（120 + 80 项） | 家长端与管理后台 | 本轮全绿 |
-| `e2e:ux`（128 项） | 首次引导三步、功能提示、英文界面、登录态健壮性 | 本轮全绿 |
+| `e2e:ux`（134 项） | 首次引导四步（多了一步「在孩子手机上开启授权」，`设备管理器` 是必做项）、功能提示、英文界面、登录态健壮性 | 本轮全绿 |
 | `server:e2e:health`（91 项） | 健康快照契约、在线分级、分机型修复步骤 | 本轮 91/91 |
 | `server:e2e:notifications`（69 项） | 站内通知的生产点（家庭成员邀请归 `device-members`、任务完成归 `children`）、幂等去重、写入侧过滤、模板+参数 | 本轮 69/69 |
 | `server:e2e:device-members`（67 项） | 角色分离（owner/admin/viewer）、每个写接口重校验、上限与打码、解绑与成员管理仅主人 | 本轮 67/67 |

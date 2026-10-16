@@ -1,12 +1,15 @@
 import { Navigate, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { Check, ChevronRight, Download, KeyRound, Smartphone, Sparkles } from 'lucide-react'
+import { Check, ChevronRight, Download, KeyRound, ShieldCheck, Smartphone, Sparkles } from 'lucide-react'
 import { BrandLogo } from '@/components/BrandLogo'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { firstPendingStep, shouldAutoStart, useOnboarding, type OnboardingStepId } from '@/hooks/useOnboarding'
 
-/** 空态清单的展示顺序与文案；id 必须与引导步骤一一对应（welcome → install → bind）。 */
+/**
+ * 空态清单的展示顺序与文案；id 必须与引导步骤一一对应
+ * （welcome → install → authorize → bind）。
+ */
 const CHECKLIST: { id: OnboardingStepId; icon: typeof Download; title: string; desc: string }[] = [
   {
     id: 'welcome',
@@ -19,6 +22,12 @@ const CHECKLIST: { id: OnboardingStepId; icon: typeof Download; title: string; d
     icon: Smartphone,
     title: '装到孩子的手机上',
     desc: '家长端只装你自己手机，孩子端装被管的那台',
+  },
+  {
+    id: 'authorize',
+    icon: ShieldCheck,
+    title: '在孩子手机上开启授权',
+    desc: '尤其别漏掉「设备管理器」——没开它，孩子长按图标就能卸载',
   },
   {
     id: 'bind',
@@ -34,7 +43,7 @@ const CHECKLIST: { id: OnboardingStepId; icon: typeof Download; title: string; d
  * 这是家长第一次打开应用最可能看到的画面，所以它**不是错误页**：
  * 没有红色感叹号、没有「加载失败」、也不弹 toast —— 那些都会让新手以为
  * 自己把软件弄坏了。这里只做三件事：说清这个软件是干嘛的、把绑定拆成
- * 看得见进度的三步、给一个明确的大按钮。
+ * 看得见进度的四步、给一个明确的大按钮。
  *
  * 真正的操作都在 `/onboarding` 里做；这里只是入口 + 进度展示，避免两处
  * 维护同一套表单。
@@ -107,7 +116,7 @@ export function NoDeviceState() {
 
             <Button className="mt-5 w-full" onClick={() => navigate('/onboarding')}>
               <Sparkles className="h-4 w-4" />
-              {doneCount === 0 ? t('开始 3 步设置') : t('继续设置')}
+              {doneCount === 0 ? t('开始 4 步设置') : t('继续设置')}
             </Button>
           </CardContent>
         </Card>

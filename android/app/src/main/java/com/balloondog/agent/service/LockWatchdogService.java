@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.content.ComponentName;
 import android.content.Context;
+import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -14,10 +15,13 @@ import android.view.accessibility.AccessibilityWindowInfo;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.balloondog.agent.capability.AccessibilityGuard;
 import com.balloondog.agent.capability.AccessibilityScreenCapture;
 import com.balloondog.agent.capability.LockEnforcer;
 import com.balloondog.agent.capability.SensitiveScreens;
+import com.balloondog.agent.capability.GuardRules;
 import com.balloondog.agent.capability.StudyHomeController;
+import com.balloondog.agent.capability.WindowNode;
 import com.balloondog.agent.capability.StudyLauncher;
 import com.balloondog.agent.capability.StudyModeEngine;
 import com.balloondog.agent.capability.LockState;
@@ -28,6 +32,7 @@ import com.balloondog.agent.ui.LockOverlayWindow;
 import com.balloondog.agent.ui.StudyHomeActivity;
 import com.balloondog.agent.capability.TrustedClock;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -358,7 +363,11 @@ public class LockWatchdogService extends AccessibilityService {
         // 窗口文字只取一次、两处共用：敏感界面判定要靠它区分「设置首页」与「应用信息页」
         // （实测事件类名经常是 FrameLayout/Button 这类根视图类，不可靠），
         // 下面的 GuardRules 也要用同一份文本，取两次没有意义。
-        String windowText = collectWindowText(event);
+        // 窗口快照一次取齐、三处共用：敏感界面判定要扁平文本，插件管控还要窗口标题与
+        // 节点结构 —— 「入口行」与「功能页标题」的区别就长在这份结构里
+        // （见 GuardRules.matchPluginRules）。
+        WindowSnapshot snapshot = snapshotWindow(event);
+        String windowText = snapshot.text;
         String sensitive = SensitiveScreens.match(pkg, event.getClassName(), windowText);
         boolean accessibilityPage = isAccessibilitySettingsPage(pkg, event);
         boolean excursion = false;
@@ -435,7 +444,21 @@ public class LockWatchdogService extends AccessibilityService {
         // 这一段<b>必须在「是否锁定」判定之前</b>：学习模式与插件管控是在设备
         // 正常可用的情况下也要生效的规则，与锁不锁屏无关。
         // 如果放在后面，家长会发现「没锁屏的时候学习模式根本不管用」。
-        if (guard(context, event, pkg, windowText)) return;
+        // ---- 应用插件管控：入口点击这一层 ----
+        //
+        // 点「发现」页上的「朋友圈」时界面不会立刻变（要等应用自己跳），等它跳过去再整屏拦，
+        // 孩子看到的是一个已经打开的页面被弹走 —— 所以入口这一层要在「手指落下」的那一刻
+        // 吃掉这次点击：按一次返回。下面的整屏判定仍然是兜底（点击事件是在应用自己的
+        // onClick 之后才发出来的，这次返回可能没赶上新页面）。
+        //
+        // 只认 typeViewClicked：窗口刷新事件没有「点了哪一行」的信息，拿整棵树去比对
+        // 会把滚动经过的入口文案也算成点击。
+        if (event.getEventType() == AccessibilityEvent.TYPE_VIEW_CLICKED
+                && handlePluginEntryClick(context, event, pkg)) {
+            return;
+        }
+
+        if (guard(context, event, pkg, snapshot)) return;
 
         // 以下是锁定态的复核，只在策略要求锁定时才做
         LockState state = LockState.compute(
@@ -495,7 +518,7 @@ public class LockWatchdogService extends AccessibilityService {
         // 家长没开「应用审核」时，装应用与他无关，不要制造骚扰
         if (!store.isFeatureEnabled("appAudit")) return;
 
-        String appName = guessAppNameFromWindowText(collectWindowText(event));
+        String appName = guessAppNameFromWindowText(snapshotWindow(event).text);
         boolean named = appName != null && !appName.isEmpty();
         String identity = named ? appName : pkg;
 
@@ -742,7 +765,7 @@ public class LockWatchdogService extends AccessibilityService {
         }
     }
 
-    private boolean guard(Context context, AccessibilityEvent event, String pkg, String windowText) {
+    private boolean guard(Context context, AccessibilityEvent event, String pkg, WindowSnapshot snapshot) {
         if (inventory == null) inventory = new com.balloondog.agent.capability.AppInventory();
         inventory.ensureScanned(context);
 
@@ -774,40 +797,38 @@ public class LockWatchdogService extends AccessibilityService {
             }
         }
 
-        com.balloondog.agent.capability.GuardRules.GuardDecision decision =
-                com.balloondog.agent.capability.AccessibilityGuard.check(
-                        store, inventory, context, pkg, windowText, TrustedClock.now());
+        GuardRules.GuardDecision decision = AccessibilityGuard.check(
+                store, inventory, context, pkg, snapshot.title, snapshot.nodes, TrustedClock.now());
         if (decision == null || decision.reason == null) return false;
+
+        // 命中「入口」的规则在这一层不下手：孩子还在列表页上，整屏拦会把同一页里
+        // 家长允许的功能一起关掉（这正是改动前「关掉朋友圈 → 微信整个用不了」那条路）。
+        // 入口该由 handlePluginEntryClick 吃掉那一次点击。
+        if (decision.entry) return false;
 
         long now = SystemClock.elapsedRealtime();
         // 与锁定复核共用同一个节流：同一个界面连续触发时不要疯狂按返回
         if (now - lastGuardAt < GUARD_INTERVAL_MS) return true;
         lastGuardAt = now;
 
-        // 同一个应用 + 同一个原因，10 秒内只记一条事件。
-        // 不加这个去重的话，孩子停在被拦的页面上会刷出成百上千条重复动态，
-        // 家长端的「最新动态」会瞬间被淹没。
-        String dedupKey = pkg + "|" + decision.reason;
-        if (!dedupKey.equals(lastGuardKey) || now - lastGuardEventAt > 10_000L) {
-            lastGuardKey = dedupKey;
-            lastGuardEventAt = now;
-            String type = decision.pluginKey != null
-                    ? com.balloondog.agent.data.Constants.EVENT_PLUGIN_BLOCKED
-                    : com.balloondog.agent.data.Constants.EVENT_APP_BLOCKED;
-            EventLog.warn("看门狗：拦截 " + pkg + " —— " + decision.reason);
-            com.balloondog.agent.service.AgentService.recordEventStatic(type, decision.reason);
-        }
+        recordBlock(pkg, decision);
 
-        // 拦截动作：弹一页「这个应用被禁止使用」，把原因说清楚。
+        // 拦截动作：弹一页说明，把原因说清楚。
         //
         // 在此之前只是按一下系统返回键：孩子被静默弹回上一个界面，既不知道发生了什么、
         // 也不知道该找谁 —— 观感就是「手机坏了」。说明页唯一的出口是「回桌面」，
         // 所以孩子不会被扔回被禁的应用里。
         //
-        // 判定链上的三种拦截（插件管控 / 学习模式 / 应用限时）都是按前台包名判的，
-        // 不存在「只拦某个网页」的情况，所以「这个应用被禁止」这句话始终成立。
-        com.balloondog.agent.ui.AppBlockedActivity.show(
-                context, appLabelOf(context, pkg), decision.reason, null);
+        // 插件管控现在可能是「功能级」的（孩子已经进了朋友圈 / 支付页），标题必须跟着变，
+        // 否则「应用已被禁止使用 / 微信 / 该功能已被家长关闭（朋友圈）」这句自相矛盾的
+        // 组合会把家长和孩子都看懵。
+        if (decision.pluginKey != null) {
+            com.balloondog.agent.ui.AppBlockedActivity.showFeature(
+                    context, appLabelOf(context, pkg), decision.reason);
+        } else {
+            com.balloondog.agent.ui.AppBlockedActivity.show(
+                    context, appLabelOf(context, pkg), decision.reason, null);
+        }
         return true;
     }
 
@@ -861,18 +882,44 @@ public class LockWatchdogService extends AccessibilityService {
     }
 
     /**
-     * 收集当前窗口的可见文本，供插件关键词匹配。
+     * 一次窗口采集的结果。
+     *
+     * <p>三个字段各有各的用场：{@code text} 是扁平文本（敏感界面判定按关键词找，
+     * 只关心「这一屏上有没有这些字」）；{@code title} 与 {@code nodes} 给插件管控用 ——
+     * 「入口行」与「功能页标题」的区别就长在节点结构里（能不能点、在不在列表里、在不在顶部）。
+     */
+    private static final class WindowSnapshot {
+        final String text;
+        final String title;
+        final List<WindowNode> nodes;
+
+        WindowSnapshot(String text, String title, List<WindowNode> nodes) {
+            this.text = text;
+            this.title = title;
+            this.nodes = nodes;
+        }
+    }
+
+    /**
+     * 采集当前窗口：扁平文本 + 窗口标题 + 有界节点快照。
      *
      * <p>遍历是有界且带预算的：无障碍节点树可能非常大，无节制遍历会拖慢主线程，
      * 反而让整个无障碍服务被系统判定为无响应。
      */
-    private String collectWindowText(AccessibilityEvent event) {
+    private WindowSnapshot snapshotWindow(AccessibilityEvent event) {
         StringBuilder sb = new StringBuilder();
+        List<WindowNode> nodes = new ArrayList<>();
+        String title = "";
         try {
             List<CharSequence> texts = event.getText();
             if (texts != null) {
                 for (CharSequence t : texts) {
-                    if (t != null) sb.append(t).append(' ');
+                    if (t != null) {
+                        sb.append(t).append(' ');
+                        // 窗口状态变化事件自带的第一个文本通常就是页面标题，用作兜底：
+                        // 实测微信进「朋友圈」时事件文本就是「朋友圈」。
+                        if (title.isEmpty()) title = t.toString();
+                    }
                 }
             }
             if (event.getContentDescription() != null) {
@@ -882,29 +929,154 @@ public class LockWatchdogService extends AccessibilityService {
                 sb.append(event.getClassName()).append(' ');
             }
 
+            String windowTitle = activeWindowTitle();
+            if (windowTitle != null && !windowTitle.isEmpty()) title = windowTitle;
+
             AccessibilityNodeInfo root = getRootInActiveWindow();
             if (root != null) {
+                // 顶部标题条 ≈ 屏幕上方四分之一。这个比例是刻意的宽口径：
+                // 只要标题文本落在顶部、又不可点击、又不在列表里，就认定它是页面标题。
+                int topLimit = getResources().getDisplayMetrics().heightPixels / 4;
                 int[] budget = {MAX_TEXT_NODES};
-                collectNodeText(root, sb, 0, budget);
+                collectNodes(root, nodes, sb, 0, budget, false, false, topLimit);
             }
         } catch (Exception e) {
             // 取文本失败就只用事件自带的那点信息，绝不能因此中断拦截链路
         }
-        return sb.toString();
+        return new WindowSnapshot(sb.toString(), title, nodes);
     }
 
-    private void collectNodeText(AccessibilityNodeInfo node, StringBuilder sb, int depth, int[] budget) {
+    /** 活动窗口的标题（系统给的，比在节点树里猜标题靠谱）。 */
+    private String activeWindowTitle() {
+        try {
+            List<AccessibilityWindowInfo> windows = getWindows();
+            if (windows == null) return null;
+            for (AccessibilityWindowInfo window : windows) {
+                if (window == null || !window.isActive()) continue;
+                CharSequence t = window.getTitle();
+                return t == null ? null : t.toString();
+            }
+        } catch (Exception e) {
+            return null;
+        }
+        return null;
+    }
+
+    /**
+     * 递归采集节点：文本 + 三个判定用的布尔量。
+     *
+     * <p>{@code clickableAncestor} / {@code listAncestor} 是往下传的 —— 列表行内部那个
+     * TextView 自己不可点击、也不在列表容器里，只有祖先知道，而「整行可点」正是入口行的特征。
+     */
+    private void collectNodes(AccessibilityNodeInfo node, List<WindowNode> out, StringBuilder flat,
+                              int depth, int[] budget, boolean clickableAncestor,
+                              boolean listAncestor, int topLimit) {
         if (node == null || depth > MAX_TEXT_DEPTH || budget[0] <= 0) return;
         budget[0]--;
 
-        if (node.getText() != null) sb.append(node.getText()).append(' ');
-        if (node.getContentDescription() != null) sb.append(node.getContentDescription()).append(' ');
+        boolean clickable = clickableAncestor || node.isClickable();
+        boolean inList = listAncestor || isListClass(node.getClassName());
+
+        boolean topStrip = false;
+        try {
+            node.getBoundsInScreen(boundsRect);
+            topStrip = boundsRect.width() > 0 && boundsRect.height() > 0
+                    && boundsRect.top < topLimit && boundsRect.height() <= topLimit;
+        } catch (Exception e) {
+            topStrip = false;
+        }
+
+        CharSequence text = node.getText();
+        if (text != null && text.length() > 0) {
+            flat.append(text).append(' ');
+            out.add(new WindowNode(text.toString(), clickable, inList, topStrip));
+        }
+        CharSequence desc = node.getContentDescription();
+        if (desc != null && desc.length() > 0 && (text == null || !desc.toString().contentEquals(text))) {
+            flat.append(desc).append(' ');
+            out.add(new WindowNode(desc.toString(), clickable, inList, topStrip));
+        }
 
         int count = node.getChildCount();
         for (int i = 0; i < count; i++) {
             if (budget[0] <= 0) break;
-            collectNodeText(node.getChild(i), sb, depth + 1, budget);
+            collectNodes(node.getChild(i), out, flat, depth + 1, budget, clickable, inList, topLimit);
         }
+    }
+
+    /** 这个类名是不是列表容器（列表行内部的文本不算「功能页标题」）。 */
+    private static boolean isListClass(CharSequence className) {
+        if (className == null) return false;
+        String name = className.toString();
+        return name.contains("RecyclerView") || name.contains("ListView") || name.contains("GridView");
+    }
+
+    /**
+     * 插件「入口」拦截：吃掉这一次点击，并按一次返回。
+     *
+     * <p>为什么不能只靠窗口事件：点「朋友圈」之后界面不会立刻变，等它跳过去再整屏拦，
+     * 孩子看到的是一个已经打开的页面被弹走 —— 观感是「手机自己发疯」。在按下的这一刻处理，
+     * 表现就接近「这个入口被禁用了」。
+     *
+     * <p>刻意<b>不</b>弹整屏说明页：孩子只是点了一下列表里的一行，不该被推去桌面。
+     * 代价是「点了没反应」是唯一反馈 —— Android 11 起后台应用弹 Toast 会被系统丢掉，
+     * 想要可靠提示得再做一个无障碍浮层，本轮没做（见 android/README.md 的边界一节）。
+     *
+     * @return 真的吃掉了这次点击时返回 true（调用方据此跳过后续链路）
+     */
+    private boolean handlePluginEntryClick(Context context, AccessibilityEvent event, String pkg) {
+        try {
+            if (store == null) return false;
+            if (inventory == null) inventory = new com.balloondog.agent.capability.AppInventory();
+            inventory.ensureScanned(context);
+            if (!isForegroundEvent(pkg)) return false;
+
+            // 事件里只有「被点的那一个节点」，所以直接按「可点击的行」描述它。
+            List<CharSequence> texts = event.getText();
+            CharSequence text = texts == null || texts.isEmpty() ? null : texts.get(0);
+            CharSequence desc = event.getContentDescription();
+            if (text == null && desc == null) return false;
+
+            List<WindowNode> clicked = new ArrayList<>(2);
+            if (text != null) clicked.add(WindowNode.of(text.toString(), true, false, false));
+            if (desc != null && (text == null || !desc.toString().contentEquals(text))) {
+                clicked.add(WindowNode.of(desc.toString(), true, false, false));
+            }
+
+            GuardRules.GuardDecision decision = AccessibilityGuard.checkClick(store, context, pkg, clicked);
+            if (decision == null || decision.reason == null) return false;
+
+            long now = SystemClock.elapsedRealtime();
+            // 同一行连点：节流兜住。不然孩子连点五下会产生五条动态 + 五次返回键。
+            if (now - lastPluginClickAt < CLICK_GUARD_INTERVAL_MS) return true;
+            lastPluginClickAt = now;
+
+            recordBlock(pkg, decision);
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            return true;
+        } catch (Exception e) {
+            // 入口拦截失败不能让整条链路断掉：下面的整屏判定还在。
+            return false;
+        }
+    }
+
+    /**
+     * 拦截落账：同一个应用 + 同一个原因，10 秒内只记一条事件。
+     *
+     * <p>不加这个去重的话，孩子停在被拦的页面上会刷出成百上千条重复动态，
+     * 家长端的「最新动态」会瞬间被淹没。入口层与整屏层共用这一套。
+     */
+    private void recordBlock(String pkg, GuardRules.GuardDecision decision) {
+        long now = SystemClock.elapsedRealtime();
+        String dedupKey = pkg + "|" + decision.reason;
+        if (dedupKey.equals(lastGuardKey) && now - lastGuardEventAt <= 10_000L) return;
+        lastGuardKey = dedupKey;
+        lastGuardEventAt = now;
+        String type = decision.pluginKey != null
+                ? Constants.EVENT_PLUGIN_BLOCKED
+                : Constants.EVENT_APP_BLOCKED;
+        EventLog.warn("看门狗：拦截 " + pkg + " —— " + decision.reason);
+        AgentService.recordEventStatic(type, decision.reason);
     }
 
     /** 把锁定界面重新拉回最前；必要时补一次返回把逃逸的界面推走。 */
@@ -955,6 +1127,15 @@ public class LockWatchdogService extends AccessibilityService {
     private com.balloondog.agent.capability.AppInventory inventory;
     /** 两次学习模式 / 插件拦截之间的最小间隔。 */
     private static final long GUARD_INTERVAL_MS = 400L;
+
+    /** 入口点击的节流：同一个入口连点不必每次都按返回。 */
+    private static final long CLICK_GUARD_INTERVAL_MS = 300L;
+
+    /** 上一次入口点击拦截的时间（节流用）。 */
+    private long lastPluginClickAt;
+
+    /** 采集节点边界时复用同一个矩形，避免每个节点都分配一次（节点树可能上千个）。 */
+    private final Rect boundsRect = new Rect();
     private long lastGuardAt;
     /** 拦截事件的去重键与时间，避免同一个被拦页面刷出成百上千条动态。 */
     private String lastGuardKey = "";

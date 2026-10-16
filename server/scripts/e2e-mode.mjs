@@ -257,8 +257,18 @@ async function main() {
   check(Boolean(mmRule), '下发了微信的插件规则')
   const momentsRule = mmRule?.plugins.find((p) => p.key === 'mm_moments')
   check(momentsRule && momentsRule.enabled === false, '朋友圈这条规则是「禁止」')
+  check(momentsRule && momentsRule.label === '朋友圈', '规则带人话名字，拦截原因不用拿关键词凑')
+  check(momentsRule && Array.isArray(momentsRule.entryTexts) && momentsRule.entryTexts.includes('朋友圈'),
+    '规则里带了「入口」文本 —— 发现页上那一行只在被点时吃一次点击')
+  check(momentsRule && Array.isArray(momentsRule.pageTexts) && momentsRule.pageTexts.includes('朋友圈'),
+    '规则里带了「功能页标题」文本 —— 真的进了朋友圈页才整屏拦')
   check(momentsRule && Array.isArray(momentsRule.keywords) && momentsRule.keywords.length > 0,
-    '规则里带了匹配关键词 —— 设备端不需要内置一份目录就能执行')
+    'keywords 兼容镜像仍在（老版本设备端靠它执行规则，缺了会静默失效）')
+  // 修误伤的数据侧防线：「支付」这种弱词不该出现在任意位置匹配里 ——
+  // 否则聊天里提一句「支付」就会把整个微信拦掉（这正是改动前的真实误伤）
+  const payRule = mmRule?.plugins.find((p) => p.key === 'mm_pay_entry')
+  check(payRule && Array.isArray(payRule.anywhereTexts) && !payRule.anywhereTexts.includes('支付'),
+    '弱词（如「支付」）不在任意位置匹配里，只在入口/标题上匹配')
   check(!mmRule.plugins.some((p) => p.key === 'mm_video_channel'),
     '与默认值一致的项不下发（省流量，也让「设备端规则从哪来」好解释）')
 

@@ -51,29 +51,92 @@ public final class GuardRules {
     }
 
     /**
-     * 应用插件规则匹配。
+     * 应用插件规则匹配 —— 判「这一屏是入口、还是已经进了功能页、还是只是正文里提了一嘴」。
      *
-     * @param windowText 当前窗口的可见文本（未小写化也可以，这里统一处理）
+     * <h3>两种拦截，两种后果</h3>
+     * 命中时返回的决定带 {@link GuardDecision#entry}：
+     * <ul>
+     *   <li>{@code entry == true}：命中的是**入口行**（发现页上的「朋友圈」那一行）。
+     *       只该吃掉这一次点击，<b>不能</b>弹「应用被禁止使用」整屏页 —— 否则孩子连同一页上
+     *       家长允许的「扫一扫」都进不去，而家长以为自己只关了朋友圈。</li>
+     *   <li>{@code entry == false}：孩子已经在**功能页**里（页面标题就是那个功能名），
+     *       这时才该整屏拦下来。</li>
+     * </ul>
+     *
+     * <p>只按文本 contains 匹配（不做分词、不做正则）是有意为之：无障碍读到的文本本身
+     * 就可能带换行、省略号与噪声，规则宽松一点宁可漏拦，也好过把孩子正常聊天判成违规。
+     *
+     * @param windowTitle 当前窗口标题（{@code AccessibilityWindowInfo.getTitle()}，可能为 null）
+     * @param nodes       当前窗口的可见文本节点，见 {@link WindowNode}
      * @return 命中的拦截决定；null 表示放行
      */
-    public static GuardDecision matchPluginRules(List<PluginRule> rules, String pkg, String windowText) {
+    public static GuardDecision matchPluginRules(List<PluginRule> rules, String pkg,
+                                                 String windowTitle, List<WindowNode> nodes) {
         if (rules == null || rules.isEmpty()) return null;
         if (pkg == null || pkg.isEmpty()) return null;
-        if (windowText == null || windowText.isEmpty()) return null;
+        if (nodes == null || nodes.isEmpty()) return null;
 
-        String lower = windowText.toLowerCase(Locale.US);
+        String lowerTitle = lower(windowTitle);
+
         for (PluginRule rule : rules) {
             if (!pkg.equals(rule.packageName)) continue;
             if (rule.enabled) continue; // 家长允许，跳过
 
-            for (String keyword : rule.keywords) {
-                if (keyword == null || keyword.isEmpty()) continue;
-                if (lower.contains(keyword.toLowerCase(Locale.US))) {
-                    return new GuardDecision("该功能已被家长关闭（" + keyword + "）", rule.key);
+            String reason = "该功能已被家长关闭（" + rule.label() + "）";
+
+            // ① 页面内标志物：整窗任意位置比对。「确认支付」「请输入支付密码」这类串本身
+            //    就说明正在做这件事，出现在哪儿都算 —— 但这类串必须辨识度足够，
+            //    放弱词（如「支付」）就会把聊天里提一句也判成违规。
+            for (WindowNode node : nodes) {
+                if (node == null || node.text == null || node.text.isEmpty()) continue;
+                for (String marker : rule.anywhereTexts) {
+                    if (contains(lower(node.text), marker)) {
+                        return new GuardDecision(reason, rule.key, false);
+                    }
+                }
+            }
+
+            // ② 功能页：窗口标题就是功能名，或者顶部标题条上有个不可点击的标题文本。
+            //    限定「不可点击 + 不在列表里 + 在顶部」，是为了不把列表行内部的 TextView
+            //    （自己不可点击、但整行可点击）和聊天正文当成了页面标题。
+            for (String pageText : rule.pageTexts) {
+                if (contains(lowerTitle, pageText)) {
+                    return new GuardDecision(reason, rule.key, false);
+                }
+            }
+            for (WindowNode node : nodes) {
+                if (node == null || node.text == null || node.text.isEmpty()) continue;
+                if (node.clickable || node.inList || !node.topStrip) continue;
+                for (String pageText : rule.pageTexts) {
+                    if (contains(lower(node.text), pageText)) {
+                        return new GuardDecision(reason, rule.key, false);
+                    }
+                }
+            }
+
+            // ③ 入口：可点击的列表行。走到这里说明孩子还没进功能页（否则①②已经返回），
+            //    所以这次命中的是「门」而不是「房间」。
+            for (WindowNode node : nodes) {
+                if (node == null || node.text == null || node.text.isEmpty()) continue;
+                if (!node.clickable) continue;
+                for (String entryText : rule.entryTexts) {
+                    if (contains(lower(node.text), entryText)) {
+                        return new GuardDecision(reason, rule.key, true);
+                    }
                 }
             }
         }
         return null;
+    }
+
+    private static String lower(String value) {
+        return value == null ? "" : value.toLowerCase(Locale.US);
+    }
+
+    private static boolean contains(String lowerHaystack, String needle) {
+        if (lowerHaystack == null || lowerHaystack.isEmpty()) return false;
+        if (needle == null || needle.isEmpty()) return false;
+        return lowerHaystack.contains(needle.toLowerCase(Locale.US));
     }
 
     /**
@@ -144,14 +207,25 @@ public final class GuardRules {
     }
 
     /** 拦截决定。 */
-    public static final class GuardDecision {        /** 需要拦截时非 null，内容是人话原因（会写进设备事件，家长端能看到）。 */
+    public static final class GuardDecision {
+        /** 需要拦截时非 null，内容是人话原因（会写进设备事件，家长端能看到）。 */
         public final String reason;
-        /** 命中的插件键；学习模式拦截时为 null。 */
+        /** 命中的插件键；学习模式 / 应用限时拦截时为 null。 */
         public final String pluginKey;
+        /**
+         * 只对插件管控有意义：true = 命中的是**入口行**（该吃掉一次点击，不弹整屏页），
+         * false = 已进入功能页 / 或学习模式、应用限时这类整屏拦截。
+         */
+        public final boolean entry;
 
         GuardDecision(String reason, String pluginKey) {
+            this(reason, pluginKey, false);
+        }
+
+        GuardDecision(String reason, String pluginKey, boolean entry) {
             this.reason = reason;
             this.pluginKey = pluginKey;
+            this.entry = entry;
         }
 
         public boolean blocked() {

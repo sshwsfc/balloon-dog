@@ -28,14 +28,24 @@ import com.balloondog.agent.databinding.ActivityAppBlockedBinding;
  *   <li>唯一的出口是「回桌面」，所以孩子不会被扔回被禁的应用里。</li>
  * </ul>
  *
+ * <p>标题有两种：整应用被禁是「应用已被禁止使用」，插件管控（比如微信里的朋友圈）走
+ * {@link #showFeature}，标题是「这个功能已被家长关闭」—— 后者只关单个功能，说成整个应用
+ * 被禁会让人以为微信不能用了。
+ *
  * <p>布局里没有任何 {@code @string/} 引用：孩子端只有中文，静态文案直接写在
  * {@code res/layout/activity_app_blocked.xml} 里，动态部分由 Intent extras 带进来。
  */
 public class AppBlockedActivity extends AppCompatActivity {
 
+    private static final String EXTRA_TITLE = "extra_title";
     private static final String EXTRA_APP_LABEL = "extra_app_label";
     private static final String EXTRA_REASON = "extra_reason";
     private static final String EXTRA_DETAIL = "extra_detail";
+
+    /** {@code title} 为空时的兜底标题：整应用被禁。 */
+    private static final String FALLBACK_TITLE = "应用已被禁止使用";
+    /** 功能级拦截的标题：整个应用还能用，只是这一个功能被关了。 */
+    private static final String FEATURE_TITLE = "这个功能已被家长关闭";
 
     /** {@code appLabel} 为空时的占位文案。 */
     private static final String FALLBACK_APP_LABEL = "这个应用";
@@ -82,6 +92,34 @@ public class AppBlockedActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 弹一页「这个功能已被家长关闭」的说明 —— 插件管控专用。
+     *
+     * <p>与 {@link #show} 的区别只在标题：应用插件管的是「微信里的朋友圈」，
+     * 微信本身还能用，标题写「应用已被禁止使用 / 微信」会自相矛盾，
+     * 孩子和家长都会以为整个应用被禁了。出口同样是回桌面（孩子已经进了那个功能页）。
+     */
+    public static void showFeature(Context context, @Nullable String appLabel, @Nullable String reason) {
+        if (context == null) {
+            return;
+        }
+        Intent intent = new Intent(context, AppBlockedActivity.class);
+        intent.putExtra(EXTRA_TITLE, FEATURE_TITLE);
+        intent.putExtra(EXTRA_APP_LABEL, appLabel);
+        intent.putExtra(EXTRA_REASON, reason);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        if (LockWatchdogBridge.startActivityFromService(intent)) {
+            return;
+        }
+        try {
+            context.startActivity(intent);
+        } catch (Exception e) {
+            EventLog.warn("功能禁止说明页启动失败：" + e);
+        }
+    }
+
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -104,10 +142,12 @@ public class AppBlockedActivity extends AppCompatActivity {
     }
 
     private void render(@Nullable Intent intent) {
+        String title = safeString(intent, EXTRA_TITLE, FALLBACK_TITLE);
         String appLabel = safeString(intent, EXTRA_APP_LABEL, FALLBACK_APP_LABEL);
         String reason = safeString(intent, EXTRA_REASON, FALLBACK_REASON);
         String detail = intent == null ? null : intent.getStringExtra(EXTRA_DETAIL);
 
+        binding.textTitle.setText(title);
         binding.textAppName.setText(appLabel);
         binding.textReason.setText(reason);
 

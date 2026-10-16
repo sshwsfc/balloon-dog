@@ -88,20 +88,27 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
 
     /** 待办清单的固定项 id —— 数组下标即显示顺序。 */
     private static final int TODO_OWNER = 0;
-    private static final int TODO_ACCESSIBILITY = 1;
-    private static final int TODO_RUNTIME = 2;
-    private static final int TODO_OVERLAY = 3;
-    private static final int TODO_USAGE = 4;
-    private static final int TODO_BATTERY = 5;
-    private static final int TODO_CAPTURE = 6;
-    private static final int TODO_VPN = 7;
-    private static final int TODO_COUNT = 8;
+    /**
+     * 设备管理器：没有设备所有者时，唯一能挡住「长按图标 → 卸载」的一道闸。
+     *
+     * <p>紧跟在设备所有者后面：两者是同一件事（防卸载）的强、弱两档，
+     * 强者做不到时（没电脑、设备已加账号）必须让家长一眼看到弱者这条路。
+     */
+    private static final int TODO_ADMIN = 1;
+    private static final int TODO_ACCESSIBILITY = 2;
+    private static final int TODO_RUNTIME = 3;
+    private static final int TODO_OVERLAY = 4;
+    private static final int TODO_USAGE = 5;
+    private static final int TODO_BATTERY = 6;
+    private static final int TODO_CAPTURE = 7;
+    private static final int TODO_VPN = 8;
+    private static final int TODO_COUNT = 9;
 
     /** 「使用情况访问」不是运行时权限，走 AppOps，这里给它一个名字常量。 */
     private static final String PERMISSION_USAGE_STATS = "android.permission.PACKAGE_USAGE_STATS";
 
     /** 清单进度只统计「必备项」——可选项不该拉低分母，让家长看着像永远做不完。 */
-    private static final int REQUIRED_TODO_COUNT = 6;
+    private static final int REQUIRED_TODO_COUNT = 7;
 
     /** 徽标配色：绿=已开启、灰=未开启、琥珀=可选/启动中。 */
     private static final int BADGE_OK = 0;
@@ -229,14 +236,14 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
 
         // 首页新增：绑定码复制、一键开启权限、高级折叠
         binding.buttonCopyCode.setOnClickListener(v -> copyDeviceCode());
-        binding.buttonOneKeyGrant.setOnClickListener(v -> runOneKeyGrant());
+        binding.buttonOneKeyGrant.setOnClickListener(v -> onOneKeyClick());
         binding.buttonAdvancedToggle.setOnClickListener(v -> toggleAdvanced());
 
         buildTodoRows();
     }
 
     /**
-     * 建好待办清单的 7 行。
+     * 建好待办清单的 9 行。
      *
      * <p>视图只建一次，之后每次 {@code renderState()} 只改文字、颜色与按钮可用性 ——
      * 每 2 秒重建一遍整棵视图树既费电又会打断正在滚动的手指。
@@ -442,7 +449,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
     }
 
     // ============================================================
-    // 待办清单：7 项权限，状态全部现读
+    // 待办清单：9 项权限，状态全部现读
     // ============================================================
 
     /**
@@ -486,10 +493,28 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         setTodoBadge(owner, ownerOn ? R.string.badge_on : R.string.badge_off,
                 ownerOn ? BADGE_OK : BADGE_OFF);
         setTodoAction(owner, ownerOn);
-        // 这一项没开就必须写在明面上：清单里其余项全绿也挡不住卸载
-        binding.textTodoAlert.setVisibility(ownerOn ? View.GONE : View.VISIBLE);
 
-        // 1. 无障碍：所有拦截动作的前提
+        // 1. 设备管理器：没开设备所有者时唯一能挡住卸载的一道闸，所以也列为必备项
+        boolean adminOn = LockController.isAdminActive(this);
+        TodoRow admin = todoRows[TODO_ADMIN];
+        setTodoBasics(admin, R.drawable.ic_lock,
+                R.string.todo_name_admin, R.string.todo_reason_admin);
+        setTodoBadge(admin, adminOn ? R.string.badge_on : R.string.badge_off,
+                adminOn ? BADGE_OK : BADGE_OFF);
+        setTodoAction(admin, adminOn);
+
+        // 这两项没开就必须写在明面上：清单里其余项全绿也挡不住卸载
+        if (!ownerOn) {
+            binding.textTodoAlert.setText(R.string.todo_alert_owner);
+            binding.textTodoAlert.setVisibility(View.VISIBLE);
+        } else if (!adminOn) {
+            binding.textTodoAlert.setText(R.string.todo_alert_admin);
+            binding.textTodoAlert.setVisibility(View.VISIBLE);
+        } else {
+            binding.textTodoAlert.setVisibility(View.GONE);
+        }
+
+        // 2. 无障碍：所有拦截动作的前提
         TodoRow accessibility = todoRows[TODO_ACCESSIBILITY];
         setTodoBasics(accessibility, R.drawable.ic_accessibility,
                 R.string.todo_name_accessibility, R.string.todo_reason_accessibility);
@@ -503,7 +528,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         }
         setTodoAction(accessibility, accessibilityOn);
 
-        // 2. 运行时权限：合成一行显示 N/M，点开看逐项
+        // 3. 运行时权限：合成一行显示 N/M，点开看逐项
         List<String> required = PermissionGranter.requiredPermissions();
         int grantedCount = required.size() - PermissionGranter.missing(this).size();
         boolean runtimeDone = grantedCount >= required.size();
@@ -514,7 +539,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
                 runtimeDone ? BADGE_OK : BADGE_OFF);
         setTodoAction(runtime, runtimeDone);
 
-        // 3. 悬浮窗
+        // 4. 悬浮窗
         boolean overlayOn = Settings.canDrawOverlays(this);
         TodoRow overlay = todoRows[TODO_OVERLAY];
         setTodoBasics(overlay, R.drawable.ic_overlay,
@@ -523,7 +548,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
                 overlayOn ? BADGE_OK : BADGE_OFF);
         setTodoAction(overlay, overlayOn);
 
-        // 4. 使用情况访问
+        // 5. 使用情况访问
         boolean usageOn = PermissionGranter.isSpecialGranted(this, PERMISSION_USAGE_STATS);
         TodoRow usage = todoRows[TODO_USAGE];
         setTodoBasics(usage, R.drawable.ic_usage,
@@ -532,7 +557,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
                 usageOn ? BADGE_OK : BADGE_OFF);
         setTodoAction(usage, usageOn);
 
-        // 5. 电池优化白名单：M 以下这个系统概念不存在，如实写「本机不支持」
+        // 6. 电池优化白名单：M 以下这个系统概念不存在，如实写「本机不支持」
         boolean batterySupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M;
         boolean batteryOn = isIgnoringBatteryOptimizations();
         TodoRow battery = todoRows[TODO_BATTERY];
@@ -546,7 +571,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         }
         setTodoAction(battery, batteryOn || !batterySupported);
 
-        // 6. 屏幕采集（可选）：家长没开就是「可选」，不是「未开启」，别制造焦虑
+        // 7. 屏幕采集（可选）：家长没开就是「可选」，不是「未开启」，别制造焦虑
         boolean captureOn = store.isCaptureEnabled() && ScreenCapturer.hasProjection();
         TodoRow capture = todoRows[TODO_CAPTURE];
         setTodoBasics(capture, R.drawable.ic_screen,
@@ -555,7 +580,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
                 captureOn ? BADGE_OK : BADGE_WARN);
         setTodoAction(capture, captureOn);
 
-        // 7. 网址拦截 VPN（可选）：家长配了黑名单却还没授权，那才算「未开启」
+        // 8. 网址拦截 VPN（可选）：家长配了黑名单却还没授权，那才算「未开启」
         boolean vpnOn = DnsFilterVpnService.hasSystemConsent(this);
         boolean vpnWanted = DnsFilterVpnService.isWanted(this);
         TodoRow vpn = todoRows[TODO_VPN];
@@ -569,9 +594,13 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         }
         setTodoAction(vpn, vpnOn);
 
-        int doneRequired = (ownerOn ? 1 : 0) + (accessibilityOn ? 1 : 0) + (runtimeDone ? 1 : 0)
-                + (overlayOn ? 1 : 0) + (usageOn ? 1 : 0) + (batteryOn ? 1 : 0);
-        renderOneKeyButton(accessibilityOn, ownerOn, doneRequired);
+        int doneRequired = (ownerOn ? 1 : 0) + (adminOn ? 1 : 0) + (accessibilityOn ? 1 : 0)
+                + (runtimeDone ? 1 : 0) + (overlayOn ? 1 : 0) + (usageOn ? 1 : 0)
+                + (batteryOn ? 1 : 0);
+        // 「除设备所有者与设备管理器之外，其余必备项都开好了」。
+        // 这两个布尔量都是上面现场读出来的，判断依据必须和清单里显示的一致。
+        boolean restDone = accessibilityOn && runtimeDone && overlayOn && usageOn && batteryOn;
+        renderOneKeyButton(accessibilityOn, ownerOn, adminOn, restDone, doneRequired);
     }
 
     /**
@@ -581,22 +610,31 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
      * 并在旁边写清原因 —— 不置灰的话，家长点了只会看到一串「需要手动开启」，
      * 却不知道为什么，体验比不给按钮还差。
      */
-    private void renderOneKeyButton(boolean accessibilityOn, boolean ownerOn, int doneRequired) {
+    private void renderOneKeyButton(boolean accessibilityOn, boolean ownerOn, boolean adminOn,
+                                    boolean restDone, int doneRequired) {
         binding.textTodoProgress.setText(getString(R.string.todo_progress,
                 doneRequired, REQUIRED_TODO_COUNT));
-        // 设备所有者不在「一键开启」能力范围内（必须在设备未添加账号时用 adb 设置），
-        // 所以判「其余项都开好了」时要把它排除在外，否则会永远显示「还有活没干完」。
-        boolean restDone = doneRequired >= REQUIRED_TODO_COUNT - (ownerOn ? 0 : 1);
+        // restDone = 「除设备所有者与设备管理器之外，其余必备项都开好了」（由调用方现场读出）。
+        // 两者都要排除在「一键」之外：设备所有者必须在设备未添加账号时用 adb 设置，
+        // 设备管理器必须在系统弹框里点一下「激活」，否则会永远显示「还有活没干完」。
         if (!accessibilityOn) {
             binding.buttonOneKeyGrant.setEnabled(false);
             binding.buttonOneKeyGrant.setText(R.string.action_one_key_grant);
             binding.textOneKeyHint.setText(R.string.one_key_hint_need_accessibility);
-        } else if (restDone && !ownerOn) {
+        } else if (restDone && !adminOn) {
+            // 其余必备项都齐了、只差「设备管理器」：这一项得在系统弹框里点一下确认，
+            // 所以按钮直接改成「开启设备管理器」，别让家长自己回清单里找那一行。
+            // 注意判据里不能带 adminOn，否则「还差其它权限 + 设备管理器没开」时会把这个按钮
+            // 从「一键开启权限」错改成「开启设备管理器」，家长点下去反而少开一堆权限。
+            binding.buttonOneKeyGrant.setEnabled(true);
+            binding.buttonOneKeyGrant.setText(R.string.action_grant_admin);
+            binding.textOneKeyHint.setText(R.string.one_key_hint_need_admin);
+        } else if (restDone && adminOn && !ownerOn) {
             // 其余权限都齐了、只差设备所有者：按钮没活可干（置灰），但不能说「已全部开启」
             binding.buttonOneKeyGrant.setEnabled(false);
             binding.buttonOneKeyGrant.setText(R.string.action_one_key_grant);
             binding.textOneKeyHint.setText(R.string.one_key_hint_need_owner);
-        } else if (restDone) {
+        } else if (restDone && adminOn) {
             binding.buttonOneKeyGrant.setEnabled(false);
             binding.buttonOneKeyGrant.setText(R.string.action_one_key_done);
             binding.textOneKeyHint.setText(R.string.one_key_hint_all_done);
@@ -658,6 +696,11 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
                 // 这一项没有应用内开关：设备所有者只能在设备尚未添加任何账号时用 adb 设置，
                 // 所以「去开启」给的是操作指引，不是跳系统页面。
                 showOwnerGuide();
+                break;
+            case TODO_ADMIN:
+                // 设备管理器：走系统的「激活设备管理器」页（requestAdmin 里已经开了限时通行证，
+                // 免得这个页面被自己的敏感界面封锁推走）
+                LockController.requestAdmin(this, REQUEST_DEVICE_ADMIN);
                 break;
             case TODO_ACCESSIBILITY:
                 openAccessibilitySettings();
@@ -760,6 +803,40 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
     // ============================================================
     // 一键开启权限
     // ============================================================
+
+    /**
+     * 「一键开启权限」按钮：平时跑授权流程，只差「设备管理器」时直接把它弹出来。
+     *
+     * <p>设备管理器是国内 ROM 上唯一一个「应用自己能申请、又能挡住卸载」的权限，
+     * 但它必须在系统弹框里由人点一下「激活」，一键流程没法静默完成。
+     * 所以最后只剩这一项时，按钮改成「开启设备管理器」并把用户送进那个弹框 ——
+     * 否则家长看到「6/7 已开启」却不知道剩下那 1 项在哪、为什么一键开不了。
+     */
+    private void onOneKeyClick() {
+        if (isAccessibilityEnabledInSettings()
+                && !LockController.isAdminActive(this)
+                && requiredDoneExceptOwnerAndAdmin()) {
+            Toast.makeText(this, R.string.toast_grant_admin, Toast.LENGTH_LONG).show();
+            LockController.requestAdmin(this, REQUEST_DEVICE_ADMIN);
+            return;
+        }
+        runOneKeyGrant();
+    }
+
+    /**
+     * 除「设备所有者」和「设备管理器」之外的必备项是否都开好了。
+     *
+     * <p>这两项都有系统弹框/电脑的限制，不能用「一键」判定；
+     * 这里把它们排除，剩下的项全绿才说明「一键」真的没活可干了。
+     */
+    private boolean requiredDoneExceptOwnerAndAdmin() {
+        return isAccessibilityEnabledInSettings()
+                && PermissionGranter.missing(this).isEmpty()
+                && Settings.canDrawOverlays(this)
+                && PermissionGranter.isSpecialGranted(this, PERMISSION_USAGE_STATS)
+                && (Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+                        || isIgnoringBatteryOptimizations());
+    }
 
     /**
      * 「一键开启权限」。

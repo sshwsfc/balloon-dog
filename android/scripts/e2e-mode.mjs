@@ -381,6 +381,16 @@ async function main() {
   check(Boolean(pluginApplied), '插件规则已下发并落到设备本地',
     '（模拟器没装微信，关键词匹配本身由 android:crosstest 的 GuardCheck 覆盖）')
 
+  // 落盘的是「解析后再序列化」的结果（AgentStore 写的是 PluginRule.toJson(rules)），
+  // 所以新格式的三组匹配文本出现在 prefs 里，才说明设备端真的读懂了服务端下发的规则，
+  // 而不是只认出了键名。老版本设备端只认 keywords，这一条就是那种静默失效的哨兵。
+  const storedPluginRules = prefsXml()
+  check(storedPluginRules.includes('entryTexts') && storedPluginRules.includes('pageTexts'),
+    '设备端读懂了新格式：三组匹配文本一起落盘',
+    '（只存下 mm_moments 这个名字、却没有匹配文本，插件管控会静默失效）')
+  check(storedPluginRules.includes('朋友圈'),
+    '匹配文本与标签是可读中文，排查时不必回头翻服务端目录')
+
   const wechatInstalled = (adb('shell', 'pm', 'list', 'packages', 'com.tencent.mm').out || '').includes('com.tencent.mm')
   if (wechatInstalled) {
     ok('本机装了微信，可以做真实的插件拦截验证')

@@ -1101,6 +1101,7 @@ export const en: Record<string, string> = {
   "图标、桌面入口、应用列表条目都会消失。": "The icon, home screen entry and app list entry all disappear.",
   "；设备离线或 Agent 出问题，可以用 ADB（或设备所有者指令）重新启用组件。": "; if the device is offline or the Agent has a problem, you can re-enable the component with ADB (or a device owner command).",
   "它只藏入口，不影响孩子在系统设置里停用或卸载（由设备所有者权限下的防卸载限制负责）。隐藏或恢复都需要孩子端在线，离线时指令会排队。": "It only hides entry points; it doesn't stop your child from disabling or uninstalling it in system settings (that's covered by the uninstall protection under device owner permission). Hiding or restoring both require the child app to be online; while it's offline, commands are queued.",
+  "这台设备还没开启「设备所有者」：图标隐藏后，Android 会在桌面保留一个点开就进「应用信息」的图标（长按还能直接卸载本应用）。开启设备所有者后这两件事才会真正消失。": "This device isn't set up as a device owner yet: after hiding the icon, Android keeps a placeholder icon on the home screen that opens App info (long-pressing it can also uninstall this app outright). Both go away only once the device owner is set up.",
   "已隐藏，仅可用拨号暗码进入": "Hidden; reachable only via the dialer code",
   "{{v0}}还没开启": "{{v0}} isn't on yet",
   "开启后才能下发这条指令，现在开启？": "You need to turn it on before sending this command. Turn it on now?",

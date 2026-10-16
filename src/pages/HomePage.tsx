@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
-import { formatDateTime } from '@/lib/format'
+import { formatDateTime, formatRelative } from '@/lib/format'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ToggleSwitch } from '@/components/ToggleSwitch'
@@ -35,6 +35,7 @@ import {
   EyeOff,
   Globe,
   Headphones,
+  Hourglass,
   Image as ImageIcon,
   Info,
   Loader2,
@@ -53,12 +54,15 @@ import {
   Settings,
   Shield,
   ShieldAlert,
+  ShieldBan,
+  ShieldCheck,
   Smartphone,
   Trash2,
   Unlock,
   Users,
   Video,
   Wifi,
+  WifiOff,
   X,
 } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
@@ -75,6 +79,7 @@ import type {
   Insight,
   MediaAsset,
   ToggleState,
+  DeviceHealth,
 } from '@/types'
 import { useTranslation } from 'react-i18next'
 import { tt } from '@/i18n'
@@ -207,6 +212,13 @@ const EVENT_META: Record<string, { icon: typeof Lock; className: string }> = {
   // 管控被改动 / 被绕过（撤销权限、关掉无障碍看门狗、断开 VPN…）。
   // detail 已经是完整的中文句子，这里只负责给个显眼的图标。
   tamper: { icon: ShieldAlert, className: 'text-amber-600' },
+  // 网址拦截真的拦下了东西（规划 §4.1）：命中 DNS 名单、或拦下一条直连/加密 DNS。
+  // 这是**正向**信号（拦截在工作），所以用红色盾牌而不是警告色。
+  web_blocked: { icon: ShieldBan, className: 'text-red-500' },
+  // 失联是**服务端按 lastActiveAt 现算**的状态，不是设备发来的事件。
+  // 它的 detail 里嵌了中文相对时间（「3小时前」），没法当 i18n key，所以展示时
+  // 由前端重新拼一句（见下面的渲染分支），服务端那句只留作审计原文。
+  agent_offline: { icon: WifiOff, className: 'text-red-500' },
 }
 
 interface FeatureMeta {
@@ -312,6 +324,8 @@ export function HomePage() {
   const membership = useMembership()
 
   const [device, setDevice] = useState<Device | null>(null)
+  /** 设备健康快照：失败不影响整页（附加信息），首页只拿它做顶部红条与角标 */
+  const [health, setHealth] = useState<DeviceHealth | null>(null)
   const [features, setFeatures] = useState<Features | null>(null)
   const [commands, setCommands] = useState<DeviceCommand[]>([])
   const [media, setMedia] = useState<MediaAsset[]>([])
@@ -381,13 +395,14 @@ export function HomePage() {
         setNoDevice(true)
         setDevice(null)
         setFeatures(null)
+        setHealth(null)
         setLoadError(null)
         setLoading(false)
         return
       }
       setNoDevice(false)
 
-      const [deviceData, featuresData, commandsData, mediaData, eventsData, insightsData] = await Promise.all([
+      const [deviceData, featuresData, commandsData, mediaData, eventsData, insightsData, healthData] = await Promise.all([
         api.getDevice(),
         api.getFeatures(),
         api.getCommands({ limit: 5 }),
@@ -395,6 +410,8 @@ export function HomePage() {
         // 动态与洞察是「附加信息」，它们失败不该把整页变成错误页
         api.getDeviceEvents({ pageSize: 20 }).catch(() => null),
         api.getInsights({ limit: 10 }).catch(() => null),
+        // 设备健康同样是附加信息：拿不到就当「还不知道」，不弹错
+        api.getDeviceHealth().catch(() => null),
       ])
       setDevice(deviceData)
       setFeatures(featuresData)
@@ -402,6 +419,7 @@ export function HomePage() {
       setMedia(mediaData.media ?? [])
       setEvents(eventsData ? eventsData.items ?? [] : null)
       setInsights(insightsData ? insightsData.items ?? [] : null)
+      setHealth(healthData)
       setLoadError(null)
     } catch (error) {
       const message = toUserMessage(error, t('加载失败，刷新页面重试'))
@@ -481,7 +499,20 @@ export function HomePage() {
     [loadData, t],
   )
 
+  /**
+   * 只读成员（规划 §5.1）：写操作的入口统一拦在这里，给一句人话 + 该找谁，
+   * 而不是让他点下去吃一个服务端 403。**服务端仍然独立校验** —— 前端这层
+   * 只是体验，不是安全边界（改了前端也拦不住直接调接口的人）。
+   */
+  const readOnly = device?.canWrite === false
+  const blockReadOnly = (): boolean => {
+    if (!readOnly) return false
+    toast.error(t('你是这台设备的只读成员，只能查看。需要调整请让设备主人来做。'))
+    return true
+  }
+
   const handleLockScreen = async () => {
+    if (blockReadOnly()) return
     if (!device) return
     const target = !device.locked
     setLockingBusy(true)
@@ -494,6 +525,7 @@ export function HomePage() {
   }
 
   const handleTempUnlock = async () => {
+    if (blockReadOnly()) return
     if (!device) return
     if (device.tempUnlock) {
       const ok = await dispatch(() => api.cancelTempUnlock(), '已取消临时解锁')
@@ -513,6 +545,7 @@ export function HomePage() {
   }
 
   const handleSetAppLimit = async () => {
+    if (blockReadOnly()) return
     const limit = Number.parseInt(appLimit, 10)
     if (!selectedPackage || !Number.isFinite(limit) || limit <= 0) {
       toast.error(t('选择应用并填写有效时长'))
@@ -532,6 +565,7 @@ export function HomePage() {
   }
 
   const handleAuditApp = async (appName: string, approved: boolean) => {
+    if (blockReadOnly()) return
     try {
       await api.auditApp(appName, approved)
       toast.success(approved ? t('已批准 {{v0}}', { v0: appName }) : t('已拒绝 {{v0}}', { v0: appName }))
@@ -542,6 +576,7 @@ export function HomePage() {
   }
 
   const handleBlockUrl = async () => {
+    if (blockReadOnly()) return
     if (!newUrl.trim()) {
       toast.error(t('输入要拦截的网址'))
       return
@@ -557,6 +592,7 @@ export function HomePage() {
   }
 
   const handleUnblockUrl = async (url: string) => {
+    if (blockReadOnly()) return
     try {
       await api.unblockUrl(url)
       toast.success(t('已取消拦截 {{v0}}', { v0: url }))
@@ -568,6 +604,7 @@ export function HomePage() {
 
   /** 开关类功能的统一切换（关键：调用方必须阻止事件冒泡，否则会同时触发行点击动作） */
   const handleToggleFeature = async (featureId: string) => {
+    if (blockReadOnly()) return
     if (!features) return
     const current = (features as unknown as Record<string, ToggleState | undefined>)[featureId]
     if (!current || typeof current.enabled !== 'boolean') {
@@ -649,6 +686,7 @@ export function HomePage() {
    * 这一点必须在界面上说出来，不能只放在文档里。
    */
   const handleAmbient = async (mode: 'start' | 'stop') => {
+    if (blockReadOnly()) return
     setAmbientBusy(mode)
     try {
       await dispatch(
@@ -667,6 +705,7 @@ export function HomePage() {
    * `/api/features` 只认白名单里的功能标识，`hideIcon` 会被判为未知标识拒绝。
    */
   const handleToggleHideIcon = async () => {
+    if (blockReadOnly()) return
     if (!device) return
     const next = !device.hideIcon
     setHideIconBusy(true)
@@ -919,6 +958,82 @@ export function HomePage() {
         <HeaderRefreshButton onRefresh={() => loadData({ silent: true })} />
       </div>
 
+      {/*
+        ---------------- 管控可信度红条 ----------------
+        「在线」不等于「管得住」：无障碍被关、设备所有者被撤、定位被拒，
+        设备照样在线，但所有管控都静默失效。所以只要体检结果里有硬伤，
+        就在最顶上压一条红条 —— 家长不需要自己翻健康页才发现。
+      */}
+      {/*
+        ---------------- 孩子的申请 ----------------
+        放在健康红条**上面**：管控有没有失效是「以后可能出事」，
+        而孩子正对着锁屏页等回应是「此刻就在发生」。孩子开口了却没人理，
+        下一次他就不开口了 —— 这个功能的价值全在及时。
+      */}
+      {device && (device.pendingTimeRequests ?? 0) > 0 && (
+        <div className="px-3 pt-3">
+          <Link
+            to="/time-requests"
+            className="flex items-start space-x-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2.5"
+          >
+            <Hourglass className="mt-0.5 h-4 w-4 flex-shrink-0 text-[#07c160]" />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-medium text-green-800">
+                {t('孩子有 {{v0}} 条申请在等你回应', { v0: device.pendingTimeRequests ?? 0 })}
+              </p>
+              <p className="mt-0.5 text-[11px] text-green-700">
+                {t('点这里批准或拒绝，批了设备立刻解锁')}
+              </p>
+            </div>
+          </Link>
+        </div>
+      )}
+
+      {health && (
+        (() => {
+          const criticalGap = health.gaps.find((g) => g.importance === 'critical')
+          const disconnected = health.liveness === 'offline' || health.liveness === 'lost'
+          const severe = health.level === 'danger' || Boolean(criticalGap) || disconnected
+          if (!severe && health.summary.openGaps === 0 && health.reported && !health.stale) return null
+          const headline = criticalGap
+            ? t('管控已失效：{{v0}}', { v0: t(criticalGap.label || '未命名问题') })
+            : disconnected
+              ? t('设备{{v0}}，最后一次心跳 {{v1}}', {
+                  v0: t(health.livenessLabel),
+                  v1: formatRelative(health.lastActiveAt),
+                })
+              : !health.reported
+                ? t('这台设备还没体检过，管控是否有效未知')
+                : health.stale
+                  ? t('体检结果已过期，下面的状态不一定还成立')
+                  : t('{{v0}} 项能力降级', { v0: health.summary.openGaps })
+          return (
+            <div className="px-3 pt-3">
+              <Link
+                to="/device-health"
+                className={`flex items-start space-x-2 rounded-lg border px-3 py-2.5 ${
+                  severe ? 'border-red-200 bg-red-50' : 'border-amber-200 bg-amber-50'
+                }`}
+              >
+                {severe ? (
+                  <ShieldAlert className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500" />
+                ) : (
+                  <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className={`text-xs font-medium ${severe ? 'text-red-700' : 'text-amber-800'}`}>
+                    {headline}
+                  </p>
+                  <p className={`mt-0.5 text-[11px] ${severe ? 'text-red-600' : 'text-amber-700'}`}>
+                    {t('点这里看哪一项被关了、怎么修')}
+                  </p>
+                </div>
+              </Link>
+            </div>
+          )
+        })()
+      )}
+
       {/* ---------------- 设备概览 ---------------- */}
       <div className="px-3 py-3">
         <Card className="overflow-hidden">
@@ -964,9 +1079,40 @@ export function HomePage() {
               </div>
               <div className="flex flex-col items-center">
                 <Clock className="w-4 h-4 text-gray-500" />
-                <span className="text-xs text-gray-500 mt-1">{device.lastActive || t('未知')}</span>
+                <span className="text-xs text-gray-500 mt-1">
+                  {device.lastActiveAt ? formatRelative(device.lastActiveAt) : t('未知')}
+                </span>
               </div>
             </div>
+
+            {/* 管控能力入口：把「在线」与「管得住」分开说 */}
+            {health && (
+              <Link
+                to="/device-health"
+                className="mt-3 flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 active:bg-gray-100"
+              >
+                <span className="flex items-center gap-1.5 text-xs text-gray-600">
+                  <ShieldCheck
+                    className={`h-4 w-4 ${
+                      health.level === 'ok' && health.reported && !health.stale
+                        ? 'text-[#07c160]'
+                        : health.level === 'danger'
+                          ? 'text-red-500'
+                          : 'text-amber-500'
+                    }`}
+                  />
+                  {t('管控能力')}
+                </span>
+                <span className="flex items-center gap-1 text-xs text-gray-500">
+                  {!health.reported
+                    ? t('尚未检测')
+                    : health.summary.openGaps > 0
+                      ? t('{{v0}} 项失效', { v0: health.summary.openGaps })
+                      : t(health.levelLabel)}
+                  <ChevronRight className="h-3.5 w-3.5 text-gray-400" />
+                </span>
+              </Link>
+            )}
 
             {tempUnlockLabel && (
               <div className="mt-3 bg-green-50 text-green-700 text-xs rounded-lg px-3 py-2 text-center">{t('临时解锁中 ·')}{tempUnlockLabel}
@@ -975,6 +1121,21 @@ export function HomePage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* 只读成员的提示条（规划 §5.1）：一进页面就说清自己能做什么 */}
+      {readOnly && (
+        <div className="px-3 mt-3">
+          <div className="flex items-start space-x-2 rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <Eye className="w-4 h-4 text-gray-500 mt-0.5 flex-shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-gray-700">{t('只读成员')}</p>
+              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">
+                {t('你是这台设备的只读成员：可以查看，但不能下发指令或改设置 —— 需要调整时请让设备主人来做。')}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ---------------- 一键锁屏（通栏，最重要） ---------------- */}
       <div className="px-3">
@@ -1105,7 +1266,13 @@ export function HomePage() {
                         <span className="text-xs text-gray-500 flex-shrink-0">
                           {formatClock(event.createdAt)}
                         </span>
-                        <span className="text-xs text-gray-700 flex-1 min-w-0">{t(event.detail)}</span>
+                        <span className="text-xs text-gray-700 flex-1 min-w-0">
+                          {event.type === 'agent_offline'
+                            ? t('设备已失联，最后一次心跳在 {{v0}}', {
+                                v0: formatRelative(device.lastActiveAt),
+                              })
+                            : t(event.detail)}
+                        </span>
                       </div>
                     )
                   })}
@@ -1225,6 +1392,8 @@ export function HomePage() {
                       >
                         {t('去开通')}
                       </button>
+                    ) : readOnly ? (
+                      <Badge className="ml-2 flex-shrink-0 bg-gray-100 text-gray-500">{t('只读')}</Badge>
                     ) : (
                       <ToggleSwitch
                         checked={enabled}
@@ -1275,13 +1444,17 @@ export function HomePage() {
                 </div>
                 <p className="text-xs text-gray-500 mt-1 leading-relaxed">{t('让孩子端持续分段录音（每段约 5 分钟），录音会出现在「媒体」里。这是持续录，和上面的「远程录音」（录一次）不是同一件事。')}</p>
               </div>
-              <ToggleSwitch
-                checked={features.audioRecord?.enabled ?? false}
-                busy={busyFeature === 'audioRecord'}
-                disabled={busyFeature === 'audioRecord'}
-                label={t('环境监听开关')}
-                onChange={() => void handleToggleFeature('audioRecord')}
-              />
+              {readOnly ? (
+                <Badge className="flex-shrink-0 bg-gray-100 text-gray-500">{t('只读')}</Badge>
+              ) : (
+                <ToggleSwitch
+                  checked={features.audioRecord?.enabled ?? false}
+                  busy={busyFeature === 'audioRecord'}
+                  disabled={busyFeature === 'audioRecord'}
+                  label={t('环境监听开关')}
+                  onChange={() => void handleToggleFeature('audioRecord')}
+                />
+              )}
             </div>
 
             <div className="flex items-start space-x-2 bg-amber-50 border border-amber-200 rounded-lg p-2.5 mt-3">
@@ -1669,14 +1842,14 @@ export function HomePage() {
           <div className="flex items-start space-x-2 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
             <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
             <div className="text-xs text-amber-800 leading-relaxed space-y-1.5">
-              <p className="font-medium text-sm">{t('拦截只在「域名解析」这一层生效')}</p>
-              <p>{t('设备端开启本地 VPN 接管域名解析：命中名单的域名直接返回「域名不存在」。它')}<b>{t('只认域名')}</b>{t('，所以下面这些拦不到：')}
+              <p className="font-medium text-sm">{t('拦截在「域名解析」和「已拦域名的地址」两层生效')}</p>
+              <p>{t('设备端开启本地 VPN：命中名单的域名直接返回「域名不存在」；同时把该域名解析出来的 IP 也引进来丢掉，所以孩子用')}<b>{t('缓存过的 IP')}</b>{t('或')}<b>{t('直接连 IP')}</b>{t('（含 853 端口的加密 DNS）也走不通。下面这些仍然拦不到：')}
               </p>
               <ul className="list-disc pl-4 space-y-0.5">
-                <li>{t('直接用 IP 访问，不走域名解析')}</li>
-                <li>{t('浏览器开启 DoH / DoT 加密解析，请求不经过设备')}</li>
-                <li>{t('域名已缓存，过期前仍可能打开')}</li>
-                <li>{t('已打开的页面、应用自己的直连通道不受影响')}</li>
+                <li>{t('换一个没被拦的加密解析服务（DoH / DoT 到别的解析器）再问到 IP —— 只有把那个解析器也加进名单才拦得住')}</li>
+                <li>{t('应用自己写死的 IP，且不属于任何被拦域名的解析结果')}</li>
+                <li>{t('已经建立的连接不会被打断，要等它断开重连才会被拦')}</li>
+                <li>{t('设备端 VPN 没在运行时两层都不生效（被系统杀掉或被换成别的 VPN）')}</li>
               </ul>
               <p>
                 {t('它是')}<b>{t('提高门槛')}</b>{t('，不是网络防火墙，不能拦下所有访问。是否生效还取决于设备端 VPN 正常运行，请在孩子设备上确认。')}</p>
@@ -1684,12 +1857,12 @@ export function HomePage() {
           </div>
           <div className="space-y-4">
             <div>
-              <p className="text-gray-600 mb-2">{t('添加要拦截的网址：')}</p>
+              <p className="text-gray-600 mb-2">{t('添加要拦截的网址或地址：')}</p>
               <input
                 type="text"
                 value={newUrl}
                 onChange={(e) => setNewUrl(e.target.value)}
-                placeholder={t('输入域名，例如 gambling.com')}
+                placeholder={t('输入域名或 IP，例如 gambling.com、1.2.3.4、1.2.3.0/24')}
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#07c160]"
               />
               <Button className="w-full mt-2 bg-[#07c160] hover:bg-[#06a050]" onClick={() => void handleBlockUrl()}>
@@ -1748,13 +1921,17 @@ export function HomePage() {
                 {device.hideIcon ? t('已隐藏，仅可用拨号暗码进入') : t('当前显示在桌面上')}
               </div>
             </div>
-            <ToggleSwitch
-              checked={device.hideIcon}
-              busy={hideIconBusy}
-              disabled={hideIconBusy}
-              label={t('隐藏图标开关')}
-              onChange={() => void handleToggleHideIcon()}
-            />
+            {readOnly ? (
+              <Badge className="flex-shrink-0 bg-gray-100 text-gray-500">{t('只读')}</Badge>
+            ) : (
+              <ToggleSwitch
+                checked={device.hideIcon}
+                busy={hideIconBusy}
+                disabled={hideIconBusy}
+                label={t('隐藏图标开关')}
+                onChange={() => void handleToggleHideIcon()}
+              />
+            )}
           </div>
           <DialogFooter>
             <Button onClick={() => setHideIconDialogOpen(false)}>{t('关闭')}</Button>

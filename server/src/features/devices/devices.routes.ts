@@ -17,6 +17,11 @@ devicesRoutes.post('/bind', ah(controller.bindDevice));
 devicesRoutes.put('/:deviceId', ah(controller.updateDevice));
 devicesRoutes.delete('/:deviceId', ah(controller.removeDevice));
 devicesRoutes.post('/:deviceId/select', ah(controller.selectDeviceById));
+// 家庭成员（§5.1）：名单任何成员可读；邀请/改角色/移除仅所有者（在 controller 里校验）
+devicesRoutes.get('/:deviceId/members', ah(controller.listDeviceMembers));
+devicesRoutes.post('/:deviceId/members', ah(controller.inviteDeviceMember));
+devicesRoutes.patch('/:deviceId/members/:memberId', ah(controller.updateDeviceMember));
+devicesRoutes.delete('/:deviceId/members/:memberId', ah(controller.removeDeviceMember));
 
 /** /api/device —— 当前设备状态与指令下发 */
 export const deviceRoutes = Router();
@@ -38,6 +43,12 @@ deviceRoutes.post('/stop-ambient', ah(controller.stopAmbient));
 deviceRoutes.post('/remote-action', ah(controller.remoteAction));
 // §8 让设备重新上报通话记录与短信（要求 callSms 开关）
 deviceRoutes.post('/sync-calls-sms', ah(controller.syncCallsSms));
+// 设备健康（规划 §1.2 §1.3）：读快照 + 让设备当场自愈重测
+deviceRoutes.get('/health', ah(controller.getDeviceHealth));
+// 孩子的申请（规划 §3.1）：家长审批加时 / 延后锁屏
+deviceRoutes.get('/time-requests', ah(controller.listTimeRequests));
+deviceRoutes.post('/time-requests/:id/review', ah(controller.reviewTimeRequest));
+deviceRoutes.post('/health/check', ah(controller.requestSelfCheck));
 deviceRoutes.get('/commands', ah(controller.listCommands));
 deviceRoutes.post('/commands/:commandId/cancel', ah(controller.cancelCommand));
 

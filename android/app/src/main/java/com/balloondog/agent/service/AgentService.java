@@ -22,9 +22,11 @@ import androidx.core.content.ContextCompat;
 import com.balloondog.agent.capability.AudioRecorder;
 import com.balloondog.agent.capability.CapabilityException;
 import com.balloondog.agent.capability.CommandExecutor;
+import com.balloondog.agent.capability.HealthReporter;
 import com.balloondog.agent.capability.LocationReader;
 import com.balloondog.agent.capability.LockState;
 import com.balloondog.agent.capability.ScreenCapturer;
+import com.balloondog.agent.capability.TrustedClock;
 import com.balloondog.agent.data.AgentStore;
 import com.balloondog.agent.data.Constants;
 import com.balloondog.agent.data.EventLog;
@@ -32,6 +34,9 @@ import com.balloondog.agent.model.AgentCommand;
 import com.balloondog.agent.model.DeviceConfig;
 import com.balloondog.agent.net.AgentApi;
 import com.balloondog.agent.net.ApiException;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /**
  * 孩子设备端 Agent 的常驻前台服务 —— 整个客户端的引擎。
@@ -423,6 +428,17 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
     // 主循环
     // ============================================================
 
+    /**
+     * 上一次上报过的健康「签名」（level + 缺口数）。
+     *
+     * <p>签名变了才额外补一次上报：家长最关心的是「刚出的问题」，
+     * 而不是每 3 分钟一条一模一样的「一切正常」。
+     */
+    private String lastHealthSignature = "";
+
+    /** 上一次上报健康快照的时间（elapsedRealtime）。 */
+    private long lastHealthAt = 0L;
+
     private void runLoop() {
         store.ensureIdentity();
         EventLog.info("设备码 " + store.getDeviceCode() + "，后端 " + store.getBaseUrl());
@@ -456,6 +472,14 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
                     } catch (ApiException e) {
                         EventLog.warn("拉取管控策略失败：" + e.userMessage());
                     }
+                }
+
+                // ---- 健康快照 ----
+                // 兜底节奏 + 「签名变了立刻补一次」：孩子刚关掉无障碍，家长端最多 3 分钟
+                // 就能看到红灯（而不是等到下次重启才发现）。
+                if (now - lastHealthAt >= Constants.HEALTH_REPORT_INTERVAL_MS || lastHealthAt == 0L) {
+                    lastHealthAt = now;
+                    reportHealthIfChanged(false);
                 }
 
                 // ---- 位置自动上报 ----
@@ -534,15 +558,74 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
         }
     }
 
+    /**
+     * 上报一份健康快照。
+     *
+     * @param force true 时无视签名与间隔（例如刚检出设备时间被改动）
+     */
+    private void reportHealthIfChanged(boolean force) {
+        try {
+            JSONObject body = HealthReporter.snapshot(this, store);
+            String signature = body.optString("level", "?") + "/" + openGapCount(body);
+            if (!force && signature.equals(lastHealthSignature)) return;
+            JSONObject ack = api.reportHealth(store.getBaseUrl(), body);
+            lastHealthSignature = signature;
+            lastHealthAt = SystemClock.elapsedRealtime();
+            EventLog.info("健康快照已上报：" + signature + "（服务端确认 "
+                    + ack.optString("level", "?") + "）");
+        } catch (ApiException e) {
+            // 上报失败不改本地状态：下一次心跳还会再试。这里只记日志，
+            // 不要把设备标成「不健康」—— 那会把网络问题误报成管控问题。
+            EventLog.warn("健康快照上报失败：" + e.describe());
+        }
+    }
+
+    private static int openGapCount(JSONObject body) {
+        JSONArray gaps = body.optJSONArray("gaps");
+        return gaps == null ? 0 : gaps.length();
+    }
+
+    /**
+     * {@code self_check} 指令：自愈已经由 CommandExecutor 跑完，这里只负责上报。
+     *
+     * @return 上报成功时的快照，失败返回 null（指令仍算成功：自愈本身已经做了）
+     */
+    @Override
+    public JSONObject selfCheckNow(String healSummary) {
+        try {
+            JSONObject body = HealthReporter.snapshot(this, store);
+            api.reportHealth(store.getBaseUrl(), body);
+            lastHealthSignature = body.optString("level", "?") + "/" + openGapCount(body);
+            lastHealthAt = SystemClock.elapsedRealtime();
+            EventLog.info("重新检测完成：" + healSummary);
+            return body;
+        } catch (ApiException e) {
+            EventLog.warn("重新检测上报失败：" + e.describe());
+            return null;
+        }
+    }
+
     private void doHeartbeat() throws ApiException {
         int battery = readBatteryPercent();
         String network = readNetworkType();
         // 顺带把设备<b>实际</b>的锁定状态报上去：家长的期望值与设备的真实状态
         // 可能因为作息表/每日额度而不同，只报期望值会让家长端显示错的结论
         LockState current = LockState.compute(
-                com.balloondog.agent.capability.LockEnforcer.buildInputs(store, System.currentTimeMillis()));
+                com.balloondog.agent.capability.LockEnforcer.buildInputs(store, TrustedClock.now()));
         AgentApi.HeartbeatResult result = api.heartbeat(store.getBaseUrl(), battery, network,
                 Constants.AGENT_VERSION, current.locked, current.describe());
+
+        // 用服务端回的权威时间锚定单调时钟：改系统时间会在这里现形（见 TrustedClock）。
+        // 放在这里而不是别处，是因为心跳是唯一「每 15 秒都一定会发生」的时刻。
+        if (TrustedClock.sync(result.serverTime)) {
+            // 检出改时间：记一条可回溯的事件（家长端动态里能看到「有人动过系统时间」），
+            // 并立刻补一次健康上报，让家长端马上看到 clockSkewSeconds。
+            long skewSeconds = TrustedClock.skewSeconds();
+            EventLog.warn("检测到设备时间被改动：设备墙钟与服务器相差 " + skewSeconds + " 秒");
+            recordEvent(Constants.EVENT_TAMPER, "设备时间被改动（与服务器相差 "
+                    + skewSeconds + " 秒）");
+            reportHealthIfChanged(true);
+        }
 
         boolean wasBound = store.isBound();
         store.setBound(result.bound);
@@ -625,12 +708,12 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
         // 学习模式与插件拦截是「孩子拿不到网也必须生效」的规则，
         // 只放在内存里等于拔网线即失效。
         String previousMode = com.balloondog.agent.capability.StudyModeEngine
-                .evaluate(store.getModeConfig(), System.currentTimeMillis());
+                .evaluate(store.getModeConfig(), TrustedClock.now());
         store.setModeConfig(config.mode);
         store.setEyeCareConfig(config.eyeCare);
         store.setPluginRules(config.appPlugins);
         String currentMode = com.balloondog.agent.capability.StudyModeEngine
-                .evaluate(config.mode, System.currentTimeMillis());
+                .evaluate(config.mode, TrustedClock.now());
         if (!previousMode.equals(currentMode)) {
             EventLog.warn("study".equals(currentMode) ? "已进入学习模式（只允许白名单应用）" : "已退出学习模式");
             recordEvent(Constants.EVENT_MODE_ENTER,
@@ -763,7 +846,7 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
             return;
         }
         // 每 6 小时最多提醒一次，避免变成骚扰
-        long now = System.currentTimeMillis();
+        long now = TrustedClock.now();
         if (now - store.getVpnConsentNotifiedAt() > 6 * 60 * 60_000L) {
             store.setVpnConsentNotifiedAt(now);
             EventLog.warn("网址拦截已开启，但本机还没授权 VPN；请家长在气球狗设置页点「启用网址拦截」");
@@ -830,7 +913,9 @@ public class AgentService extends Service implements CommandExecutor.ConfigAppli
         lastUsageTickMs = SystemClock.elapsedRealtime();
         while (ticking) {
             try {
-                long nowWall = System.currentTimeMillis();
+                // 「现在」走可信时钟（规划 §1.6）：用量记账与锁定判定都用它，
+                // 孩子把系统时间调回昨天也不会让额度重置或定时锁屏失效
+                long nowWall = TrustedClock.now();
                 long nowMono = SystemClock.elapsedRealtime();
 
                 // ---- 1) 用量记账（只在「可用」时累加）----

@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ah } from '../../shared/asyncHandler';
 import { authenticate, authenticateDevice } from '../../middleware/auth';
-import { currentUserId, resolveDevice } from '../../shared/deviceScope';
+import { currentUserId, resolveDevice, resolveWritableDevice } from '../../shared/deviceScope';
 import { devicesRepo } from '../devices/devices.repository';
 import { quizService } from './quiz.service';
 import {
@@ -27,7 +27,7 @@ export async function getConfig(req: Request, res: Response) {
 /** PUT /api/quiz/config */
 export async function updateConfig(req: Request, res: Response) {
   const patch = updateQuizConfigSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json({ success: true, config: await quizService.updateConfig(device, patch) });
 }
 
@@ -41,7 +41,7 @@ export async function previewQuestion(req: Request, res: Response) {
 /** POST /api/quiz/answer —— 家长端自测（真实答题由设备端提交）。 */
 export async function submitAnswer(req: Request, res: Response) {
   const { questionId, answer } = submitAnswerSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   const result = await quizService.answer(device, questionId, answer, {
     recordUserId: currentUserId(req),
   });

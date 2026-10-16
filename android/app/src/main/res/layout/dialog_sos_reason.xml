@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  求助时问一句「是什么事」（规划 §3.2）。
+
+  刻意做成「可以什么都不填就发」：孩子着急的时候最不需要的就是填表。
+  但如果愿意说一句，家长看到的就是孩子自己写的话，而不是系统代写的「孩子点了求助」。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="4dp"
+    android:paddingEnd="4dp">
+
+    <EditText
+        android:id="@+id/inputSosReason"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="想跟家长说的话（可以不填）"
+        android:importantForAutofill="no"
+        android:inputType="textMultiLine|textCapSentences"
+        android:maxLength="200"
+        android:maxLines="4"
+        android:minLines="2"
+        android:textSize="15sp" />
+
+</LinearLayout>

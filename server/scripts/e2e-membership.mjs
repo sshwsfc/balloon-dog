@@ -61,19 +61,22 @@ const planOf = (tiers, code) => {
 }
 
 /**
- * 报价本身必须自洽：实付 = 原价 − 折扣合计（不低于 1 元地板）+ 受邀上浮额。
+ * 家长端报价必须自洽：实付 = 原价 − 折扣合计（不低于 1 元地板）。
  *
- * `discountCents` 是「原价 − 实付」，受邀加价会把它抵消甚至变成负数 —— 家长端只在
- * `> 0` 时显示「已优惠」，所以这里不去断言它非负，只断言这条等式本身成立。
+ * 这条等式**两种账号都成立**：常规定价的账号照旧是「原价 − 逐条优惠」；受邀账号服务端
+ * 会把优惠明细连同原价一起压平（见 membership.service.ts 的 quoteOf），所以也成立。
+ *
+ * 受邀定价对家长端是**隐蔽**的：接口不下发 `referral`（规则名 + 上浮额），
+ * 也不下发按下单前常规定价算的那份明细 —— 家长端只该看到一个干净的价格。
+ * 真正的上浮金额与规则名走后台试算接口和订单快照验证，见第 13 步。
  */
 function checkQuoteArithmetic(label, quote) {
   const discount = quote.adjustments.reduce((acc, a) => acc + a.amountCents, 0)
-  const surcharge = quote.referral?.surchargeCents ?? 0
   check(
-    quote.finalCents === Math.max(100, quote.originalCents - discount) + surcharge &&
+    quote.finalCents === Math.max(100, quote.originalCents - discount) &&
       quote.discountCents === quote.originalCents - quote.finalCents,
-    `${label} 实付 = 原价 − 折扣合计（不低于 1 元地板）+ 受邀上浮额`,
-    `原价 ${quote.originalCents} 折扣 ${discount} 上浮 ${surcharge} 实付 ${quote.finalCents}`,
+    `${label} 实付 = 原价 − 折扣合计（不低于 1 元地板）`,
+    `原价 ${quote.originalCents} 折扣 ${discount} 实付 ${quote.finalCents}`,
   )
   check(
     quote.monthlyEquivalentCents === Math.round(quote.finalCents / quote.months),
@@ -84,10 +87,6 @@ function checkQuoteArithmetic(label, quote) {
     quote.adjustments.every((a) => a.amountCents >= 0 && a.name && a.ruleId),
     `${label} 每条命中规则都有名字、id 和非负的减免额`,
   )
-  /*
-    受邀加价**不**进 adjustments：adjustments 是一份「逐条相加 == 常规优惠」的清单，
-    把正数混进去会让这条恒等式变成假的。所以这里只验常规明细，再单独验加价那段关系。
-  */
   check(
     quote.adjustments.every((a) =>
       a.discountType === 'percent'
@@ -97,30 +96,14 @@ function checkQuoteArithmetic(label, quote) {
     `${label} 常规规则的百分比折扣按原价计算（不是折上折）`,
   )
   check(
-    quote.adjustments.every((a) => !a.ruleId.startsWith('referral:')),
-    `${label} 受邀加价不混进优惠明细（否则「逐条相加 == 优惠」这条恒等式会假）`,
+    quote.adjustments.every((a) => !String(a.ruleId ?? '').startsWith('referral:')),
+    `${label} 优惠明细里没有受邀定价的痕迹`,
   )
-
-  // 受邀加价：结账价 = max(常规定价实付, 受邀价)，多收的部分记在 referral.surchargeCents
-  const normalFinal = quote.originalCents - quote.adjustments.reduce((acc, a) => acc + a.amountCents, 0)
+  // 隐蔽性本身也是契约：家长端拿不到受邀定价的任何字段
   check(
-    quote.referral.baseCents === normalFinal,
-    `${label} 受邀价的基数是常规定价算完的实付价（不是原价）`,
-    `${quote.referral.baseCents} vs ${normalFinal}`,
+    quote.referral === undefined,
+    `${label} 家长端不下发受邀定价状态（规则名与上浮额对家长是隐蔽的）`,
   )
-  if (quote.referral.applied) {
-    check(
-      quote.finalCents === quote.referral.candidateCents &&
-        quote.finalCents > normalFinal &&
-        quote.referral.surchargeCents === quote.finalCents - normalFinal,
-      `${label} 受邀价生效时结账价 = 受邀价，比常规定价多收 ${quote.referral.surchargeCents} 分`,
-    )
-  } else {
-    check(
-      quote.finalCents === normalFinal && quote.referral.surchargeCents === 0,
-      `${label} 受邀价不生效时按常规定价结算`,
-    )
-  }
 }
 
 async function main() {
@@ -418,6 +401,22 @@ async function main() {
     check(gatedAgain.status === 403, '过期后 AI 洞察重新被拦（403）', `实际 ${gatedAgain.status}`)
     // ==========================================================
     step('13. 受邀用户定价：会员价格 × 是否被邀请注册')
+
+    /*
+      自愈：这个脚本会在第 13 步建一条临时规则再删掉。如果上一次运行在中途崩了，
+      残留的规则会参与计算、把下一次运行的第 13 步弄红（命中条数、理由都会变）。
+      所以开工前先把名字以「E2E 」开头的规则清一遍，收尾时再清一遍。
+    */
+    const sweepReferralRules = async (token) => {
+      const listed = await api('GET', '/admin/membership/referral-rules', { token })
+      if (!listed.ok) return
+      for (const rule of listed.body.items ?? []) {
+        if (String(rule.name ?? '').startsWith('E2E ')) {
+          await api('DELETE', `/admin/membership/referral-rules/${rule.id}`, { token })
+        }
+      }
+    }
+    await sweepReferralRules(adminToken)
     // ==========================================================
     /*
       被邀请注册的家长价格**更高** —— 邀请人要拿的分享返现是平台出的，这笔成本落在他的
@@ -440,14 +439,17 @@ async function main() {
     check(!inviterOverview.config || typeof inviterOverview.inviteCode === 'string', '临时家长也有邀请码，可以用来拉一个受邀账号')
 
     const notInvited = await must('GET', '/membership', { token })
+    const notInvitedMonthly = planOf(notInvited.tiers, 'member_monthly')
     check(
-      planOf(notInvited.tiers, 'member_monthly').referral.applicable === false,
-      '没通过邀请注册的账号：受邀定价不适用',
-      planOf(notInvited.tiers, 'member_monthly').referral.reason,
+      notInvitedMonthly.referral === undefined,
+      '家长端报价里没有 referral 字段：被邀请与否不告诉家长',
     )
     check(
-      planOf(notInvited.tiers, 'member_monthly').referral.reason.includes('不是通过邀请注册'),
-      '并给出可展示的理由（而不是静默按常规定价）',
+      notInvitedMonthly.adjustments.length > 0 &&
+        notInvitedMonthly.originalCents === 1500 &&
+        notInvitedMonthly.finalCents < notInvitedMonthly.originalCents,
+      '没被邀请的账号照旧看到「原价 + 逐条优惠」（隐蔽只针对受邀账号，不能误伤正常展示）',
+      `${yuan(notInvitedMonthly.originalCents)} → ${yuan(notInvitedMonthly.finalCents)}`,
     )
 
     // 受邀账号：用一个新手机号 + 邀请码注册
@@ -465,50 +467,83 @@ async function main() {
     const inviteeToken = inviteeReg.token
     created.extraUsers.push({ id: inviteeReg.user.id, phone: inviteePhone })
 
+    /*
+      真正要验的公式在后台试算接口上验：`/admin/membership/simulate` 的 invited 画像
+      会把完整的受邀定价状态（规则名、基数、候选价、上浮额、命中条数）吐出来，
+      而这些字段**一个都不该出现在家长端**。
+    */
+    const simQuote = async (planCode, overrides = {}) => {
+      const r = await must('POST', '/admin/membership/simulate', {
+        token: adminToken,
+        body: { planCode, ...profile, ...overrides },
+      })
+      return r
+    }
+    const notInvitedSim = await simQuote('member_monthly', { invited: false })
+    check(
+      notInvitedSim.referral.applicable === false &&
+        notInvitedSim.referral.reason.includes('不是通过邀请注册'),
+      '后台试算能看到「不适用」的完整理由（运营看得到，家长看不到）',
+      notInvitedSim.referral.reason,
+    )
+
     const invited = await must('GET', '/membership', { token: inviteeToken })
     const invitedMonthly = planOf(invited.tiers, 'member_monthly')
     const invitedYearly = planOf(invited.tiers, 'member_yearly')
-    check(invitedMonthly.referral.applicable === true, '受邀注册的账号：受邀定价适用')
-    check(invitedMonthly.referral.applied === true, '而且真的生效了（价格被抬高了）', invitedMonthly.referral.reason)
-    check(
-      invitedMonthly.referral.surchargeCents > 0,
-      `价格比常规定价更高（多收 ${yuan(invitedMonthly.referral.surchargeCents)}）`,
-    )
-    check(
-      invitedMonthly.finalCents > invitedMonthly.referral.baseCents,
-      '结账价严格高于常规定价，而不是取了两者中更低的',
-    )
     checkQuoteArithmetic('受邀账号月付', invitedMonthly)
     checkQuoteArithmetic('受邀账号年付', invitedYearly)
+    check(
+      invitedMonthly.referral === undefined && invitedYearly.referral === undefined,
+      '受邀账号的报价里同样没有 referral 字段',
+    )
+    check(
+      invitedMonthly.adjustments.length === 0 &&
+        invitedMonthly.discountCents === 0 &&
+        invitedMonthly.originalCents === invitedMonthly.finalCents,
+      '受邀账号的优惠明细被服务端压平：家长端只看到一个干净的价格，看不到任何「加价」痕迹',
+      `原价 ${yuan(invitedMonthly.originalCents)} 明细 ${invitedMonthly.adjustments.length} 条`,
+    )
 
     const normalMonthly = await normalQuote('member_monthly')
     const normalYearly = await normalQuote('member_yearly')
     check(
       invitedMonthly.finalCents === Math.round(normalMonthly.finalCents * 2),
-      `月付按「常规定价 × 200%」算（${yuan(normalMonthly.finalCents)} → ${yuan(invitedMonthly.finalCents)}）`,
+      `受邀月付 = 常规定价 × 200%（${yuan(normalMonthly.finalCents)} → ${yuan(invitedMonthly.finalCents)}）`,
       yuan(invitedMonthly.finalCents),
-    )
-    /*
-      首单时两条默认规则**都**命中（50% 那条限首单、25% 那条不限），价格取其中最高的 ——
-      这正是「几条规则各算一个价、取 max」的口径，而不是「按优先级挑一条」。
-    */
-    check(
-      invitedMonthly.referral.matchedCount === 2,
-      `首单时两条默认规则都命中（命中 ${invitedMonthly.referral.matchedCount} 条）`,
     )
     check(
       invitedYearly.finalCents === Math.round(normalYearly.finalCents * 2),
-      `年付同样取最高价（${yuan(normalYearly.finalCents)} → ${yuan(invitedYearly.finalCents)}），而不是被周期限定那条压低`,
+      `受邀年付同样取最高价（${yuan(normalYearly.finalCents)} → ${yuan(invitedYearly.finalCents)}），而不是被周期限定那条压低`,
       yuan(invitedYearly.finalCents),
     )
+
+    const invitedSim = await simQuote('member_yearly', { invited: true, referralActive: true })
     check(
-      invitedYearly.referral.ruleName === '受邀好友首单上浮 100%' &&
-        invitedMonthly.referral.ruleName === '受邀好友首单上浮 100%',
-      '命中的规则名下发到家长端（前端据此展示贵了多少、为什么贵）',
-      `${invitedMonthly.referral.ruleName} / ${invitedYearly.referral.ruleName}`,
+      invitedSim.referral.applicable === true && invitedSim.referral.applied === true,
+      '后台试算：受邀注册的账号受邀定价适用且生效',
+      invitedSim.referral.reason,
+    )
+    check(
+      invitedSim.result.finalCents === invitedYearly.finalCents,
+      '后台试算与家长端报价是同一套公式（家长端只是把明细藏了起来）',
+      `${yuan(invitedSim.result.finalCents)} vs ${yuan(invitedYearly.finalCents)}`,
+    )
+    /*
+      首单时两条默认规则**都**命中（100% 那条限首单、25% 那条不限），价格取其中最高的 ——
+      这正是「几条规则各算一个价、取 max」的口径，而不是「按优先级挑一条」。
+    */
+    check(
+      invitedSim.referral.matchedCount === 2,
+      `首单时两条默认规则都命中（命中 ${invitedSim.referral.matchedCount} 条）`,
+    )
+    check(
+      invitedSim.referral.ruleName === '受邀好友首单上浮 100%' &&
+        invitedSim.referral.surchargeCents ===
+          invitedSim.result.finalCents - invitedSim.referral.baseCents,
+      `后台能看到命中的规则名与上浮额（${invitedSim.referral.ruleName} +${yuan(invitedSim.referral.surchargeCents)}）`,
     )
 
-    // 下单那一刻要落快照：事后改规则不能篡改历史订单
+    // 下单那一刻要落快照：事后改规则不能篡改历史订单；但快照**不下发**给家长
     const inviteeOrder = await must('POST', '/membership/orders', {
       token: inviteeToken,
       body: { planCode: 'member_yearly', payChannel: 'alipay' },
@@ -519,39 +554,70 @@ async function main() {
       yuan(inviteeOrder.order.amountCents),
     )
     check(
-      inviteeOrder.order.referralRuleName === '受邀好友首单上浮 100%' &&
-        inviteeOrder.order.referralSurchargeCents ===
-          invitedYearly.finalCents - invitedYearly.referral.baseCents,
-      '订单里存了命中的规则名与上浮金额（快照，不靠事后重算）',
-      `${inviteeOrder.order.referralRuleName} / ${inviteeOrder.order.referralSurchargeCents}`,
+      inviteeOrder.order.referralRuleName === undefined &&
+        inviteeOrder.order.referralSurchargeCents === undefined,
+      '下单响应里也没有受邀定价字段（家长端连订单接口都拿不到上浮信息）',
+    )
+    check(
+      inviteeOrder.order.originalCents === inviteeOrder.order.amountCents &&
+        (inviteeOrder.order.adjustments ?? []).length === 0,
+      '受邀订单的账单被压平：原价 = 实付、无优惠明细，不会出现「15 − 3.75 ≠ 22.5」这种自相矛盾',
+      `${yuan(inviteeOrder.order.originalCents)} / 明细 ${(inviteeOrder.order.adjustments ?? []).length} 条`,
+    )
+    const inviteeOrderRow = await prisma.membershipOrder.findUnique({ where: { orderNo: inviteeOrder.order.orderNo } })
+    check(
+      inviteeOrderRow.referralRuleName === '受邀好友首单上浮 100%' &&
+        inviteeOrderRow.referralSurchargeCents === invitedYearly.finalCents - invitedSim.referral.baseCents,
+      '库里仍然存着命中的规则名与上浮金额（快照，不靠事后重算；后台订单页照常展示）',
+      `${inviteeOrderRow.referralRuleName} / ${inviteeOrderRow.referralSurchargeCents}`,
+    )
+    // 隐蔽是单向的：家长端接口整个删掉了这两个字段，后台订单接口照常下发。
+    const adminInviteeOrders = await must(
+      'GET',
+      `/admin/membership/orders?q=${encodeURIComponent(inviteePhone)}&page=1&pageSize=20`,
+      { token: adminToken },
+    )
+    const adminInviteeRow = (adminInviteeOrders.items ?? []).find(
+      (o) => o.orderNo === inviteeOrder.order.orderNo,
+    )
+    check(
+      adminInviteeRow?.referralRuleName === '受邀好友首单上浮 100%' &&
+        adminInviteeRow?.referralSurchargeCents === inviteeOrderRow.referralSurchargeCents &&
+        adminInviteeRow?.referralSurchargeCents > 0,
+      '后台订单列表照常下发规则名与上浮额（家长端隐藏、后台可见，方向相反）',
+      `${adminInviteeRow?.referralRuleName} / ${adminInviteeRow?.referralSurchargeCents}`,
     )
     await must('POST', `/membership/orders/${inviteeOrder.order.orderNo}/pay`, { token: inviteeToken, body: {} })
 
     // 首单限定：付过费之后首单那条不再命中，落到续费那条（25%）
     const afterPaid = await must('GET', '/membership', { token: inviteeToken })
     const afterPaidMonthly = planOf(afterPaid.tiers, 'member_monthly')
+    checkQuoteArithmetic('受邀账号已付费（月付）', afterPaidMonthly)
     check(
-      afterPaidMonthly.referral.applicable === true && afterPaidMonthly.referral.applied === true,
-      '已付费账号仍适用，但换成续费那条加价规则',
-      afterPaidMonthly.referral.reason,
-    )
-    check(
-      afterPaidMonthly.referral.ruleName === '受邀好友续费上浮 25%',
-      `续费规则接手（${afterPaidMonthly.referral.ruleName}）`,
+      afterPaidMonthly.referral === undefined && afterPaidMonthly.adjustments.length === 0,
+      '续费报价同样隐蔽：家长端看不到「这次换了一条加价规则」',
     )
     /*
       不能拿「未受邀的同画像」去比：这个账号刚付完一笔会员费，activeTier 已经从
-      ordinary 变成 member，常规规则跟着变，比出来的差额是会员态带来的。所以这里验的是
-      不变量本身 —— finalCents === 常规定价实付 + surchargeCents。
+      ordinary 变成 member，常规规则跟着变，比出来的差额是会员态带来的。所以改用
+      后台试算的同一个画像（已付费 + member）来比。
     */
-    const afterPaidAdjustments = afterPaidMonthly.adjustments ?? []
-    const afterPaidNormal =
-      afterPaidMonthly.originalCents - afterPaidAdjustments.reduce((n, a) => n + a.amountCents, 0)
+    const afterPaidNormalSim = await simQuote('member_monthly', { invited: false, hasPaid: true, activeTier: 'member' })
+    const afterPaidInvitedSim = await simQuote('member_monthly', { invited: true, referralActive: true, hasPaid: true, activeTier: 'member' })
     check(
-      afterPaidAdjustments.every((a) => !String(a.ruleId ?? '').startsWith('referral:')) &&
-        afterPaidMonthly.finalCents === afterPaidNormal + afterPaidMonthly.referral.surchargeCents,
-      '加价不进优惠明细，结账价 = 常规定价实付 + 上浮额（恒等式没被破坏）',
-      `实付 ${yuan(afterPaidMonthly.finalCents)} / 常规 ${yuan(afterPaidNormal)} / 上浮 ${yuan(afterPaidMonthly.referral.surchargeCents)}`,
+      afterPaidInvitedSim.referral.applied === true &&
+        afterPaidMonthly.finalCents === afterPaidInvitedSim.result.finalCents,
+      '已付费账号仍适用，换成续费那条规则，家长端拿到的就是它的结果',
+      `${yuan(afterPaidMonthly.finalCents)}`,
+    )
+    check(
+      afterPaidInvitedSim.referral.ruleName === '受邀好友续费上浮 25%',
+      `续费规则接手（${afterPaidInvitedSim.referral.ruleName}）`,
+    )
+    check(
+      afterPaidMonthly.finalCents === Math.round(afterPaidNormalSim.result.finalCents * 1.25),
+      `续费上浮 25%：${yuan(afterPaidNormalSim.result.finalCents)} → ${yuan(afterPaidMonthly.finalCents)}`,
+      yuan(afterPaidMonthly.finalCents),
     )
 
     // 反作弊联动：邀请关系被判作废后不该再被加价
@@ -559,11 +625,17 @@ async function main() {
     check(Boolean(referralRow), '受邀账号在库里有一条邀请关系')
     await prisma.referral.update({ where: { id: referralRow.id }, data: { status: 'invalid' } })
     const invalidated = await must('GET', '/membership', { token: inviteeToken })
+    const invalidatedMonthly = planOf(invalidated.tiers, 'member_monthly')
     check(
-      planOf(invalidated.tiers, 'member_monthly').referral.reason.includes('作废') &&
-        planOf(invalidated.tiers, 'member_monthly').referral.applied === false,
-      '邀请关系被作废后，回到常规定价并给出「已作废」的理由',
-      planOf(invalidated.tiers, 'member_monthly').referral.reason,
+      invalidatedMonthly.finalCents === afterPaidNormalSim.result.finalCents,
+      '邀请关系被作废后，家长端回到常规定价（价格变了，但仍然不解释原因）',
+      `${yuan(invalidatedMonthly.finalCents)} vs ${yuan(afterPaidNormalSim.result.finalCents)}`,
+    )
+    const invalidatedSim = await simQuote('member_monthly', { invited: true, referralActive: false, hasPaid: true, activeTier: 'member' })
+    check(
+      invalidatedSim.referral.applied === false && invalidatedSim.referral.reason.includes('作废'),
+      '后台看得到「关系已作废」的理由',
+      invalidatedSim.referral.reason,
     )
 
     /*
@@ -591,12 +663,23 @@ async function main() {
     const lowFixedQuote = await must('GET', '/membership', { token: inviteeToken })
     const lowFixedMonthly = planOf(lowFixedQuote.tiers, 'member_monthly')
     check(
-      lowFixedMonthly.finalCents !== 990 && lowFixedMonthly.referral.reason.includes('不低于'),
-      '低于常规定价的一口价不生效：配错规则只会「不生效」，不会变成给受邀用户的折扣',
-      `${yuan(lowFixedMonthly.finalCents)} / ${lowFixedMonthly.referral.reason}`,
+      lowFixedMonthly.finalCents !== 990 &&
+        lowFixedMonthly.finalCents === afterPaidNormalSim.result.finalCents,
+      '低于常规定价的一口价不生效：配错规则只会「不生效」，不会变成给受邀用户的折扣（家长端价格照旧）',
+      yuan(lowFixedMonthly.finalCents),
+    )
+    /*
+      家长端看不到「为什么没生效」（referral 不下发），所以理由与命中条数改在后台试算上验。
+      这条规则 requireActiveReferral=false，关系已作废也照样进候选，只是赢不了。
+    */
+    const lowFixedSim = await simQuote('member_monthly', { invited: true, referralActive: false })
+    check(
+      lowFixedSim.referral.applied === false && lowFixedSim.referral.reason.includes('不低于'),
+      '后台能解释「为什么没生效」',
+      lowFixedSim.referral.reason,
     )
     check(
-      lowFixedMonthly.referral.matchedCount >= 1,
+      lowFixedSim.referral.matchedCount >= 1,
       '它确实被算进了候选，只是没赢 —— 不是被优先级筛掉的',
     )
     const listed = await must('GET', '/admin/membership/referral-rules?enabled=true', { token: adminToken })
@@ -666,6 +749,17 @@ async function main() {
         for (const extra of created.extraUsers) {
           const removedExtra = await api('DELETE', `/admin/users/${extra.id}`, { token: adminLogin.body.token })
           check(removedExtra.ok, `已清理受邀临时家长 ${extra.phone}（连带其订单/返现/券）`, `实际 ${removedExtra.status}`)
+        }
+      }
+      if (adminLogin.ok) {
+        // 临时受邀定价规则同样要清：中途崩掉时不删就会污染下一次运行
+        const listedRules = await api('GET', '/admin/membership/referral-rules', { token: adminLogin.body.token })
+        if (listedRules.ok) {
+          for (const rule of listedRules.body.items ?? []) {
+            if (String(rule.name ?? '').startsWith('E2E ')) {
+              await api('DELETE', `/admin/membership/referral-rules/${rule.id}`, { token: adminLogin.body.token })
+            }
+          }
         }
       }
       if (adminLogin.ok && created.userId) {

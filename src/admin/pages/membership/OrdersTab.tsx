@@ -297,6 +297,18 @@ export function OrdersTab() {
                 ) : (
                   <p className="mt-1 text-xs text-muted-foreground">没有命中优惠</p>
                 )}
+                {/*
+                  受邀定价的上浮额单独列一行：它和优惠是相反方向的钱，混进上面那排「−￥X」
+                  会让人以为明细加得起来。后台必须看得到 —— 这是唯一能看到它的地方。
+                */}
+                {detail.referralSurchargeCents > 0 ? (
+                  <div className="mt-1 flex justify-between text-xs">
+                    <span className="text-foreground">
+                      {detail.referralRuleName || '受邀用户定价'}
+                    </span>
+                    <span className="font-mono text-amber-600">+{formatCents(detail.referralSurchargeCents)}</span>
+                  </div>
+                ) : null}
                 <div className="mt-2 flex justify-between border-t pt-2 text-sm">
                   <span className="text-foreground">实付</span>
                   <span className="font-mono font-semibold text-primary">{formatCents(detail.amountCents)}</span>

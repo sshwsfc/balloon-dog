@@ -11,12 +11,14 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { toast } from 'sonner'
-import { ArrowLeft, Battery, Check, Crown, HelpCircle, Plus, Smartphone, Trash2, Wifi } from 'lucide-react'
+import { ArrowLeft, Battery, Check, Crown, Eye, HelpCircle, Plus, ShieldCheck, Smartphone, Trash2, Users, UserPlus, Wifi } from 'lucide-react'
 import { api, toUserMessage } from '@/services/api'
 import { FeatureTip } from '@/components/FeatureTip'
+import { AgentInstallCard } from '@/components/onboarding/AgentInstallCard'
+import { formatRelative } from '@/lib/format'
 import { invalidateAppIcons } from '@/hooks/useAppIcons'
 import { useMembership } from '@/hooks/useMembership'
-import type { Device } from '@/types'
+import type { Device, DeviceMember, DeviceRole } from '@/types'
 import { useTranslation } from 'react-i18next'
 
 type DevicesResponse = { devices: Device[] }
@@ -37,6 +39,22 @@ export function DeviceManagePage() {
 
   const [removeTarget, setRemoveTarget] = useState<Device | null>(null)
   const [removing, setRemoving] = useState(false)
+
+  /**
+   * 家庭成员（规划 §5.1）。
+   *
+   * 一个弹窗装完「看名单 + 邀请 + 改角色 + 移出」：这几件事互相依赖（改完角色要
+   * 立刻看到名单更新，邀请完要看到人数涨了），拆成多个页面反而要来回跳。
+   * 非主人打开时整块管理区不渲染 —— 服务端同样会 403，前端不靠这个挡住人。
+   */
+  const [memberTarget, setMemberTarget] = useState<Device | null>(null)
+  const [members, setMembers] = useState<DeviceMember[]>([])
+  const [memberLimit, setMemberLimit] = useState(5)
+  const [memberLoading, setMemberLoading] = useState(false)
+  const [memberBusy, setMemberBusy] = useState(false)
+  const [invitePhone, setInvitePhone] = useState('')
+  const [inviteNickname, setInviteNickname] = useState('')
+  const [inviteRole, setInviteRole] = useState<DeviceRole>('viewer')
 
   const loadDevices = useCallback(async () => {
     try {
@@ -99,6 +117,103 @@ export function DeviceManagePage() {
       navigate('/')
     } catch (err) {
       toast.error(toUserMessage(err, t('切换设备失败')))
+    }
+  }
+
+  /**
+   * 点设备卡上的健康点：先把这台设备切成「当前设备」，再进健康页。
+   *
+   * 健康接口是**按当前设备**取的（`GET /api/device/health`），所以不能直接带上
+   * `?deviceId=` 跳过去 —— 那会让家长看到另一台设备的开关状态，
+   * 而他以为自己在看刚点的那台。先切换、再跳转，看到的一定是同一台。
+   */
+  const handleOpenHealth = async (device: Device) => {
+    try {
+      await api.selectDevice(device.id)
+      invalidateAppIcons()
+      navigate('/device-health')
+    } catch (err: unknown) {
+      toast.error(toUserMessage(err, t('切换设备失败')))
+    }
+  }
+
+  const loadMembers = useCallback(
+    async (deviceId: string) => {
+      setMemberLoading(true)
+      try {
+        const res = await api.getDeviceMembers(deviceId)
+        setMembers(res.members ?? [])
+        setMemberLimit(res.limit ?? 5)
+      } catch (err) {
+        toast.error(toUserMessage(err, t('加载家庭成员失败')))
+      } finally {
+        setMemberLoading(false)
+      }
+    },
+    [t],
+  )
+
+  const handleOpenMembers = (device: Device) => {
+    setMemberTarget(device)
+    setMembers([])
+    setInvitePhone('')
+    setInviteNickname('')
+    setInviteRole('viewer')
+    void loadMembers(device.id)
+  }
+
+  const handleInviteMember = async () => {
+    if (!memberTarget) return
+    const phone = invitePhone.trim()
+    if (!/^1\d{10}$/.test(phone)) {
+      toast.error(t('请输入成员注册时用的 11 位手机号'))
+      return
+    }
+    setMemberBusy(true)
+    try {
+      await api.inviteDeviceMember(memberTarget.id, {
+        phone,
+        role: inviteRole,
+        nickname: inviteNickname.trim() || undefined,
+      })
+      toast.success(t('已加入家庭成员，他打开应用就能看到这台设备'))
+      setInvitePhone('')
+      setInviteNickname('')
+      await loadMembers(memberTarget.id)
+      // 列表页没有成员信息，但主人自己那行的角色不会变，这里只是保持一致的刷新时机
+      await loadDevices()
+    } catch (err) {
+      toast.error(toUserMessage(err, t('邀请失败，请稍后重试')))
+    } finally {
+      setMemberBusy(false)
+    }
+  }
+
+  const handleChangeMemberRole = async (member: DeviceMember, role: DeviceRole) => {
+    if (!memberTarget) return
+    setMemberBusy(true)
+    try {
+      await api.updateDeviceMember(memberTarget.id, member.id, { role })
+      toast.success(role === 'admin' ? t('已设为管理员') : t('已设为只读'))
+      await loadMembers(memberTarget.id)
+    } catch (err) {
+      toast.error(toUserMessage(err, t('修改角色失败')))
+    } finally {
+      setMemberBusy(false)
+    }
+  }
+
+  const handleRemoveMember = async (member: DeviceMember) => {
+    if (!memberTarget) return
+    setMemberBusy(true)
+    try {
+      await api.removeDeviceMember(memberTarget.id, member.id)
+      toast.success(t('已移出家庭成员'))
+      await loadMembers(memberTarget.id)
+    } catch (err) {
+      toast.error(toUserMessage(err, t('移除成员失败')))
+    } finally {
+      setMemberBusy(false)
     }
   }
 
@@ -196,6 +311,54 @@ export function DeviceManagePage() {
                             {device.status === 'online' ? t('在线') : t('离线')}
                           </Badge>
                           {device.locked && <Badge className="bg-red-500 text-white">{t('已锁定')}</Badge>}
+                          {/*
+                            角色角标（规划 §5.1）：被邀请进来的家长要一眼看出自己
+                            在这台设备上是「能改」还是「只能看」——否则他会一直点开关，
+                            然后被服务端 403。
+                          */}
+                          {device.role === 'admin' && (
+                            <Badge className="bg-blue-100 text-blue-700">{t('管理员')}</Badge>
+                          )}
+                          {device.role === 'viewer' && (
+                            <Badge className="bg-gray-100 text-gray-600">{t('只读')}</Badge>
+                          )}
+                          {/*
+                            健康点（规划 §1.2）：一眼看出这台设备的管控还成不成立。
+                            没上报过快照时**不画点**，只写「未检测」—— 画个灰点也会被
+                            读成「大概没事」，而这里的事实是「我们不知道」。
+                          */}
+                          {device.healthLevel ? (
+                            <button
+                              type="button"
+                              className="flex items-center space-x-1"
+                              onClick={() => void handleOpenHealth(device)}
+                            >
+                              <span
+                                className={`w-2 h-2 rounded-full ${
+                                  device.healthLevel === 'ok'
+                                    ? 'bg-[#07c160]'
+                                    : device.healthLevel === 'warn'
+                                      ? 'bg-amber-500'
+                                      : 'bg-red-500'
+                                }`}
+                              />
+                              <span
+                                className={`text-[11px] ${
+                                  device.healthLevel === 'ok'
+                                    ? 'text-[#07c160]'
+                                    : device.healthLevel === 'warn'
+                                      ? 'text-amber-600'
+                                      : 'text-red-500'
+                                }`}
+                              >
+                                {device.openGaps
+                                  ? t('{{v0}} 项待处理', { v0: device.openGaps })
+                                  : t('管控正常')}
+                              </span>
+                            </button>
+                          ) : (
+                            <span className="text-[11px] text-gray-300">{t('未检测')}</span>
+                          )}
                         </div>
                         <p className="text-xs text-gray-400 mt-1 truncate">
                           {device.model} · {device.os}
@@ -209,7 +372,7 @@ export function DeviceManagePage() {
                             <Wifi className="w-3.5 h-3.5 mr-1" />
                             {device.network || t('未知')}
                           </span>
-                          <span>{device.lastActive}</span>
+                          <span>{device.lastActiveAt ? formatRelative(device.lastActiveAt) : t('未知')}</span>
                         </div>
                         <p className="text-[11px] text-gray-300 mt-2 font-mono">
                           {t('绑定码')} {device.deviceCode}
@@ -218,7 +381,7 @@ export function DeviceManagePage() {
                       </div>
                     </div>
 
-                    <div className="flex gap-2 mt-3">
+                    <div className="flex gap-2 mt-3 flex-wrap">
                       <Button
                         size="sm"
                         variant="outline"
@@ -231,12 +394,31 @@ export function DeviceManagePage() {
                       <Button
                         size="sm"
                         variant="outline"
-                        className="text-red-500 border-red-200 hover:bg-red-50"
-                        onClick={() => setRemoveTarget(device)}
+                        className="flex-1"
+                        onClick={() => handleOpenMembers(device)}
                       >
-                        <Trash2 className="w-4 h-4 mr-1" />
-                        {t('解绑')}
+                        {device.canManageMembers ? (
+                          <Users className="w-4 h-4 mr-1" />
+                        ) : (
+                          <Eye className="w-4 h-4 mr-1" />
+                        )}
+                        {t('家庭成员')}
                       </Button>
+                      {/*
+                        解绑只有主人能做：服务端对所有人的 removeDevice 都校验主人身份，
+                        这里再画一个按钮只会让管理员点出一个 403。
+                      */}
+                      {device.role !== 'admin' && device.role !== 'viewer' && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="text-red-500 border-red-200 hover:bg-red-50"
+                          onClick={() => setRemoveTarget(device)}
+                        >
+                          <Trash2 className="w-4 h-4 mr-1" />
+                          {t('解绑')}
+                        </Button>
+                      )}
                     </div>
                   </CardContent>
                 </Card>
@@ -290,6 +472,16 @@ export function DeviceManagePage() {
             <DialogTitle>{t('绑定孩子设备')}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
+            {/* 绑定码在孩子端首页上，「还没装孩子端」的家长点开这个对话框时手上
+                是空的 —— 所以下载方式与二维码放在第一步，而不是让他先关掉对话框
+                去别处找入口。 */}
+            <section className="rounded-xl border border-gray-100 bg-gray-50 p-3">
+              <p className="text-sm font-medium text-gray-800">{t('还没装孩子端？先下载')}</p>
+              <p className="mt-1 text-xs leading-relaxed text-gray-500">
+                {t('孩子端只装在被管的那台手机上，装好后它首页会显示绑定码，再回来填在下面。')}
+              </p>
+              <AgentInstallCard compact className="mt-3" />
+            </section>
             <div>
               <label className="text-sm text-gray-600 block mb-2">
                 {t('设备绑定码')} <span className="text-red-500">*</span>
@@ -332,6 +524,150 @@ export function DeviceManagePage() {
               disabled={submitting}
             >
               {submitting ? t('绑定中…') : t('确认绑定')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 家庭成员 */}
+      <Dialog open={Boolean(memberTarget)} onOpenChange={(open) => !open && setMemberTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t('家庭成员')}</DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-gray-500 -mt-2 leading-relaxed">
+            {t('一台设备可以由多位家长一起看：主人能改一切，管理员能改设置和下发指令，只读成员只能看。')}
+          </p>
+          {memberLoading ? (
+            <p className="text-sm text-gray-400 py-6 text-center">{t('加载中...')}</p>
+          ) : (
+            <div className="space-y-2 max-h-[45vh] overflow-y-auto">
+              {members.map((member) => (
+                <div
+                  key={member.id}
+                  className="flex items-center space-x-2 rounded-lg border border-gray-100 p-2.5"
+                >
+                  <div className="w-8 h-8 rounded-full bg-green-50 flex items-center justify-center flex-shrink-0">
+                    {member.isOwner ? (
+                      <Crown className="w-4 h-4 text-[#07c160]" />
+                    ) : (
+                      <Users className="w-4 h-4 text-[#07c160]" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center space-x-1.5">
+                      <span className="text-sm font-medium text-gray-900 truncate">
+                        {member.nickname}
+                      </span>
+                      <Badge
+                        className={
+                          member.isOwner
+                            ? 'bg-[#07c160] text-white'
+                            : member.role === 'admin'
+                              ? 'bg-blue-100 text-blue-700'
+                              : 'bg-gray-100 text-gray-600'
+                        }
+                      >
+                        {t(member.roleLabel)}
+                      </Badge>
+                    </div>
+                    <p className="text-[11px] text-gray-400 mt-0.5">
+                      {member.phone || t('未绑定手机号')}
+                    </p>
+                  </div>
+                  {memberTarget?.canManageMembers && !member.isOwner && (
+                    <div className="flex items-center space-x-1 flex-shrink-0">
+                      <button
+                        type="button"
+                        disabled={memberBusy}
+                        onClick={() =>
+                          void handleChangeMemberRole(
+                            member,
+                            member.role === 'admin' ? 'viewer' : 'admin',
+                          )
+                        }
+                        className="rounded-full bg-gray-50 px-2.5 py-1 text-[11px] text-gray-600 active:bg-gray-100 disabled:opacity-50"
+                      >
+                        {member.role === 'admin' ? t('降为只读') : t('设为管理员')}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={memberBusy}
+                        onClick={() => void handleRemoveMember(member)}
+                        className="rounded-full bg-red-50 px-2.5 py-1 text-[11px] text-red-600 active:bg-red-100 disabled:opacity-50"
+                      >
+                        {t('移出')}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {memberTarget?.canManageMembers && (
+            <div className="rounded-lg bg-gray-50 p-3 space-y-2">
+              <p className="text-xs text-gray-500">
+                {t('邀请家人（{{v0}}/{{v1}} 人）', {
+                  v0: Math.max(0, members.length - 1),
+                  v1: memberLimit,
+                })}
+              </p>
+              <div className="flex gap-2">
+                <input
+                  value={invitePhone}
+                  onChange={(e) => setInvitePhone(e.target.value)}
+                  inputMode="numeric"
+                  placeholder={t('他的注册手机号')}
+                  className="flex-1 min-w-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-[#07c160]"
+                />
+                <input
+                  value={inviteNickname}
+                  onChange={(e) => setInviteNickname(e.target.value)}
+                  placeholder={t('备注（可选）')}
+                  className="w-24 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-[#07c160]"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                {(['viewer', 'admin'] as DeviceRole[]).map((role) => (
+                  <button
+                    key={role}
+                    type="button"
+                    onClick={() => setInviteRole(role)}
+                    className={`rounded-full px-3 py-1 text-xs ${
+                      inviteRole === role
+                        ? 'bg-[#07c160] text-white'
+                        : 'bg-white text-gray-600 border border-gray-200'
+                    }`}
+                  >
+                    {role === 'admin' ? t('管理员（能改设置）') : t('只读（只能看）')}
+                  </button>
+                ))}
+              </div>
+              <Button
+                className="w-full bg-[#07c160] hover:bg-[#06a050]"
+                disabled={memberBusy || !invitePhone.trim()}
+                onClick={() => void handleInviteMember()}
+              >
+                <UserPlus className="w-4 h-4 mr-1" />
+                {memberBusy ? t('处理中…') : t('邀请加入')}
+              </Button>
+              <p className="text-[11px] text-gray-400 leading-relaxed">
+                {t('对方要先用这个手机号注册过气球狗账号；设备主人不算在人数里，家庭成员最多 5 人。移出后他会立刻失去这台设备的访问权。')}
+              </p>
+            </div>
+          )}
+          {!memberTarget?.canManageMembers && (
+            <div className="flex items-start space-x-2 rounded-lg bg-amber-50 border border-amber-200 p-2.5">
+              <ShieldCheck className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+              <p className="text-xs text-amber-800 leading-relaxed">
+                {t('只有设备主人能邀请或移出家庭成员。')}
+              </p>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setMemberTarget(null)}>
+              {t('关闭')}
             </Button>
           </DialogFooter>
         </DialogContent>

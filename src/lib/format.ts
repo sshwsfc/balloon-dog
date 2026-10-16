@@ -50,5 +50,28 @@ export function compareByLocale(a: string, b: string): number {
   return a.localeCompare(b, locale())
 }
 
+/**
+ * 「3小时前」这类相对时间，**在客户端拼**而不是渲染服务端下发的 `lastActive`。
+ *
+ * 服务端也会算一份（`humanizeLastActive`）并放在 `lastActive` 里，但那是**写死的中文**：
+ * 界面切到英文后，凡是直接渲染它的地方都会漏出「小时前」这种中文碎片
+ * （UX 套件里「英文界面不再出现成片中文」这一条就是这么抓出来的）。
+ * 所以需要相对时间的地方一律用这个函数，服务端那份只当兜底/审计字段。
+ *
+ * 粒度（分钟 / 小时 / 天）与服务端保持一致，避免同一台设备在两处显示不同。
+ */
+export function formatRelative(iso: string | number | Date | null | undefined): string {
+  if (!iso) return i18n.t('从未活跃')
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return i18n.t('从未活跃')
+  const diffMs = Date.now() - at.getTime()
+  if (diffMs < 60_000) return i18n.t('刚刚')
+  const minutes = Math.floor(diffMs / 60_000)
+  if (minutes < 60) return i18n.t('{{v0}} 分钟前', { v0: minutes })
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return i18n.t('{{v0}} 小时前', { v0: hours })
+  return i18n.t('{{v0}} 天前', { v0: Math.floor(hours / 24) })
+}
+
 /** 切语言时不用做任何事：这些函数每次调用都重新读 i18n.language，调用方会随重渲染刷新。 */
 export { i18n }

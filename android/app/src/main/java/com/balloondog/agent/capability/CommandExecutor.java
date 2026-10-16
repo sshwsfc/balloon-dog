@@ -16,6 +16,7 @@ import com.balloondog.agent.net.AgentApi;
 import com.balloondog.agent.net.ApiException;
 import com.balloondog.agent.service.AgentService;
 import com.balloondog.agent.service.LockWatchdogService;
+import com.balloondog.agent.service.LongevityGuard;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -47,6 +48,7 @@ import org.json.JSONObject;
  * stop_ambient           停止环境监听（当前段录完即上传）             { stopped: true }
  * remote_action          无障碍全局动作 / 拉起指定应用                { action, performed }
  * sync_calls_sms         立刻读取通话记录与短信并上报                { summary }
+ * self_check             自愈巡检 + 上报新的健康快照                  { healed, level, openGaps }
  * </pre>
  */
 public class CommandExecutor {
@@ -93,6 +95,14 @@ public class CommandExecutor {
          * <p>它是唯一一条「读类」指令：不改变设备状态，只把清单发上去。
          */
         void reportAppsNow();
+
+        /**
+         * 立刻体检一次并把新的健康快照上报（`self_check` 指令用）。
+         *
+         * @param healSummary 本次自愈做了什么（一句人话），写进指令结果里给家长看
+         * @return 上报成功时返回新快照，失败返回 null
+         */
+        JSONObject selfCheckNow(String healSummary);
     }
 
     public CommandExecutor(Context context, AgentStore store, ConfigApplier configApplier) {
@@ -146,6 +156,8 @@ public class CommandExecutor {
                     return doRemoteAction(command);
                 case Constants.CMD_SYNC_CALLS_SMS:
                     return doSyncCallsSms();
+                case Constants.CMD_SELF_CHECK:
+                    return doSelfCheck();
                 default:
                     return Outcome.fail("不支持的指令类型：" + command.type);
             }
@@ -201,7 +213,7 @@ public class CommandExecutor {
         // 所以把宽限精确设为「下一次本会锁定的时刻」——复用 LockState 的同一套推算，
         // 不自己拍一个 30 分钟。若未来 7 天内都不会锁，就是 0，不需要任何宽限。
         LockState.Inputs inputs = com.balloondog.agent.capability.LockEnforcer
-                .buildInputs(store, System.currentTimeMillis());
+                .buildInputs(store, TrustedClock.now());
         inputs.remoteLocked = false;
         inputs.grantUntil = 0L;
         long nextLockAt = LockState.findNextLockAt(inputs);
@@ -226,7 +238,7 @@ public class CommandExecutor {
         String untilText = command.payloadString("until");
         long untilMillis = com.balloondog.agent.model.JsonUtils.parseIsoMillis(untilText);
         if (untilMillis <= 0) {
-            untilMillis = System.currentTimeMillis() + minutes * 60_000L;
+            untilMillis = TrustedClock.now() + minutes * 60_000L;
         }
 
         store.setLockState(false, untilMillis);
@@ -447,6 +459,26 @@ public class CommandExecutor {
             // 原生类型
         }
         return Outcome.ok(result);
+    }
+
+    /**
+     * 家长点「重新检测」：先自愈，再把新的健康快照报上去。
+     *
+     * <p>顺序不能反：如果先上报再自愈，家长端会看到「还是那几条缺口」，
+     * 以为点了没用（实际上无障碍已经被重新打开了）。
+     *
+     * <p>{@code LongevityGuard.selfHeal} 是幂等的，且**必须真跑一次体检再回读结果** ——
+     * 乐观地把开关置绿是这个特性最不能犯的错：家长会因此以为管控已恢复。
+     */
+    private Outcome doSelfCheck() {
+        if (configApplier == null) {
+            return Outcome.fail("服务尚未就绪，无法体检");
+        }
+        // 自愈有几十次 binder 调用，但 self_check 是家长显式触发的低频操作，
+        // 直接在指令线程里同步做完，保证结果里带的是「体检之后」的真实状态。
+        String healSummary = LongevityGuard.selfHeal(appContext, store, "家长点重新检测");
+        JSONObject after = configApplier.selfCheckNow(healSummary);
+        return Outcome.ok(HealthReporter.selfCheckResult(appContext, store, healSummary, after));
     }
 
     // ============================================================

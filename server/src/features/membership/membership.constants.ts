@@ -251,9 +251,18 @@ export const PAY_CHANNELS = ['alipay', 'wechat'] as const;
 
 export type PayChannel = (typeof PAY_CHANNELS)[number];
 
-export const PAY_CHANNEL_LABELS: Record<PayChannel, string> = {
+/**
+ * 测试用的假渠道（规划 §5.4）。它不在 `PAY_CHANNELS` 里 —— 那个常量代表**真实**渠道，
+ * 会被后台筛选、对账口径引用；假渠道是另一类东西（不联网、能在测试里伪造回调），
+ * 所以单独一个名字，并在下单时额外校验「只允许在非生产环境 + 开关打开时使用」。
+ */
+export const PAY_CHANNEL_FAKE = 'fake';
+
+/** 注意是 `Record<string, string>`：订单里可能存着历史渠道名，视图层不能因为查不到就崩。 */
+export const PAY_CHANNEL_LABELS: Record<string, string> = {
   alipay: '支付宝',
   wechat: '微信支付',
+  [PAY_CHANNEL_FAKE]: '测试渠道（不会真的收钱）',
 };
 
 export const ORDER_STATUSES = ['pending', 'paid', 'failed', 'cancelled', 'refunded'] as const;

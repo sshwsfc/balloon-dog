@@ -12,7 +12,6 @@ import {
   Clock,
   Eye,
   KeyRound,
-  Link as LinkIcon,
   Loader2,
   MapPin,
   PartyPopper,
@@ -25,10 +24,8 @@ import { Button } from '@/components/ui/button'
 import { api, toUserMessage } from '@/services/api'
 import { isWechatBrowser, scanWithWechat } from '@/lib/wechat'
 import { InstallGuide } from '@/components/onboarding/InstallGuide'
-import { QrBlock } from '@/components/onboarding/QrBlock'
 import { ScanCodeDialog } from '@/components/onboarding/ScanCodeDialog'
-import { AGENT_APK_PATH, agentApkUrl } from '@/components/onboarding/apk'
-import { isLocalServerUrl } from '@/lib/serverUrl'
+import { AgentInstallCard } from '@/components/onboarding/AgentInstallCard'
 import {
   ONBOARDING_STEPS,
   finishOnboarding,
@@ -173,8 +170,6 @@ export function OnboardingPage() {
     }
   }, [current])
 
-  const apkUrl = agentApkUrl()
-
   return (
     <div className="page-shell page-shell--immersive">
       {/* ---------- 顶部进度 ---------- */}
@@ -255,36 +250,13 @@ export function OnboardingPage() {
             </div>
 
             {/* ---------- 下载孩子端：以「扫一扫」为主入口 ---------- */}
+            {/* 二维码 + 手动下载 + 排障引导统一在 AgentInstallCard 里：绑定对话框
+                也用它，两处各写一份必然会漂移（二维码和真实下载地址对不上时，
+                家长扫了没反应、连报错都没有）。 */}
             <section className="rounded-xl border border-gray-100 bg-white p-4">
-              <QrBlock
-                value={apkUrl}
-                caption="用孩子手机扫这个二维码"
-                hint="扫一扫就开始下载孩子端安装包（约 5MB）。要扫给「孩子那台手机」，不是你现在这台。"
-              />
-              {isLocalServerUrl() && (
-                <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-2.5">
-                  <p className="text-[11px] leading-relaxed text-amber-800">
-                    {t('当前对外地址是本机地址（{{v0}}），孩子手机扫了也打不开。请在仓库根目录 .env 里把 VITE_SERVER_URL 配成孩子手机能访问的域名，或先用下面的手动下载方式。', { v0: apkUrl })}
-                  </p>
-                </div>
-              )}
-            </section>
-
-            {/* ---------- 手动下载：不放大按钮，给地址与文字链即可 ---------- */}
-            <section className="rounded-xl bg-gray-50 p-3">
-              <p className="text-xs font-medium text-gray-700">{t('手动下载方式')}</p>
-              <p className="mt-1 text-[11px] leading-relaxed text-gray-500">
-                {t('扫码不方便时，用孩子手机浏览器打开下面地址：')}
-              </p>
-              <p className="mt-1.5 break-all font-mono text-[11px] text-gray-700">{apkUrl}</p>
-              <a
-                href={AGENT_APK_PATH}
-                download
-                className="mt-2 inline-flex items-center gap-1 text-[11px] text-[#07c160] underline"
-              >
-                <LinkIcon className="h-3 w-3" />
-                {t('也可以在这台手机上下载后，再传给孩子手机')}
-              </a>
+              {/* 排障引导（怎么传过去 / 怎么放开「禁止安装」）在下一步「install」里
+                  完整展示，这里不重复折叠一份。 */}
+              <AgentInstallCard withTroubleshooting={false} />
             </section>
 
             <div className="rounded-xl bg-gray-50 p-3">

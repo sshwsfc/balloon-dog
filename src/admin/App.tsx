@@ -10,7 +10,11 @@ import QuestionManagePage from './pages/QuestionManage'
 import QuizRecordPage from './pages/QuizRecords'
 import SmsAuditPage from './pages/SmsAudit'
 import MembershipPage from './pages/Membership'
+import PaymentsPage from './pages/Payments'
 import ReferralPage from './pages/Referral'
+import AlertsPage from './pages/Alerts'
+import FlagsPage from './pages/Flags'
+import TicketsPage from './pages/Tickets'
 import AdminManagePage from './pages/AdminManage'
 import OperationLogPage from './pages/OperationLogs'
 import SettingsPage from './pages/Settings'
@@ -62,7 +66,11 @@ export default function AdminApp() {
         <Route path="quiz-records" element={<QuizRecordPage />} />
         <Route path="sms-codes" element={<SmsAuditPage />} />
         <Route path="membership" element={<MembershipPage />} />
+        <Route path="payments" element={<PaymentsPage />} />
         <Route path="referral" element={<ReferralPage />} />
+        <Route path="alerts" element={<AlertsPage />} />
+        <Route path="flags" element={<FlagsPage />} />
+        <Route path="tickets" element={<TicketsPage />} />
         <Route
           path="admins"
           element={

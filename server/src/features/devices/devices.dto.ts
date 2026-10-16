@@ -1,5 +1,17 @@
 import { z } from 'zod';
-import { COMMAND_STATUSES, REMOTE_ACTIONS } from './devices.constants';
+import {
+  COMMAND_STATUSES,
+  DEVICE_MEMBER_ROLES,
+  GAP_FIXABILITIES,
+  GAP_IMPORTANCES,
+  HEALTH_LEVELS,
+  REMOTE_ACTIONS,
+  TIME_REQUEST_DEFAULT_MINUTES,
+  TIME_REQUEST_KINDS,
+  TIME_REQUEST_MAX_MINUTES,
+  TIME_REQUEST_MIN_MINUTES,
+  TIME_REQUEST_STATUSES,
+} from './devices.constants';
 
 const deviceIdParam = z.string().trim().min(1, '缺少设备 ID');
 
@@ -93,6 +105,68 @@ export const agentHeartbeatSchema = z.object({
   lockReason: z.string().trim().max(60).optional(),
 });
 
+/**
+ * 设备健康快照（规划 §1.1）。
+ *
+ * ── 为什么 `gaps` 由设备端给结构而不是服务端给 ──────────────────────────
+ * 「哪一项坏了」是设备端的事实（它读的是本机系统设置），
+ * 「为什么坏了、能不能修、怎么修」同样只有设备端知道：不同 ROM 上
+ * 电池白名单要不要点系统框、无障碍能不能被设备所有者写回去，结论都不一样。
+ * 服务端若自己维护一张对照表，ROM 一换就会给出错的修复步骤。
+ * 所以这里只校验形状与长度上限，内容一律原样透传给家长端。
+ *
+ * 注意 `gaps` 为空数组是**合法**的（一切正常），不是「全量替换漏传」——
+ * 本接口是整份快照 upsert，不做「空数组一律 422」那条规则。
+ */
+export const agentHealthGapSchema = z.object({
+  /** 稳定的机器可读标识（如 `accessibility`），供前端定位与去重，不展示。 */
+  id: z.string().trim().min(1).max(60),
+  label: z.string().trim().max(60).default(''),
+  /** 人话说明，家长端直接展示 —— 设备端下发的原文，不在服务端重写。 */
+  detail: z.string().trim().min(1).max(300),
+  importance: z.enum(GAP_IMPORTANCES).default('major'),
+  fixability: z.enum(GAP_FIXABILITIES).default('manual'),
+  /** 修复指引（分机型步骤的要点）。fixability=auto 时可为空。 */
+  fixHint: z.string().trim().max(300).default(''),
+});
+
+export type AgentHealthGap = z.infer<typeof agentHealthGapSchema>;
+
+export const agentHealthSchema = z.object({
+  /** 设备端自己下的结论；缺省时服务端用 deriveHealthLevel 兜底推算（老版本 Agent）。 */
+  level: z.enum(HEALTH_LEVELS).optional(),
+  gaps: z.array(agentHealthGapSchema).max(60).default([]),
+  /**
+   * 布尔开关快照。**刻意不写成固定 key 的 object**：设备端版本可能比服务端新
+   * （先发了新检查项）也可能更旧（还没实现某项）。固定 key 会让老设备上报直接 422，
+   * 或者让新项的缺失被 default 成一个假的 false —— 家长端会看到一条「被关掉」的假警报。
+   * 所以这里只约束「值必须是 boolean」，缺哪个 key 就是「未知」。
+   */
+  checks: z.record(z.boolean()).default({}),
+  /** 运行时权限快照：{ location: 'granted' | 'denied', ... }，同样容忍未知 key。 */
+  permissions: z.record(z.enum(['granted', 'denied'])).default({}),
+  /** OwnerHardening.audit() 的原样输出。 */
+  restrictions: z
+    .array(
+      z.object({
+        id: z.string().trim().min(1).max(60),
+        label: z.string().trim().max(60).default(''),
+        supported: z.boolean().default(true),
+        applied: z.boolean().default(false),
+      }),
+    )
+    .max(80)
+    .default([]),
+  serviceRunning: z.boolean().default(false),
+  /** 设备墙钟 − 服务端时间（秒）。规划 §1.6，用于发现「孩子把时间改了」。 */
+  clockSkewSeconds: z.coerce.number().int().min(-86_400).max(86_400).default(0),
+  healCount: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  lastHealAt: z.coerce.date().optional(),
+});
+
+/** 家长查健康页时可指定设备；缺省用「当前设备」。 */
+export const healthQuerySchema = z.object({ deviceId: deviceIdParam.optional() });
+
 /** 设备端回报指令执行结果。 */
 export const agentCommandResultSchema = z.object({
   status: z.enum(['succeeded', 'failed'], { required_error: '缺少执行结果' }),
@@ -134,6 +208,58 @@ export const agentAuditRequestSchema = z.object({
 });
 
 export const auditRequestIdSchema = z.object({ id: z.string().trim().min(1) });
+
+// ============================================================
+// 孩子的申请（§3.1）
+// ============================================================
+
+/**
+ * 设备端提交一条申请（加时 / 延后锁屏）。
+ *
+ * minutes 用 coerce + 默认值：设备端换版本时可能漏传，而「漏传分钟数」不该
+ * 变成一条 422 —— 孩子此刻正对着锁屏页，家长那边收到一个 30 分钟的默认申请
+ * 比收到一个报错有用得多。
+ */
+export const agentTimeRequestSchema = z.object({
+  kind: z.enum(TIME_REQUEST_KINDS).default('extend_time'),
+  minutes: z.coerce
+    .number()
+    .int()
+    .min(TIME_REQUEST_MIN_MINUTES)
+    .max(TIME_REQUEST_MAX_MINUTES)
+    .default(TIME_REQUEST_DEFAULT_MINUTES),
+  reason: z.string().trim().max(200).default(''),
+});
+
+/** POST /api/agent/sos —— 孩子点的求助；理由可选（最长 200 字）。 */
+export const agentSosSchema = z.object({
+  message: z.string().trim().max(200).optional(),
+});
+
+export const timeRequestIdSchema = z.object({ id: z.string().trim().min(1) });
+
+/** 家长端列表：默认只看待审批（家长打开页面就是来处理这些的），可显式查历史。 */
+export const timeRequestQuerySchema = z.object({
+  status: z.enum([...TIME_REQUEST_STATUSES, 'all']).default('pending'),
+});
+
+/**
+ * 家长审批。
+ *
+ * `minutes` 可选且**允许改小**：孩子申请 120 分钟、家长给 30 分钟是常态，
+ * 强迫家长只能原样批准（或先拒绝再手动临时解锁）会把一个高频动作拆成两步。
+ * 不允许改大：申请 5 分钟却批 240 分钟只会是误操作。
+ */
+export const reviewTimeRequestSchema = z.object({
+  status: z.enum(['approved', 'rejected']),
+  minutes: z.coerce
+    .number()
+    .int()
+    .min(TIME_REQUEST_MIN_MINUTES)
+    .max(TIME_REQUEST_MAX_MINUTES)
+    .optional(),
+  note: z.string().trim().max(200).default(''),
+});
 
 // ============================================================
 // 逐应用用量（§4）
@@ -235,4 +361,29 @@ export const remoteActionSchema = z
   .refine((v) => v.action !== 'open_app' || Boolean(v.packageName), {
     message: 'open_app 动作必须提供 packageName',
     path: ['packageName'],
+  });
+
+/** 邀请一位家长共同守护这台设备（规划 §5.1）。按手机号找人 —— 家长之间只互知手机号。 */
+export const inviteDeviceMemberSchema = z.object({
+  phone: z
+    .string()
+    .trim()
+    .regex(/^1[3-9]\d{9}$/, '请输入正确的手机号'),
+  role: z.enum(DEVICE_MEMBER_ROLES).default('viewer'),
+  nickname: z.string().trim().max(20).optional(),
+});
+
+export const deviceMemberIdSchema = z.object({
+  // 参数名必须和路由里的 `:memberId` 一致 —— 写成 `id` 会让每个改角色/移除请求
+  // 都在校验阶段 422（这个错法很隐蔽：接口「挂了」，但日志里看不出是谁没权限）
+  memberId: z.string().trim().min(1, '缺少成员 ID'),
+});
+
+export const updateDeviceMemberSchema = z
+  .object({
+    role: z.enum(DEVICE_MEMBER_ROLES).optional(),
+    nickname: z.string().trim().max(20).optional(),
+  })
+  .refine((v) => v.role !== undefined || v.nickname !== undefined, {
+    message: '没有要修改的内容',
   });

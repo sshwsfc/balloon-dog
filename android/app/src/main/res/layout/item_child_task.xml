@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  孩子端「今日任务」的一行（规划 §5.2）：勾选框 + 任务名。
+  一行只有这两样东西 —— 家长布置什么就显示什么，孩子端不做排序、不做分组、也不做删除。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingTop="2dp"
+    android:paddingBottom="2dp">
+
+    <CheckBox
+        android:id="@+id/checkTask"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:contentDescription="标记完成"
+        android:minWidth="40dp" />
+
+    <TextView
+        android:id="@+id/textTaskTitle"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="6dp"
+        android:layout_weight="1"
+        android:textColor="#FF1A1A1A"
+        android:textSize="15sp"
+        tools:text="练琴 30 分钟" />
+
+</LinearLayout>

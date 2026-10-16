@@ -13,7 +13,11 @@ import {
 
 export const createOrderSchema = z.object({
   planCode: z.string().min(1, '请选择套餐').max(64),
-  payChannel: z.enum(PAY_CHANNELS, { message: '请选择支付方式' }),
+  /**
+   * 真实渠道只有微信/支付宝；`fake` 是自动化测试用的假渠道，
+   * 它在 service 里还会再过一道「非生产 + 开关打开」的闸（见 createOrder）。
+   */
+  payChannel: z.enum([...PAY_CHANNELS, 'fake'], { message: '请选择支付方式' }),
   /** 邀请返现优惠券（可选）。面额与有效性一律以服务端为准。 */
   couponId: z.string().trim().max(64).optional(),
 });

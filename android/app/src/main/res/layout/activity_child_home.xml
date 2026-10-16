@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  孩子端主页（规划 §3.2）。
+
+  文案直接写中文：孩子端从设计上不做 i18n（和锁定页、说明页一致），
+  只有真正会被布局引用的短句才进 strings.xml。
+
+  页面顺序就是孩子关心的顺序：今天还剩多少 → 今天要做什么 → 怎么赚时长 → 怎么找家长。
+  进度条用剩余百分比（不是已用）：孩子看的是「我还有多少」，不是「我被扣了多少」。
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#FFF6F6F6"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/title_child_home"
+            android:textColor="#FF1A1A1A"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <!-- 今天还剩多少：三种情况分开说（没设额度 / 已经用完 / 还剩多久） -->
+        <TextView
+            android:id="@+id/textRemaining"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:textColor="@color/wechat_green"
+            android:textSize="26sp"
+            android:textStyle="bold"
+            tools:text="今天还剩 1小时20分钟" />
+
+        <ProgressBar
+            android:id="@+id/progressRemaining"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:max="100"
+            android:progress="100"
+            android:progressTint="@color/wechat_green" />
+
+        <TextView
+            android:id="@+id/textUsage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textColor="#FF8A8A8A"
+            android:textSize="13sp"
+            tools:text="今天已用 40分钟，额度 2小时" />
+
+        <!-- 现在能不能用 / 接下来会怎样 -->
+        <TextView
+            android:id="@+id/textStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:textColor="#FF1A1A1A"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            tools:text="现在可以正常使用" />
+
+        <TextView
+            android:id="@+id/textNext"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:lineSpacingExtra="3dp"
+            android:textColor="#FF8A8A8A"
+            android:textSize="13sp"
+            tools:text="1小时20分钟后进入休息（作息：晚上睡觉）" />
+
+        <!--
+          今日任务（规划 §5.2）：整块由 Java 决定显不显示 —— 一条都没有时不出现，
+          「家长还没有布置任务」这种话留给家长端说，孩子端只显示真的要做的事。
+          勾选是唯一动作，勾上/取消都要能对上服务端那一条（网络在 Java 里，离开主线程）。
+        -->
+        <LinearLayout
+            android:id="@+id/taskSection"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:orientation="vertical"
+            android:visibility="gone"
+            tools:visibility="visible">
+
+            <TextView
+                android:id="@+id/textTasksHeader"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#FF1A1A1A"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                tools:text="「小明」今天的任务" />
+
+            <TextView
+                android:id="@+id/textTasksProgress"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textColor="#FF8A8A8A"
+                android:textSize="13sp"
+                tools:text="已完成 1/3" />
+
+            <LinearLayout
+                android:id="@+id/taskList"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="vertical" />
+
+        </LinearLayout>
+
+        <!-- 怎么赚时长：家长没开答题时整颗按钮不出现（留个点不动的按钮更让人困惑） -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonQuiz"
+            style="@style/ButtonPrimary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:text="@string/action_quiz" />
+
+        <!-- 怎么找家长：求助（服务端发 danger 级通知）与直接拨号 -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonSos"
+            style="@style/ButtonPrimary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/action_sos" />
+
+        <TextView
+            android:id="@+id/textSosState"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:lineSpacingExtra="3dp"
+            android:textColor="#FF8A8A8A"
+            android:textSize="13sp"
+            tools:text="已经通知家长了" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonCall"
+            style="@style/ButtonSecondary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/action_call_parent" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="24dp"
+            android:background="#FFE5E5E5" />
+
+        <!-- 谁在守护这台设备（来自服务端；拿不到就如实说，不假装能打通） -->
+        <TextView
+            android:id="@+id/textParent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:textColor="#FF1A1A1A"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            tools:text="守护这台设备的是：妈妈" />
+
+        <TextView
+            android:id="@+id/textParentHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:lineSpacingExtra="3dp"
+            android:textColor="#FF8A8A8A"
+            android:textSize="12sp"
+            tools:text="家长手机号 138****8000" />
+
+        <!--
+          知情说明（规划 §3.4）：放在页面最底部，但按钮文案与副标题让孩子知道
+          「这里写着这台设备的真相」，而不是一个装饰性的「关于」。
+        -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonGuardianInfo"
+            style="@style/ButtonSecondary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="@string/action_guardian_info" />
+
+    </LinearLayout>
+</ScrollView>

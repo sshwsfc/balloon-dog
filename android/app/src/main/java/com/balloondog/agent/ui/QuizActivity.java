@@ -22,6 +22,7 @@ import com.balloondog.agent.model.RemoteQuestion;
 import com.balloondog.agent.net.AgentApi;
 import com.balloondog.agent.net.ApiException;
 import com.balloondog.agent.service.AgentService;
+import com.balloondog.agent.capability.TrustedClock;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -266,7 +267,7 @@ public class QuizActivity extends AppCompatActivity {
             // 这正是把倒计时做成纯计算结果、而不是自己维护一个计时器的好处。
             long until = result.tempUnlockUntil > 0
                     ? result.tempUnlockUntil
-                    : System.currentTimeMillis() + result.rewardMinutes * 60_000L;
+                    : TrustedClock.now() + result.rewardMinutes * 60_000L;
             store.setLockState(false, until);
             store.setManualUnlockUntil(0L);
 
@@ -276,7 +277,7 @@ public class QuizActivity extends AppCompatActivity {
                 sb.append("，").append(getString(R.string.quiz_reward_prefix))
                         .append(result.rewardMinutes).append(getString(R.string.quiz_minutes));
             }
-            sb.append("。可用至 ").append(JsonUtils.humanizeDuration(until - System.currentTimeMillis()))
+            sb.append("。可用至 ").append(JsonUtils.humanizeDuration(until - TrustedClock.now()))
                     .append("后结束。");
             binding.textFeedback.setText(sb.toString());
 

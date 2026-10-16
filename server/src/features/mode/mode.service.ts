@@ -1,6 +1,7 @@
 import type { ChildDevice } from '@prisma/client';
 import crypto from 'node:crypto';
 import { prisma } from '../../prisma';
+import { notificationsService } from '../notifications/notifications.service';
 import { BadRequestError, NotFoundError } from '../../errors';
 import { parsePagination } from '../../shared/deviceScope';
 import { signAppIconPath } from './appIconUrl';
@@ -563,6 +564,33 @@ export const modeService = {
     const cutoff = new Date(now - EVENT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
     await prisma.deviceEvent.deleteMany({ where: { deviceId: device.id, createdAt: { lt: cutoff } } });
 
+    // 进出安全区也给家长发站内通知（规划 §2.1）：动态是「设备日志」，
+    // 而「孩子到学校了 / 离开学校了」是家长**当下就想知道**的事。
+    // 去重键带上设备给的时刻：同一条事件重传会命中同一条通知，
+    // 而真实发生的第二次进出会得到新的键（各自的时刻不同）。
+    // 设备未认领时没有家长可通知，直接跳过。
+    if (device.userId) {
+      for (const row of rows) {
+        if (row.type !== 'geofence_enter' && row.type !== 'geofence_exit') continue;
+        const entering = row.type === 'geofence_enter';
+        // detail 形如「进入 学校」/「离开 学校」（设备端拼的中文）。设备端是中文硬编码的，
+        // 所以这里把「方向 + 地点」拆开：方向用我们的模板（能翻译），地点原样当参数
+        //（那是家长自己起的安全区名，不是译文）。拆不出来就退回原文，宁可中文也别丢信息。
+        const place = parseGeofencePlace(row.detail);
+        await notificationsService.notify({
+          userId: device.userId,
+          deviceId: device.id,
+          type: row.type,
+          // 带变量的句子写成模板 + 参数：整句拼接就不再是一个 i18n key，英文界面会露出中文
+          title: entering ? '{{v0}} 进入了安全区' : '{{v0}} 离开了安全区',
+          titleParams: { v0: device.name },
+          body: place ? (entering ? '进入了 {{v0}}' : '离开了 {{v0}}') : row.detail,
+          bodyParams: place ? { v0: place } : null,
+          dedupeKey: `geofence:${device.id}:${row.type}:${row.createdAt.getTime()}`,
+        });
+      }
+    }
+
     return { success: true, count: rows.length };
   },
 };
@@ -570,6 +598,12 @@ export const modeService = {
 // ============================================================
 // 内部工具
 // ============================================================
+
+/** 「进入 学校」→「学校」。设备端固定拼这个格式；解析不出来返回 null（调用方回退到原文）。 */
+function parseGeofencePlace(detail: string): string | null {
+  const matched = /^(?:进入|离开)\s*(.+)$/.exec(detail.trim());
+  return matched ? matched[1] : null;
+}
 
 function clampEventTime(at: number | undefined, now: number): Date {
   const WEEK = 7 * 24 * 60 * 60 * 1000;

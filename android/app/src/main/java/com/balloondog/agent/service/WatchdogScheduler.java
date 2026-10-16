@@ -14,6 +14,7 @@ import androidx.annotation.Nullable;
 
 import com.balloondog.agent.data.Constants;
 import com.balloondog.agent.data.EventLog;
+import com.balloondog.agent.capability.TrustedClock;
 
 /**
  * 保活看门狗（需求 2「不能被杀死 / 保持长活」的兜底链路）。
@@ -142,7 +143,12 @@ public final class WatchdogScheduler {
      * 并且会在日志里说明，不做静默降级。
      */
     public static void scheduleBoundary(Context context, long atMillis) {
-        if (atMillis <= System.currentTimeMillis()) return;
+        // 家长配的是「22:00」这种墙钟时刻，但闹钟**不能**用 RTC 排：
+        // 孩子把系统时间一改，RTC 闹钟就跟着错位（改早＝提前锁、改晚＝永远不锁）。
+        // 用可信时钟算出「还有多久」，再交给单调的 ELAPSED_REALTIME 去数（规划 §1.6）。
+        long delay = atMillis - TrustedClock.now();
+        if (delay <= 0) return;
+        long triggerAt = SystemClock.elapsedRealtime() + delay;
         AlarmManager manager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
         if (manager == null) return;
 
@@ -156,9 +162,9 @@ public final class WatchdogScheduler {
 
         try {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || manager.canScheduleExactAlarms()) {
-                manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMillis, pending);
+                manager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pending);
             } else {
-                manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMillis, pending);
+                manager.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pending);
                 EventLog.warn("未获得精确闹钟权限，锁屏时间点可能略有延迟");
             }
         } catch (SecurityException e) {

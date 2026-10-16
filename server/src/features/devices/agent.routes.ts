@@ -21,6 +21,9 @@ export const agentRoutes = Router();
 agentRoutes.post('/register', ah(controller.register));
 
 agentRoutes.post('/heartbeat', authenticateDevice, ah(controller.heartbeat));
+// 健康快照（规划 §1.1）：设备端把「哪几个开关是开的」整份铺上来。
+// 与心跳分开是为了让旧版 Agent 不受影响 —— 老设备不报 health，只是健康页显示「尚未检测」。
+agentRoutes.post('/health', authenticateDevice, ah(controller.reportHealth));
 agentRoutes.get('/commands/next', authenticateDevice, ah(controller.nextCommand));
 agentRoutes.post('/commands/:commandId/result', authenticateDevice, ah(controller.reportCommandResult));
 agentRoutes.post('/locations', authenticateDevice, ah(controller.reportLocation));

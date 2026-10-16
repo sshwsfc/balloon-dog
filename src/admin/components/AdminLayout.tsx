@@ -3,11 +3,14 @@ import { useState } from 'react'
 import {
   Activity,
   BarChart3,
+  BellRing,
   BookOpen,
   ChevronLeft,
   ClipboardList,
   Cpu,
+  CreditCard,
   Crown,
+  Headset,
   KeyRound,
   LogOut,
   Menu,
@@ -15,6 +18,7 @@ import {
   Settings,
   Share2,
   ShieldCheck,
+  ToggleLeft,
   Users,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -33,6 +37,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: '/', label: '数据看板', icon: BarChart3, end: true },
+  { to: '/alerts', label: '告警大盘', icon: BellRing },
   { to: '/users', label: '家长账号', icon: Users },
   { to: '/devices', label: '设备管理', icon: Cpu },
   { to: '/commands', label: '指令监控', icon: Activity },
@@ -40,7 +45,10 @@ const NAV: NavItem[] = [
   { to: '/quiz-records', label: '答题记录', icon: ClipboardList },
   { to: '/sms-codes', label: '验证码审计', icon: MessageSquare },
   { to: '/membership', label: '会员管理', icon: Crown },
+  { to: '/payments', label: '支付', icon: CreditCard },
   { to: '/referral', label: '邀请返现', icon: Share2 },
+  { to: '/flags', label: '灰度开关', icon: ToggleLeft },
+  { to: '/tickets', label: '客服工单', icon: Headset },
   { to: '/admins', label: '管理员', icon: ShieldCheck, superOnly: true },
   { to: '/logs', label: '操作日志', icon: KeyRound },
   { to: '/settings', label: '账号设置', icon: Settings },

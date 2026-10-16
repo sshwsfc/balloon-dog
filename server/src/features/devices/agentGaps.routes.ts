@@ -18,6 +18,17 @@ agentGapsRoutes.use(authenticateDevice);
 agentGapsRoutes.post('/audit-requests', ah(controller.createAuditRequest));
 agentGapsRoutes.get('/audit-requests/:id', ah(controller.getAuditRequest));
 
+// §3.1 孩子的申请：加时 / 延后锁屏（申请 + 轮询审批结果）
+agentGapsRoutes.post('/time-requests', ah(controller.createTimeRequest));
+agentGapsRoutes.get('/time-requests/:id', ah(controller.getTimeRequest));
+
+// §3.2 孩子端主页：绑定信息 + 求助
+agentGapsRoutes.get('/child-home', ah(controller.getChildHome));
+agentGapsRoutes.post('/sos', ah(controller.submitSos));
+
+// §5.2 今日任务：孩子在自己的设备上勾掉（或取消）
+agentGapsRoutes.post('/tasks/:taskId', ah(controller.setTaskDone));
+
 // §4 今日逐应用用量（全量替换）
 agentGapsRoutes.post('/app-usage', ah(controller.reportAppUsage));
 

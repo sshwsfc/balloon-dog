@@ -100,7 +100,7 @@ public final class LockReassertor {
      */
     public boolean reassertIfNeeded(String trigger, boolean force) {
         LockState state = LockState.compute(
-                LockEnforcer.buildInputs(store, System.currentTimeMillis()));
+                LockEnforcer.buildInputs(store, TrustedClock.now()));
         if (!state.locked) {
             consecutiveFailures = 0;
             return false;

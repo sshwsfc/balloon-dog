@@ -57,6 +57,14 @@ public final class LongevityGuard {
     private static volatile long lastHealAt = 0L;
     private static volatile String lastProblemSignature = "";
     /**
+     * 自愈成功执行的次数。
+     *
+     * <p>家长端要能回答一个问题：「这套管控到底还在不在自己维持？」
+     * 数字一直不涨，往往才是真信号（进程被冻死了）。所以只在 {@link #selfHeal} 真正跑完时 +1，
+     * 只读巡检不算。
+     */
+    private static volatile int healCount = 0;
+    /**
      * 上一次上报过的缺口清单。
      *
      * <p>存清单而不是只存签名，是为了能算出「这次新增了哪几条」「哪几条修好了」：
@@ -259,37 +267,108 @@ public final class LongevityGuard {
      */
     public static List<String> problems(Context context, AgentStore store) {
         List<String> problems = new ArrayList<>();
+        for (Gap gap : gaps(context, store)) {
+            problems.add(gap.detail);
+        }
+        return problems;
+    }
+
+    /**
+     * 一条缺口的结构化形态。
+     *
+     * <p>{@code detail} 就是原来 {@link #problems} 里那句中文 —— 家长端直接展示，
+     * <b>不在服务端或家长端重写</b>，否则迟早出现「设备说无障碍被关、家长端说悬浮窗被关」。
+     * 其余字段是给家长端排序与给「一键修复」分组用的：
+     *
+     * <ul>
+     *   <li>{@code critical}：关掉它等于整套管控失效（设备所有者 / 无障碍看门狗）</li>
+     *   <li>{@code importance}：非关键项的轻重（major 影响体验，minor 只是提醒）</li>
+     *   <li>{@code fixability}：{@code auto} = 点「重新检测」就能修好；
+     *       {@code manual} = 必须有人在孩子手机上点系统框；{@code none} = 系统限制，谁也修不了</li>
+     *   <li>{@code fixHint}：manual 项的分机型操作要点，家长端照着念就能做</li>
+     * </ul>
+     */
+    public static final class Gap {
+        public final String id;
+        public final String label;
+        public final String detail;
+        public final boolean critical;
+        public final String importance;
+        public final String fixability;
+        public final String fixHint;
+
+        Gap(String id, String label, String detail, boolean critical,
+            String importance, String fixability, String fixHint) {
+            this.id = id;
+            this.label = label;
+            this.detail = detail;
+            this.critical = critical;
+            this.importance = importance;
+            this.fixability = fixability;
+            this.fixHint = fixHint == null ? "" : fixHint;
+        }
+    }
+
+    /**
+     * 只读巡检：列出当前所有「能让孩子绕过管控」的缺口。
+     *
+     * <p>每一条的 {@code detail} 都是人话，直接可展示给家长。
+     * 这是**唯一的事实来源**：{@link #problems} 与健康上报都从这里派生。
+     */
+    public static List<Gap> gaps(Context context, AgentStore store) {
+        List<Gap> gaps = new ArrayList<>();
         if (!LockController.isDeviceOwner(context)) {
-            problems.add("设备所有者已被撤销：防卸载、防强停全部失效，孩子可直接卸载本应用");
+            gaps.add(new Gap("deviceOwner", "设备所有者",
+                    "设备所有者已被撤销：防卸载、防强停全部失效，孩子可直接卸载本应用",
+                    true, "critical", "manual",
+                    "只能重新激活：把安装包重新装一次并同意「激活设备所有者」，或按 README 用 ADB 重新下发"));
         }
         if (!LockController.isAdminActive(context)) {
-            problems.add("设备管理器未激活：锁屏能力降级到悬浮窗");
+            gaps.add(new Gap("adminActive", "设备管理器",
+                    "设备管理器未激活：锁屏能力降级到悬浮窗",
+                    false, "major", "auto", ""));
         }
         if (!LockController.canDrawOverlays(context)) {
-            problems.add("悬浮窗权限已关闭：锁定页只能靠无障碍看门狗拉回，按返回键有概率逃出");
+            gaps.add(new Gap("overlay", "悬浮窗权限",
+                    "悬浮窗权限已关闭：锁定页只能靠无障碍看门狗拉回，按返回键有概率逃出",
+                    false, "major", "manual",
+                    "设置 → 应用 → 气球狗 → 显示在其他应用上层（各机型入口不同，一般也叫「悬浮窗」）"));
         }
         if (!LockWatchdogService.isEnabledInSettings(context)) {
-            problems.add("无障碍看门狗已被关闭：孩子可下拉通知栏、进设置、按最近任务绕过锁定");
+            gaps.add(new Gap("accessibility", "无障碍看门狗",
+                    "无障碍看门狗已被关闭：孩子可下拉通知栏、进设置、按最近任务绕过锁定",
+                    true, "critical", "auto", ""));
         }
         if (!isIgnoringBatteryOptimizations(context)) {
-            problems.add("未加入电池优化白名单：息屏后可能被 Doze 冻结，心跳与指令会延迟");
+            gaps.add(new Gap("batteryWhitelist", "电池优化白名单",
+                    "未加入电池优化白名单：息屏后可能被 Doze 冻结，心跳与指令会延迟",
+                    false, "major", "manual",
+                    "设置 → 电池 → 电池优化，把气球狗设为「不优化」（部分机型叫「允许后台活动」）"));
         }
         // 判据用 isWanted()（开关开着<b>且</b>黑名单非空）而不是光看开关：
         // 黑名单为空时本来就不会建 VPN，那种情况报缺口是假警报。
         if (DnsFilterVpnService.isWanted(context) && !DnsFilterVpnService.hasSystemConsent(context)) {
-            problems.add("网址拦截的 VPN 授权已被撤销：DNS 拦截已停");
+            gaps.add(new Gap("vpnConsent", "网址拦截授权",
+                    "网址拦截的 VPN 授权已被撤销：DNS 拦截已停",
+                    false, "major", "manual",
+                    "设置 → 网络 → VPN，重新允许气球狗的连接请求"));
         }
         // 永久 VPN 绑定只查「还在不在」：少了它，孩子从快捷开关一划就能断掉网址拦截。
         if (DnsFilterVpnService.isWanted(context) && !DnsFilterVpnService.isAlwaysOn(context)) {
-            problems.add("网址拦截未设为「永久 VPN」：孩子可从快捷开关断开（每次自愈会重新绑定）");
+            gaps.add(new Gap("vpnAlwaysOn", "永久 VPN 绑定",
+                    "网址拦截未设为「永久 VPN」：孩子可从快捷开关断开（每次自愈会重新绑定）",
+                    false, "minor", "auto", ""));
         }
         // 「使用情况访问」是 appop，设备所有者代授在 Android 13 上被系统拒绝（见
         // PermissionGranter 的实测注释），所以只能检测 + 上报。
         // 刻意只在「家长真的在用需要它的功能」时才报：没配限额却报这条是假警报。
         if (!AppUsageTracker.hasPermission(context)
                 && (store.isTimePlanEnabled() || !store.getAppLimitRules().isEmpty())) {
-            problems.add("「使用情况访问」权限已被关闭：逐应用限时与今日时长统计不会生效，"
-                    + "请在系统设置 → 应用 → 特殊应用权限 → 使用情况访问里重新开启");
+            gaps.add(new Gap("usageAccess", "使用情况访问",
+                    "「使用情况访问」权限已被关闭：逐应用限时与今日时长统计不会生效，"
+                            + "请在系统设置 → 应用 → 特殊应用权限 → 使用情况访问里重新开启",
+                    false, "major", "manual",
+                    "设置 → 应用 → 特殊应用权限 → 使用情况访问 → 气球狗 → 允许"));
         }
         if (store.isHardeningEnabled() && LockController.isDeviceOwner(context)) {
             for (OwnerHardening.Item item : OwnerHardening.audit(context)) {
@@ -301,10 +380,22 @@ public final class LongevityGuard {
                 // detail 为空时不要拼出「禁止修改语言/区域（）」这种给人看的怪句子
                 String detail = item.detail == null || item.detail.isEmpty()
                         ? "" : "（" + item.detail + "）";
-                problems.add("加固项未生效：" + item.label + detail);
+                gaps.add(new Gap("restriction:" + item.id, item.label,
+                        "加固项未生效：" + item.label + detail,
+                        false, "major", "auto", ""));
             }
         }
-        return problems;
+        return gaps;
+    }
+
+    /** 自愈执行次数（家长端「自动修复次数」）。 */
+    public static int healCount() {
+        return healCount;
+    }
+
+    /** 最近一次自愈时间（毫秒时间戳，0 表示还没跑过）。 */
+    public static long lastHealAt() {
+        return lastHealAt;
     }
 
     /** 界面上直接铺开显示的长活状态。 */
@@ -367,6 +458,7 @@ public final class LongevityGuard {
         List<String> problems = problems(context, store);
         report(context, problems, reason);
         lastHealAt = System.currentTimeMillis();
+        healCount++;
 
         String summary = TextUtils.join("；", actions)
                 + (problems.isEmpty() ? "；巡检无缺口" : "；仍有 " + problems.size() + " 项缺口");

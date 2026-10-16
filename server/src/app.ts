@@ -19,8 +19,20 @@ import {
 } from './features/devices/devices.routes';
 import { agentRoutes } from './features/devices/agent.routes';
 import { adminRoutes } from './features/admin/admin.routes';
+import { adminAudit } from './features/admin/admin.audit';
+import { flagAdminRoutes } from './features/flags/flags.controller';
+import { alertAdminRoutes } from './features/opsalert/alerts.controller';
+import { supportRoutes, ticketAdminRoutes } from './features/support/support.controller';
 import { quizRoutes } from './features/quiz/quiz.controller';
 import { locationRoutes, safeZoneRoutes } from './features/locations/locations.controller';
+import { childrenRoutes } from './features/children/children.controller';
+import { privacyRoutes } from './features/privacy/privacy.controller';
+import {
+  paymentAdminRoutes,
+  paymentNotifyRoutes,
+  paymentRoutes,
+} from './features/payments/payments.controller';
+import { notificationRoutes } from './features/notifications/notifications.controller';
 import { mediaRoutes } from './features/media/media.routes';
 import { lockPolicyRoutes, scheduleRoutes } from './features/schedule/schedule.controller';
 import {
@@ -69,6 +81,15 @@ export function createApp(): Express {
   // 4mb 而不是 1mb：孩子端上报应用清单时会顺带带上应用图标的 base64
   // （每个约 2~4KB，几百个可启动应用就是几百 KB）。图标只在应用有增删时才会重传，
   // 平时心跳/上报都是小包。
+  //
+  // 支付回调**必须在 json 解析之前**：微信 v3 的签名是对原始字节算的，
+  // 先 parse 再签名比对必然失败。所以先用 express.raw 把这一条路径截下来
+  // （`type: '*/*'` 是因为支付宝的回调是 form-urlencoded、微信是 JSON）。
+  app.use(
+    '/api/payments/notify',
+    express.raw({ type: '*/*', limit: '256kb' }),
+    paymentNotifyRoutes,
+  );
   app.use(express.json({ limit: '4mb' }));
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
   app.use(requestId);
@@ -131,6 +152,23 @@ export function createApp(): Express {
   app.use('/api/quiz', quizRoutes);
   app.use('/api/locations', locationRoutes);
   app.use('/api/safe-zones', safeZoneRoutes);
+  // §5.2 孩子档案与今日任务：账号级（不是设备级），档案属于家长
+  app.use('/api/children', childrenRoutes);
+  // §5.3 合规：同意留痕 / 数据导出 / 注销（账号级）
+  app.use('/api/privacy', privacyRoutes);
+  app.use('/api/payments', paymentRoutes);
+  // §5.5 客服工单：家长提交与查看进度（入口由灰度开关控制）
+  app.use('/api/support', supportRoutes);
+  // 后台审计挂在整个 /api/admin 前缀上，而不是某个 router 内部：后台路由分散在
+  // /api/admin、/api/admin/payments、/api/admin/flags 等多个挂载点，任何一个新挂载点
+  // 忘了带审计，都会在 OperationLog 里留下一个看不见的缺口（这正是 payments 曾经的漏洞）。
+  // 放在鉴权之前，失败与 401 的尝试同样被记录。
+  app.use('/api/admin', adminAudit);
+  // 管理端的支付路由要挂在 /api/admin 之前，否则会被 adminRoutes 先接走
+  app.use('/api/admin/payments', paymentAdminRoutes);
+  app.use('/api/admin/flags', flagAdminRoutes);
+  app.use('/api/admin/alerts', alertAdminRoutes);
+  app.use('/api/admin/tickets', ticketAdminRoutes);
   app.use('/api/media', mediaRoutes);
   app.use('/api/lock-policy', lockPolicyRoutes);
   app.use('/api/schedules', scheduleRoutes);
@@ -150,6 +188,7 @@ export function createApp(): Express {
   app.use('/api/eye-care', eyeCareRoutes);
   app.use('/api/app-plugins', appPluginRoutes);
   app.use('/api/device-events', deviceEventRoutes);
+  app.use('/api/notifications', notificationRoutes);
   app.use('/api/agent', agentRoutes);
   app.use('/api/admin', adminRoutes);
 

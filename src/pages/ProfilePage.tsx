@@ -3,21 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Bell,
-  ChevronRight,
-  Crown,
-  Gift,
-  Image as ImageIcon,
-  Lightbulb,
-  LogOut,
-  Mail,
-  Plus,
-  Shield,
-  Smartphone,
-  Sparkles,
-  User,
-} from 'lucide-react'
+import { Baby, Bell, ChevronRight, Crown, Gift, Hourglass, Image as ImageIcon, LifeBuoy, Lightbulb, LogOut, Mail, Plus, Shield, Smartphone, Sparkles, User } from 'lucide-react'
 import { LanguageSetting } from '@/components/LanguageSetting'
 import { MembershipBadge } from '@/components/MembershipGate'
 import { resetOnboarding, useOnboarding } from '@/hooks/useOnboarding'
@@ -39,6 +25,24 @@ export function ProfilePage() {
   const onboardingDone = Boolean(onboarding.finishedAt)
   const [devices, setDevices] = useState<Device[]>([])
   const [deviceError, setDeviceError] = useState<string | null>(null)
+  // 未读消息数：放在「我的」这一页是因为它是家长扫一眼就会来的地方。
+  // 失败就静默当 0 —— 一个角标不值得弹错误提示。
+  const [unreadCount, setUnreadCount] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    api
+      .getNotificationUnreadCount()
+      .then((res) => {
+        if (!cancelled) setUnreadCount(res.unreadCount)
+      })
+      .catch(() => {
+        /* 静默：角标不是关键路径 */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const fetchDevices = useCallback(() => api.getDevices(), [])
 
@@ -74,10 +78,38 @@ export function ProfilePage() {
     navigate('/login', { replace: true })
   }
 
+  // 待审批的申请条数：跨设备求和。家长可能有多台设备，而「我的」这一页
+  // 不该逼家长先在脑子里选中某一台才知道有没有人在等他。
+  const pendingRequests = devices.reduce((sum, d) => sum + (d.pendingTimeRequests ?? 0), 0)
+
   const menuItems = [
     { icon: User, title: t('个人信息'), desc: t('修改昵称、邮箱'), onClick: () => toast.info(t('个人信息编辑即将上线')) },
-    { icon: Bell, title: t('通知设置'), desc: t('消息提醒、推送通知'), onClick: () => toast.info(t('通知设置即将上线')) },
-    { icon: Shield, title: t('隐私安全'), desc: t('密码、指纹、面部识别'), onClick: () => toast.info(t('隐私安全设置即将上线')) },
+    {
+      icon: Bell,
+      title: t('消息中心'),
+      desc: unreadCount > 0 ? t('{{v0}} 条未读', { v0: unreadCount }) : t('设备异常、安全区、装应用申请'),
+      badge: unreadCount,
+      onClick: () => navigate('/notifications'),
+    },
+    {
+      icon: Hourglass,
+      title: t('孩子的申请'),
+      desc:
+        pendingRequests > 0
+          ? t('{{v0}} 条等你回应', { v0: pendingRequests })
+          : t('加时、延后锁屏的申请会出现在这里'),
+      badge: pendingRequests,
+      onClick: () => navigate('/time-requests'),
+    },
+    { icon: Bell, title: t('通知设置'), desc: t('消息提醒、推送通知'), onClick: () => navigate('/notifications/settings') },
+    {
+      icon: Baby,
+      title: t('孩子档案'),
+      desc: t('年龄、学校、设备归属与今日任务'),
+      onClick: () => navigate('/children'),
+    },
+    { icon: Shield, title: t('合规与隐私'), desc: t('监护授权、数据导出与注销账号'), onClick: () => navigate('/privacy') },
+    { icon: LifeBuoy, title: t('帮助与反馈'), desc: t('遇到问题就描述一下，客服在工单里回复'), onClick: () => navigate('/support') },
   ]
 
   return (
@@ -337,7 +369,14 @@ export function ProfilePage() {
                       <p className="text-xs text-gray-400 mt-0.5">{item.desc}</p>
                     </div>
                   </div>
-                  <ChevronRight className="w-5 h-5 text-gray-300" />
+                  <div className="flex items-center space-x-2">
+                    {'badge' in item && item.badge ? (
+                      <span className="px-1.5 py-0.5 rounded-full bg-red-500 text-white text-[10px] leading-none">
+                        {item.badge > 99 ? '99+' : item.badge}
+                      </span>
+                    ) : null}
+                    <ChevronRight className="w-5 h-5 text-gray-300" />
+                  </div>
                 </button>
                 {index < menuItems.length - 1 && <div className="mx-4 border-t border-gray-100" />}
               </div>

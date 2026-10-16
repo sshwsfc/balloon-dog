@@ -630,6 +630,13 @@ export const membershipAdminService = {
           amountCents: order.amountCents,
           discountCents: Math.max(0, order.originalCents - order.amountCents),
           adjustments,
+          /*
+            受邀定价的快照**只在这里**（后台）出现：家长端接口会把规则名与上浮额整个去掉
+            （见 membership.service.ts 的 toOrderView）。运营看到的账单因此是自洽的：
+            原价 − 明细 + 受邀上浮 = 实付，而家长只看到一个干净的价格。
+          */
+          referralRuleName: order.referralRuleName,
+          referralSurchargeCents: order.referralSurchargeCents,
           payChannel: order.payChannel,
           payChannelLabel:
             PAY_CHANNEL_LABELS[order.payChannel as keyof typeof PAY_CHANNEL_LABELS] ??

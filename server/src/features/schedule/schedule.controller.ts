@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ah } from '../../shared/asyncHandler';
 import { authenticate } from '../../middleware/auth';
-import { resolveDevice } from '../../shared/deviceScope';
+import { resolveDevice, resolveWritableDevice } from '../../shared/deviceScope';
 import { scheduleService } from './schedule.service';
 import {
   createScheduleSchema,
@@ -31,7 +31,7 @@ export async function getPolicy(req: Request, res: Response) {
 /** PUT /api/lock-policy */
 export async function updatePolicy(req: Request, res: Response) {
   const patch = updateLockPolicySchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json({ success: true, policy: await scheduleService.updatePolicy(device, patch) });
 }
 
@@ -48,7 +48,7 @@ export async function listSchedules(req: Request, res: Response) {
 /** POST /api/schedules */
 export async function createSchedule(req: Request, res: Response) {
   const input = createScheduleSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.status(201).json({ success: true, schedule: await scheduleService.create(device, input) });
 }
 
@@ -56,14 +56,14 @@ export async function createSchedule(req: Request, res: Response) {
 export async function updateSchedule(req: Request, res: Response) {
   const { scheduleId } = scheduleIdSchema.parse(req.params);
   const patch = updateScheduleSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json({ success: true, schedule: await scheduleService.update(device, scheduleId, patch) });
 }
 
 /** DELETE /api/schedules/:scheduleId */
 export async function removeSchedule(req: Request, res: Response) {
   const { scheduleId } = scheduleIdSchema.parse(req.params);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json(await scheduleService.remove(device, scheduleId));
 }
 

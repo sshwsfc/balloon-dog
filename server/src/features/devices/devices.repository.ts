@@ -1,4 +1,5 @@
 import { prisma } from '../../prisma';
+import type { Prisma } from '@prisma/client';
 import { FEATURE_DEFS, defaultEnabledOf } from './devices.constants';
 
 /**
@@ -10,13 +11,29 @@ export const devicesRepo = {
   findById: (id: string) => prisma.childDevice.findUnique({ where: { id } }),
   findByCode: (deviceCode: string) => prisma.childDevice.findUnique({ where: { deviceCode } }),
 
+  /**
+   * 该家长能打开的设备（规划 §5.1）：自己绑的 + 作为家庭成员被邀请的。
+   * 家庭成员的设备在读接口里必须出现，否则「共同守护」只存在于数据库里。
+   */
   listByUser: (userId: number) =>
     prisma.childDevice.findMany({
-      where: { userId },
+      where: { OR: [{ userId }, { members: { some: { userId } } }] },
       orderBy: { createdAt: 'asc' },
     }),
 
   countByUser: (userId: number) => prisma.childDevice.count({ where: { userId } }),
+
+  /**
+   * 批量取健康摘要（规划 §1.2 的「设备列表每台一个健康点」）。
+   *
+   * 只 select 三个轻字段，绝不把 `gaps` / `restrictions` 这些 JSON 大字段捞进列表页 ——
+   * 列表每台设备一行，详情才需要完整快照。
+   */
+  healthSummaries: (deviceIds: string[]) =>
+    prisma.deviceHealth.findMany({
+      where: { deviceId: { in: deviceIds } },
+      select: { deviceId: true, level: true, openGaps: true, reportedAt: true },
+    }),
 
   createUnbound: (data: {
     deviceCode: string;
@@ -269,4 +286,160 @@ export const devicesRepo = {
   upsertFeatureRows: async (deviceId: string): Promise<void> => {
     await devicesRepo.ensureDefaults(deviceId);
   },
+
+  // ============================================================
+  // 设备健康（规划 §1）
+  // ============================================================
+
+  /**
+   * 健康快照是**整份覆盖**：一台设备一行，上报走 upsert。
+   * 用 upsert 而不是「先删后插」是因为它不产生空窗期 —— 家长在设备上报的
+   * 同一瞬间刷新健康页，也不会读到「没有快照」。
+   */
+  upsertHealth: (
+    deviceId: string,
+    data: {
+      level: string;
+      gaps: Prisma.InputJsonValue;
+      openGaps: number;
+      checks: Prisma.InputJsonValue;
+      permissions: Prisma.InputJsonValue;
+      restrictions: Prisma.InputJsonValue;
+      serviceRunning: boolean;
+      clockSkewSeconds: number;
+      healCount: number;
+      lastHealAt: Date | null;
+      reportedAt: Date;
+    },
+  ) =>
+    prisma.deviceHealth.upsert({
+      where: { deviceId },
+      create: { deviceId, ...data },
+      update: data,
+    }),
+
+  findHealth: (deviceId: string) => prisma.deviceHealth.findUnique({ where: { deviceId } }),
+
+  /** 最近一条「设备失联」动态，用于给补记事件做去重（见 OFFLINE_EVENT_DEDUPE_MS）。 */
+  lastOfflineEventAt: async (deviceId: string): Promise<Date | null> => {
+    const row = await prisma.deviceEvent.findFirst({
+      where: { deviceId, type: 'agent_offline' },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    return row?.createdAt ?? null;
+  },
+
+  createEvent: (deviceId: string, type: string, detail: string) =>
+    prisma.deviceEvent.create({ data: { deviceId, type, detail } }),
+
+  // ============================================================
+  // 孩子的申请（§3.1）
+  // ============================================================
+
+  createTimeRequest: (deviceId: string, kind: string, minutes: number, reason: string) =>
+    prisma.timeRequest.create({ data: { deviceId, kind, minutes, reason } }),
+
+  /**
+   * 去重键 (deviceId, kind) 的 pending 查询 —— 孩子端反复提交只应有一条待审批。
+   *
+   * 用 kind 而不是 (kind, minutes)：孩子第一次申请 30 分钟没批，第二次改成 60 分钟，
+   * 那是同一个「我想多玩一会儿」的诉求，家长端该看到的是一条最新的申请，
+   * 而不是两条并列的 30/60 让家长猜。
+   */
+  findPendingTimeRequest: (deviceId: string, kind: string) =>
+    prisma.timeRequest.findFirst({
+      where: { deviceId, kind, status: 'pending' },
+      orderBy: { createdAt: 'desc' },
+    }),
+
+  /** 设备端按 id 轮询审批结果。带 deviceId 一起查，免得拿到别家设备的申请。 */
+  findTimeRequestById: (deviceId: string, id: string) =>
+    prisma.timeRequest.findFirst({ where: { id, deviceId } }),
+
+  /** 家长端列表：pending 时按「先来先处理」正序，历史按「最近发生」倒序。 */
+  listTimeRequests: (deviceId: string, status?: string) =>
+    prisma.timeRequest.findMany({
+      where: { deviceId, ...(status && status !== 'all' ? { status } : {}) },
+      orderBy: { createdAt: status === 'pending' ? 'asc' : 'desc' },
+      take: 100,
+    }),
+
+  reviewTimeRequest: (
+    id: string,
+    status: 'approved' | 'rejected',
+    note: string,
+    grantedMinutes: number | null,
+  ) =>
+    prisma.timeRequest.update({
+      where: { id },
+      data: { status, reviewNote: note, grantedMinutes, reviewedAt: new Date() },
+    }),
+
+  /**
+   * 待审批条数 —— 家长端首页/底栏的角标用。
+   *
+   * 一次查回该家长**所有**设备的待审批数（按设备分组），而不是每台设备查一次：
+   * 首页要同时渲染设备列表和角标，N+1 会随设备数线性变慢。
+   */
+  // ---- 家庭成员（规划 §5.1）----
+
+  findUserByPhone: (phone: string) =>
+    prisma.user.findUnique({
+      where: { phone },
+      select: { id: true, nickname: true, phone: true, status: true },
+    }),
+
+  listDeviceMembers: (deviceId: string) =>
+    prisma.deviceMember.findMany({
+      where: { deviceId },
+      orderBy: { createdAt: 'asc' },
+      include: { user: { select: { id: true, nickname: true, phone: true, avatar: true } } },
+    }),
+
+  findDeviceMember: (id: string) =>
+    prisma.deviceMember.findUnique({
+      where: { id },
+      include: { user: { select: { id: true, nickname: true, phone: true, avatar: true } } },
+    }),
+
+  findDeviceMemberByUser: (deviceId: string, userId: number) =>
+    prisma.deviceMember.findUnique({ where: { deviceId_userId: { deviceId, userId } } }),
+
+  countDeviceMembers: (deviceId: string) => prisma.deviceMember.count({ where: { deviceId } }),
+
+  createDeviceMember: (data: {
+    deviceId: string;
+    userId: number;
+    role: string;
+    nickname: string;
+    invitedBy: number | null;
+  }) =>
+    prisma.deviceMember.create({
+      data,
+      include: { user: { select: { id: true, nickname: true, phone: true, avatar: true } } },
+    }),
+
+  updateDeviceMember: (id: string, data: { role?: string; nickname?: string }) =>
+    prisma.deviceMember.update({
+      where: { id },
+      data,
+      include: { user: { select: { id: true, nickname: true, phone: true, avatar: true } } },
+    }),
+
+  deleteDeviceMember: (id: string) => prisma.deviceMember.delete({ where: { id } }),
+
+  /** 该家长作为成员参与的所有设备（列表页标角色用，一次查回，避免 N+1）。 */
+  memberRolesForUser: (userId: number) =>
+    prisma.deviceMember.findMany({
+      where: { userId },
+      select: { deviceId: true, role: true },
+    }),
+
+  pendingTimeRequestCounts: (deviceIds: string[]) =>
+    prisma.timeRequest.groupBy({
+      by: ['deviceId'],
+      where: { deviceId: { in: deviceIds }, status: 'pending' },
+      _count: { _all: true },
+    }),
 };

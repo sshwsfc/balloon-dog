@@ -11,80 +11,7 @@
  *  4. **相对路径 /api**：开发走 Vite 代理、生产走 Nginx 反代，不再硬编码 host:port
  *     （原实现拼接 `location.hostname:3000`，换端口/域名就废）。
  */
-import type {
-  AppPluginListResponse,
-  AppPluginUpdateItem,
-  AppPluginUpdateResult,
-  AuthResponse,
-  CallLogListResponse,
-  CommandDispatchResult,
-  Device,
-  DeviceAppListResponse,
-  DeviceAppRefreshResult,
-  DeviceCommand,
-  DeviceEventListResponse,
-  DeviceModeState,
-  DeviceModeUpdateResult,
-  DeviceModeValue,
-  EyeCareConfigPatch,
-  EyeCareGetResponse,
-  EyeCareUpdateResult,
-  Features,
-  InsightDetail,
-  InsightListResponse,
-  InsightReanalyzeResult,
-  LocationPoint,
-  LockPolicy,
-  MediaAsset,
-  ModeAppAddResult,
-  ModeAppGroup,
-  ModeAppListResponse,
-  ModeSlot,
-  QuizAnswerResult,
-  QuizConfig,
-  QuizQuestion,
-  QuizRecord,
-  QuizStatistics,
-  RemoteAction,
-  SafeZone,
-  ScheduleListResponse,
-  ScheduleRule,
-  ScheduleRuleInput,
-  ScreenMonitorConfig,
-  ScreenMonitorConfigPatch,
-  ScreenMonitorUpdateResult,
-  CreateMembershipOrderResponse,
-  MembershipOrder,
-  MembershipOrderListResponse,
-  MembershipOverview,
-  MembershipStatus,
-  MembershipTier,
-  PayChannel,
-  PayMembershipOrderResponse,
-  PurchasableTier,
-  SmsListResponse,
-  StudySlotListResponse,
-  StudySlotReplaceResult,
-  UsageAlertListResponse,
-  UsageAlertReadAllResult,
-  ReferralCoupon,
-  ReferralCouponListResponse,
-  ReferralIdentityResponse,
-  ReferralInvitee,
-  ReferralListResponse,
-  ReferralOverview,
-  ReferralReward,
-  ReferralWithdrawal,
-  ReferralWithdrawResponse,
-  UsageAlertReadResult,
-  UsageAlertType,
-  UsageBudgetInput,
-  UsageBudgetListResponse,
-  UsageBudgetUpsertResult,
-  UsageSummary,
-  User,
-  WithdrawChannel,
-} from '@/types'
+import type { AppPluginListResponse, AppPluginUpdateItem, AppPluginUpdateResult, AuthResponse, CallLogListResponse, Child, ChildDeviceBrief, ChildTask, CommandDispatchResult, ConsentRecordView, ConsentStatus, CreateMembershipOrderResponse, DeletionStatus, Device, DeviceAppListResponse, DeviceAppRefreshResult, DeviceCommand, DeviceEventListResponse, DeviceHealth, DeviceMember, DeviceMemberList, DeviceModeState, DeviceModeUpdateResult, DeviceModeValue, DeviceRole, EyeCareConfigPatch, EyeCareGetResponse, EyeCareUpdateResult, Features, InsightDetail, InsightListResponse, InsightReanalyzeResult, InvoiceResponse, InvoiceView, LocationPoint, LockPolicy, MediaAsset, MembershipOrder, MembershipOrderListResponse, MembershipOverview, MembershipStatus, MembershipTier, ModeAppAddResult, ModeAppGroup, ModeAppListResponse, ModeSlot, NotificationListResponse, NotificationPreferences, NotificationUnreadResponse, PayMembershipOrderResponse, PaymentChannelKey, PaymentIntentResponse, PaymentOrderDetailResponse, PaymentOrderListResponse, PaymentOrderView, PaymentsCatalog, PrivacyCatalog, PrivacyExport, PurchasableTier, QuizAnswerResult, QuizConfig, QuizQuestion, QuizRecord, QuizStatistics, ReferralCoupon, ReferralCouponListResponse, ReferralIdentityResponse, ReferralInvitee, ReferralListResponse, ReferralOverview, ReferralReward, ReferralWithdrawResponse, ReferralWithdrawal, RefundResponse, RemoteAction, SafeZone, ScheduleListResponse, ScheduleRule, ScheduleRuleInput, ScreenMonitorConfig, ScreenMonitorConfigPatch, ScreenMonitorUpdateResult, SmsListResponse, StudySlotListResponse, StudySlotReplaceResult, SupportConfig, SupportTicketView, TimeRequestListResponse, UsageAlertListResponse, UsageAlertReadAllResult, UsageAlertReadResult, UsageAlertType, UsageBudgetInput, UsageBudgetListResponse, UsageBudgetUpsertResult, UsageSummary, User, WithdrawChannel } from '@/types'
 import { tt } from '@/i18n'
 
 const API_BASE = '/api'
@@ -203,7 +130,7 @@ function buildUrl(path: string, query?: Record<string, QueryValue>): string {
 }
 
 interface RequestOptions {
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE'
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
   body?: unknown
   query?: Record<string, QueryValue>
   /** 上传表单时传 FormData（不能设 Content-Type，交给浏览器带 boundary） */
@@ -314,6 +241,13 @@ const http = {
     request<T>(path, { method: 'PUT', body, query }),
   del: <T>(path: string, query?: Record<string, QueryValue>) =>
     request<T>(path, { method: 'DELETE', query }),
+  /**
+   * PATCH：家庭成员改角色用得到（`PATCH /api/devices/:deviceId/members/:memberId`）。
+   * 之前只有 get/post/put/del —— 少一个动词时最容易顺手把接口改成 PUT，
+   * 那样「只改角色」就变成一个必须提交全字段的更新接口，和其他成员的动作打架。
+   */
+  patch: <T>(path: string, body?: unknown, query?: Record<string, QueryValue>) =>
+    request<T>(path, { method: 'PATCH', body, query }),
   upload: <T>(path: string, formData: FormData) =>
     request<T>(path, { method: 'POST', formData }),
 }
@@ -440,6 +374,69 @@ export const userApi = {
 // 设备
 // ============================================================
 
+/**
+ * 家长端站内通知（规划 §2.1）。
+ *
+ * 与「设备动态」刻意分开：动态是设备视角的日志流，通知是「需要家长知道并处理的事」。
+ * 两者的读者与生命周期都不同，混在一起家长要么被淹没、要么不敢标已读。
+ */
+export const notificationApi = {
+  list: (params?: { page?: number; pageSize?: number; unreadOnly?: boolean; type?: string; level?: string }) => {
+    const query = new URLSearchParams()
+    if (params?.page) query.set('page', String(params.page))
+    if (params?.pageSize) query.set('pageSize', String(params.pageSize))
+    if (params?.unreadOnly) query.set('unreadOnly', 'true')
+    if (params?.type) query.set('type', params.type)
+    if (params?.level) query.set('level', params.level)
+    const qs = query.toString()
+    return http.get<NotificationListResponse>(`/notifications${qs ? `?${qs}` : ''}`)
+  },
+
+  /** 未读角标（首页铃铛用；服务端会顺带跑一次惰性检查，不要拿来高频轮询） */
+  unreadCount: () => http.get<NotificationUnreadResponse>('/notifications/unread-count'),
+
+  markRead: (id: string) => http.post<NotificationUnreadResponse>(`/notifications/${id}/read`, {}),
+
+  markAllRead: () => http.post<NotificationUnreadResponse>('/notifications/read-all', {}),
+
+  remove: (id: string) => http.del<NotificationUnreadResponse>(`/notifications/${id}`),
+
+  preferences: () => http.get<NotificationPreferences>('/notifications/preferences'),
+
+  updatePreferences: (preferences: { type: string; inApp: boolean; wechat?: boolean; push?: boolean }[]) =>
+    http.put<NotificationPreferences>('/notifications/preferences', { preferences }),
+
+  /**
+   * 往微信发一条测试消息（不传 id = 发最近的一条）。
+   *
+   * 同步返回结果，失败时 `ApiError.userMessage` 里带微信的 errcode 原文 ——
+   * 这类问题（模板 ID 不对、字段名不匹配、没关注公众号）只有看到原文才排查得动。
+   */
+  testWechat: (notificationId?: string) =>
+    http.post<{ sent: boolean; notificationId: string }>('/notifications/channels/wechat/test', {
+      notificationId,
+    }),
+}
+
+/**
+ * 孩子的申请（规划 §3.1）—— 家长端审批加时 / 延后锁屏。
+ *
+ * 默认只拉待审批：家长进这个页面就是来处理它们的；要看历史传 status='all'。
+ */
+export const timeRequestApi = {
+  list: (status: 'pending' | 'approved' | 'rejected' | 'all' = 'pending') =>
+    http.get<TimeRequestListResponse>(`/device/time-requests?status=${status}`),
+
+  /**
+   * 批准或拒绝。`minutes` 只能改小（服务端也按 min(给的值, 申请值) 兜底）：
+   * 孩子申请 120 分钟、家长给 30 分钟是常态，而「申请 5 分钟批 240 分钟」只会是误触。
+   */
+  review: (
+    id: string,
+    body: { status: 'approved' | 'rejected'; minutes?: number; note?: string },
+  ) => http.post<{ success: boolean; grantedMinutes: number }>(`/device/time-requests/${id}/review`, body),
+}
+
 export const deviceApi = {
   list: () => http.get<{ devices: Device[] }>('/devices'),
 
@@ -463,8 +460,155 @@ export const deviceApi = {
 
   remove: (deviceId: string) => http.del<{ success: boolean }>(`/devices/${deviceId}`),
 
+  /**
+   * 家庭成员（规划 §5.1）。
+   *
+   * `members` 任何成员都能读（只读成员也该知道还有谁在看这台设备）；
+   * 邀请 / 改角色 / 移除都只有设备主人能调，服务端会 403。
+   */
+  members: (deviceId: string) => http.get<DeviceMemberList>(`/devices/${deviceId}/members`),
+  inviteMember: (
+    deviceId: string,
+    data: { phone: string; role?: DeviceRole; nickname?: string },
+  ) => http.post<DeviceMember>(`/devices/${deviceId}/members`, data),
+  updateMember: (
+    deviceId: string,
+    memberId: string,
+    data: { role?: DeviceRole; nickname?: string },
+  ) => http.patch<DeviceMember>(`/devices/${deviceId}/members/${memberId}`, data),
+  removeMember: (deviceId: string, memberId: string) =>
+    http.del<{ success: boolean }>(`/devices/${deviceId}/members/${memberId}`),
+
   select: (deviceId: string) =>
     http.post<{ success: boolean; device: Device }>(`/devices/${deviceId}/select`, {}),
+
+  /**
+   * 设备健康快照（`GET /api/device/health`）。
+   *
+   * 读的时候服务端会顺手补记一条「设备失联」动态（6 小时去重窗口），
+   * 所以单纯打开健康页也可能产生一条动态 —— 这是有意的：失联值得留在时间线上。
+   */
+  health: (deviceId?: string) =>
+    http.get<DeviceHealth>('/device/health', deviceId ? { deviceId } : undefined),
+
+  /**
+   * 让设备立刻体检一次（`POST /api/device/health/check`）。
+   *
+   * 只是把 `self_check` 指令丢进队列 —— 检测与回报都是设备做的，所以调用方
+   * 必须接着轮询 `health()` 的 `updatedAt`，**不要**乐观地把开关置绿。
+   */
+  healthCheck: (deviceId?: string) =>
+    http.post<{ success: boolean; command: DeviceCommand }>(
+      '/device/health/check',
+      deviceId ? { deviceId } : {},
+    ),
+}
+
+// ============================================================
+// 孩子档案与今日任务（规划 §5.2）
+// ============================================================
+
+/**
+ * 孩子档案**不是设备作用域的**：它属于家长账号（`Child.userId`），
+ * 所以这里的调用都不带 deviceId。设备与孩子的关联走 `setDevices` 整组替换。
+ *
+ * 档案与任务都只有档案主人能碰 —— 被邀请来看设备的家庭成员（§5.1）看不到
+ * 别人家孩子的档案，服务端对越权一律回 404。
+ */
+export const childrenApi = {
+  list: () => http.get<{ children: Child[] }>('/children'),
+
+  create: (data: { name: string; birthYear?: number; school?: string }) =>
+    http.post<{ success: boolean; child: Child }>('/children', data),
+
+  update: (childId: string, data: { name?: string; birthYear?: number; school?: string }) =>
+    http.patch<{ success: boolean; child: Child }>(`/children/${childId}`, data),
+
+  /** 删档案只会把设备**解绑**（`onDelete: SetNull`），不会删设备 */
+  remove: (childId: string) => http.del<{ success: boolean }>(`/children/${childId}`),
+
+  /** 整组替换：传什么就是什么，没列出的设备会被摘下来 */
+  setDevices: (childId: string, deviceIds: string[]) =>
+    http.put<{ success: boolean; devices: ChildDeviceBrief[] }>(`/children/${childId}/devices`, {
+      deviceIds,
+    }),
+
+  listTasks: (childId: string, date?: string) =>
+    http.get<{ date: string; total: number; done: number; tasks: ChildTask[] }>(
+      `/children/${childId}/tasks`,
+      date ? { date } : undefined,
+    ),
+
+  createTask: (childId: string, data: { title: string; date?: string }) =>
+    http.post<{ success: boolean; task: ChildTask }>(`/children/${childId}/tasks`, data),
+
+  updateTask: (childId: string, taskId: string, data: { title?: string; done?: boolean }) =>
+    http.patch<{ success: boolean; task: ChildTask }>(
+      `/children/${childId}/tasks/${taskId}`,
+      data,
+    ),
+
+  removeTask: (childId: string, taskId: string) =>
+    http.del<{ success: boolean }>(`/children/${childId}/tasks/${taskId}`),
+}
+
+// ============================================================
+// 合规留痕、导出与注销（规划 §5.3）
+// ============================================================
+
+export const supportApi = {
+  /**
+   * 帮助与反馈的**可用性与写入上限都来自服务端**：分类、提示语、未关闭工单上限（5）、
+   * 正文长度上限，以及那个控制入口的灰度开关。前端不自己抄一份枚举。
+   */
+  config: () => http.get<SupportConfig>('/support/config'),
+
+  create: (data: { category: string; subject: string; body: string; contact?: string; deviceId?: string }) =>
+    http.post<{ ticket: SupportTicketView }>('/support/tickets', data),
+
+  list: () => http.get<{ tickets: SupportTicketView[] }>('/support/tickets'),
+
+  detail: (ticketNo: string) => http.get<{ ticket: SupportTicketView }>(`/support/tickets/${ticketNo}`),
+
+  /** 补充信息。已关闭的工单不能再回 —— 否则「关闭」就没有意义了。 */
+  reply: (ticketNo: string, body: string) =>
+    http.post<{ ticket: SupportTicketView }>(`/support/tickets/${ticketNo}/replies`, { body }),
+}
+
+export const privacyApi = {
+  /** 文本目录 + 最小必要采集清单（服务端唯一一份，界面不自己抄一份） */
+  docs: () => http.get<PrivacyCatalog>('/privacy/docs'),
+
+  consents: () => http.get<{ consents: ConsentStatus[] }>('/privacy/consents'),
+
+  accept: (data: { docType: string; docVersion: string }) =>
+    http.post<{ success: boolean; record: ConsentRecordView; created: boolean; needsReaccept: boolean }>(
+      '/privacy/consents',
+      data,
+    ),
+
+  /**
+   * 撤回同意。要密码 + 手动打确认文字 —— 因为它**立刻删除设备记录并停止监控**，
+   * 不是一个状态位。已经收集的账号数据（孩子档案、订单）不受影响。
+   */
+  revoke: (consentId: string, data: { password: string; confirm: string }) =>
+    http.post<{
+      success: boolean
+      record: ConsentRecordView
+      unboundDevices: number
+      stoppedMonitoring: boolean
+    }>(`/privacy/consents/${consentId}/revoke`, data),
+
+  deletion: () => http.get<{ deletion: DeletionStatus }>('/privacy/deletion'),
+
+  /** 申请注销：立刻停止监控，7 天冷静期后真的删除 */
+  requestDeletion: (data: { password: string; confirm: string }) =>
+    http.post<{ success: boolean; deletion: DeletionStatus }>('/privacy/deletion', data),
+
+  cancelDeletion: () => http.del<{ success: boolean; deletion: DeletionStatus }>('/privacy/deletion'),
+
+  /** 导出我的全部数据（媒体文件本身不在里面，见 notes） */
+  exportData: () => http.get<PrivacyExport>('/privacy/export'),
 }
 
 // ============================================================
@@ -1046,7 +1190,7 @@ export const membershipApi = {
    * 下单。金额由**服务端**按当前规则算好并快照进订单，
    * 前端传的任何价格都会被忽略 —— 否则改一下请求体就能一分钱开会员。
    */
-  createOrder: (planCode: string, payChannel: PayChannel, couponId?: string) =>
+  createOrder: (planCode: string, payChannel: PaymentChannelKey, couponId?: string) =>
     http.post<CreateMembershipOrderResponse>('/membership/orders', {
       planCode,
       payChannel,
@@ -1066,6 +1210,55 @@ export const membershipApi = {
   /** 开启/关闭连续包月。 */
   setAutoRenew: (enabled: boolean) =>
     http.post<{ success: boolean; status: MembershipStatus }>('/membership/auto-renew', { enabled }),
+}
+
+export const paymentsApi = {
+  /** 渠道目录：现在能用什么、缺哪些环境变量、自助退款窗口多久。 */
+  catalog: () => http.get<PaymentsCatalog>('/payments/catalog'),
+
+  /** 自己的订单（支付管线视图：比会员模块多了退款单号 / 发票 / 能不能退）。 */
+  myOrders: (options?: { page?: number; pageSize?: number }) =>
+    http.get<PaymentOrderListResponse>('/payments/orders', {
+      page: options?.page ?? 1,
+      pageSize: options?.pageSize ?? 20,
+    }),
+
+  /** 单笔订单 + 它的全部渠道交互流水（家长能看到自己这单发生了什么）。 */
+  orderDetail: (orderNo: string) =>
+    http.get<PaymentOrderDetailResponse>(`/payments/orders/${orderNo}`),
+
+  /**
+   * 向渠道发起支付（预支付）。
+   *
+   * 渠道没配且后端开着模拟支付时，返回的 `payment.mode` 是 `mock`：
+   * 界面必须显示「模拟支付」而不是假装二维码能扫。
+   */
+  createPayment: (orderNo: string) =>
+    http.post<PaymentIntentResponse>(`/payments/orders/${orderNo}/pay`, {}),
+
+  /** 自助退款。超过窗口 / 有待处理发票时后端会拒绝，并把原因写成一句人话。 */
+  requestRefund: (orderNo: string, reason: string, amountCents?: number) =>
+    http.post<RefundResponse>('/payments/refunds', {
+      orderNo,
+      reason,
+      ...(amountCents != null ? { amountCents } : {}),
+    }),
+
+  myRefunds: (options?: { page?: number; pageSize?: number }) =>
+    http.get<{ success: boolean; refunds: PaymentOrderView[] }>('/payments/refunds', {
+      page: options?.page ?? 1,
+      pageSize: options?.pageSize ?? 20,
+    }),
+
+  /** 申请开票。公司抬头必须给税号（后端 422 会指出是哪个字段）。 */
+  requestInvoice: (input: { orderNo: string; title: string; taxNo?: string; email: string }) =>
+    http.post<InvoiceResponse>('/payments/invoices', input),
+
+  myInvoices: (options?: { page?: number; pageSize?: number }) =>
+    http.get<{ success: boolean; invoices: InvoiceView[] }>('/payments/invoices', {
+      page: options?.page ?? 1,
+      pageSize: options?.pageSize ?? 20,
+    }),
 }
 
 /** 会员权益不足（HTTP 403 / MEMBERSHIP_REQUIRED）时后端给的结构。 */
@@ -1133,6 +1326,24 @@ export const api = {
   updateDevice: deviceApi.update,
   deleteDevice: deviceApi.remove,
   selectDevice: deviceApi.select,
+
+  // 设备健康（§1 设备健康可见性）
+  getDeviceHealth: deviceApi.health,
+  requestDeviceHealthCheck: deviceApi.healthCheck,
+
+  // 站内通知（规划 §2.1）
+  getNotifications: notificationApi.list,
+  getNotificationUnreadCount: notificationApi.unreadCount,
+  testWechatNotification: notificationApi.testWechat,
+  readNotification: notificationApi.markRead,
+  readAllNotifications: notificationApi.markAllRead,
+  deleteNotification: notificationApi.remove,
+  getNotificationPreferences: notificationApi.preferences,
+  updateNotificationPreferences: notificationApi.updatePreferences,
+
+  // 孩子的申请（§3.1）
+  listTimeRequests: timeRequestApi.list,
+  reviewTimeRequest: timeRequestApi.review,
 
   // 指令
   lockScreen: commandApi.lock,
@@ -1209,6 +1420,40 @@ export const api = {
   deleteUsageBudget: usageBudgetApi.remove,
   getUsageSummary: usageBudgetApi.summary,
 
+  // 家庭成员（规划 §5.1）
+  getDeviceMembers: deviceApi.members,
+  inviteDeviceMember: deviceApi.inviteMember,
+  updateDeviceMember: deviceApi.updateMember,
+  removeDeviceMember: deviceApi.removeMember,
+
+  // 孩子档案与今日任务（规划 §5.2）
+  getChildren: childrenApi.list,
+  createChild: childrenApi.create,
+  updateChild: childrenApi.update,
+  deleteChild: childrenApi.remove,
+  setChildDevices: childrenApi.setDevices,
+  getChildTasks: childrenApi.listTasks,
+  createChildTask: childrenApi.createTask,
+  updateChildTask: childrenApi.updateTask,
+  deleteChildTask: childrenApi.removeTask,
+
+  // 合规留痕 / 导出 / 注销（规划 §5.3）
+  // 客服工单（§5.5）
+  getSupportConfig: supportApi.config,
+  createSupportTicket: supportApi.create,
+  getSupportTickets: supportApi.list,
+  getSupportTicket: supportApi.detail,
+  replySupportTicket: supportApi.reply,
+
+  getPrivacyDocs: privacyApi.docs,
+  getPrivacyConsents: privacyApi.consents,
+  acceptPrivacyConsent: privacyApi.accept,
+  revokePrivacyConsent: privacyApi.revoke,
+  getDeletionStatus: privacyApi.deletion,
+  requestAccountDeletion: privacyApi.requestDeletion,
+  cancelAccountDeletion: privacyApi.cancelDeletion,
+  exportMyData: privacyApi.exportData,
+
   // 模式切换（学习模式 / 普通模式）
   getDeviceMode: deviceModeApi.get,
   updateDeviceMode: deviceModeApi.update,
@@ -1244,6 +1489,9 @@ export const api = {
   // 会员 / 充值
   getMembership: membershipApi.overview,
   getMembershipOrders: membershipApi.orders,
+  paymentCatalog: paymentsApi.catalog,
+  paymentOrders: paymentsApi.myOrders,
+  paymentOrderDetail: paymentsApi.orderDetail,
   createMembershipOrder: membershipApi.createOrder,
   payMembershipOrder: membershipApi.payOrder,
   cancelMembershipOrder: membershipApi.cancelOrder,

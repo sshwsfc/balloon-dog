@@ -11,6 +11,7 @@ import androidx.core.app.NotificationCompat;
 
 import com.balloondog.agent.R;
 import com.balloondog.agent.data.Constants;
+import com.balloondog.agent.ui.ChildHomeActivity;
 import com.balloondog.agent.ui.MainActivity;
 
 /**
@@ -60,6 +61,10 @@ public final class AgentNotifications {
                 .setOnlyAlertOnce(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setContentIntent(MainActivity.createPendingIntent(context))
+                // 孩子端的入口（规划 §3.2）：点通知本体会进家长设置页，
+                // 这颗按钮进孩子自己的主页 —— 两者刻意分开，不给家长添麻烦。
+                .addAction(0, context.getString(R.string.action_child_home),
+                        ChildHomeActivity.createPendingIntent(context))
                 .build();
     }
 

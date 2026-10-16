@@ -260,6 +260,28 @@ public final class LockState {
         return 0;
     }
 
+    /**
+     * 向后试探「最早什么时候会自动解锁」。
+     *
+     * <p>返回绝对时刻；{@code 0} 表示探不出来（家长远程锁定、今日额度/预算用尽 ——
+     * 这些靠输入里的固定标志位，往后看多久都还是锁着）。
+     *
+     * <p>为什么放在这里：判定逻辑只能有一份。锁定页用的是与守护服务完全相同的
+     * {@link #isLockedAt}，只是把时刻换成未来 —— 这样「还剩多久」永远不会
+     * 和真实的解锁时刻说两句话。
+     *
+     * <p>调用频率：锁定页每分钟一次。绝不能挂进 {@link #compute} 里，
+     * 那会让每秒一次的判定变成每秒 1440 次。
+     */
+    public static long probeAutoUnlockAt(Inputs base) {
+        if (!isLockedAt(base, base.now)) return base.now;
+        for (int i = 1; i <= 24 * 60; i++) {
+            long at = base.now + i * 60_000L;
+            if (!isLockedAt(base, at)) return at;
+        }
+        return 0L;
+    }
+
     /** 一句话摘要，用于通知与日志。 */
     public String describe() {
         if (!locked) {

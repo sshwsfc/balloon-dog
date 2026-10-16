@@ -61,6 +61,7 @@
     <!-- 锁定页 -->
     <string name="lock_title">设备已被家长锁定</string>
     <string name="lock_hint">如需使用，请联系家长或通过答题获得使用时长。</string>
+    <string name="action_request_time">申请使用时间</string>
 
     <!-- 答题页 -->
     <string name="quiz_loading">正在取题…</string>
@@ -187,6 +188,21 @@
     <string name="status_detail_unbound">未绑定家长</string>
     <string name="status_locked_now">锁定中</string>
     <string name="status_detail_usage">今日已用 %1$s</string>
+
+    <!-- 孩子端主页（规划 §3.2）：剩余时长 / 答题赚时长 / 求助家长 -->
+    <string name="title_child_home">今天</string>
+    <string name="action_child_home">查看剩余时间</string>
+    <string name="action_sos">求助家长</string>
+    <string name="action_call_parent">给家长打电话</string>
+
+    <!-- 知情说明页（规划 §3.4）：正文在 capability/GuardianNotice，这里只有布局引用的短句 -->
+    <string name="title_guardian_info">这台设备由家长守护</string>
+    <string name="guardian_info_subtitle">下面写的是这台设备真实会做什么、不做什么。随时可以回来看。</string>
+    <string name="guardian_info_live_heading">现在正在发生什么</string>
+    <string name="action_notice_back">我知道了</string>
+    <string name="action_guardian_info">本设备如何被守护</string>
+    <string name="title_study_home">学习模式</string>
+    <string name="study_home_hint">这是家长为你设置的学习桌面。想退出学习模式，请让家长在家长端切换；桌面上的应用由家长选择。</string>
 
     <!-- 家长入口：桌面图标隐藏后在拨号盘输入暗码打开本应用（见 SecretCodeReceiver） -->
     <string name="icon_hint_dial_entry">要在本机打开守护应用：在系统拨号盘输入 %1$s（图标隐藏后这是本机唯一的入口）。</string>

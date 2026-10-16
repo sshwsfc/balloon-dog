@@ -92,7 +92,7 @@ public final class ScreenSampler {
         //     出现在锁定之后，锁定界面因此没能在前台。
         try {
             LockState state = LockState.compute(
-                    LockEnforcer.buildInputs(store, System.currentTimeMillis()));
+                    LockEnforcer.buildInputs(store, TrustedClock.now()));
             if (state.locked) return null;
         } catch (Exception e) {
             // 判定失败时按「不锁」处理，宁可少采一张也不要卡住采样

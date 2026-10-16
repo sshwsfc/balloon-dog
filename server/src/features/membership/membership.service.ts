@@ -23,6 +23,7 @@ import {
   ENTITLEMENTS,
   PERIOD_LABELS,
   PERIOD_MONTHS,
+  PAY_CHANNEL_FAKE,
   TIER_LABELS,
   TIER_RANK,
   isMembershipTier,
@@ -31,6 +32,7 @@ import {
   type MembershipTier,
   type PurchasableTier,
 } from './membership.constants';
+import { fakeProviderAllowed } from '../payments/payments.constants';
 import {
   priceWithReferral,
   type PricingAdjustment,
@@ -103,8 +105,6 @@ export interface PlanQuote {
   discountCents: number;
   monthlyEquivalentCents: number;
   adjustments: PricingAdjustment[];
-  /** 受邀定价的状态与说明（没被邀请的账号也会返回，applicable=false）。 */
-  referral: ReferralPriceView;
 }
 
 export interface TierQuotes {
@@ -124,10 +124,6 @@ export interface OrderView {
   /** 抵扣用的邀请优惠券（没有则是 null）。 */
   couponId: string | null;
   couponCents: number;
-  /** 本单命中的受邀定价规则名称；没命中则为空串。 */
-  referralRuleName: string;
-  /** 本单因受邀定价**多收**的钱（分）；0 表示没生效。 */
-  referralSurchargeCents: number;
   adjustments: PricingAdjustment[];
   payChannel: string;
   status: string;
@@ -407,20 +403,28 @@ function loadReferralPriceRules() {
 // 视图转换
 // ============================================================
 
+/**
+ * 订单视图（**家长端**）。
+ *
+ * 受邀定价对家长端是**不可见**的：不下发规则名，也不下发上浮金额；订单里那些
+ * 「原价 − 逐条优惠」的明细是按下单**前**的常规定价算的，受邀账号的实付比这份明细
+ * 算出来的高，摆出来就是一份自相矛盾的账单（15 − 3.75 ≠ 22.5），等于把上浮写在脸上。
+ * 所以受邀订单直接压平：原价 = 实付、优惠明细清空，家长端只会看到一个干净的价格。
+ * 完整快照仍在 MembershipOrder 表里，后台订单页照常展示（见 membership.admin.service.ts）。
+ */
 function toOrderView(order: MembershipOrder): OrderView {
+  const concealed = order.referralSurchargeCents > 0;
   return {
     orderNo: order.orderNo,
     planCode: order.planCode,
     tier: order.tier as PurchasableTier,
     period: order.period as BillingPeriod,
     periodLabel: PERIOD_LABELS[order.period as BillingPeriod] ?? order.period,
-    originalCents: order.originalCents,
+    originalCents: concealed ? order.amountCents : order.originalCents,
     amountCents: order.amountCents,
     couponId: order.couponId,
     couponCents: order.couponCents,
-    referralRuleName: order.referralRuleName,
-    referralSurchargeCents: order.referralSurchargeCents,
-    adjustments: parseAdjustments(order.adjustments),
+    adjustments: concealed ? [] : parseAdjustments(order.adjustments),
     payChannel: order.payChannel,
     status: order.status,
     paidAt: order.paidAt ? order.paidAt.toISOString() : null,
@@ -431,7 +435,16 @@ function toOrderView(order: MembershipOrder): OrderView {
   };
 }
 
+/**
+ * 套餐报价视图（**家长端**）。
+ *
+ * 与 `toOrderView` 同一个理由：受邀定价只影响价格，不向家长解释原因。
+ * 受邀价生效时把常规定价的优惠明细一并收起 —— 那份明细按下单前的常规定价算，
+ * 和上浮后的价格对不上；同时也不下发 `referral`（规则名 + 上浮额），
+ * 否则随便打开一次开发者工具就能看到「受邀好友首单上浮 100% +￥107.6」。
+ */
 function quoteOf(plan: MembershipPlan, pricing: PricingResult, referral: ReferralPriceView): PlanQuote {
+  const concealed = referral.applied;
   return {
     code: plan.code,
     name: plan.name,
@@ -441,12 +454,11 @@ function quoteOf(plan: MembershipPlan, pricing: PricingResult, referral: Referra
     periodLabel: PERIOD_LABELS[plan.period as BillingPeriod] ?? plan.period,
     months: plan.months,
     recommended: plan.recommended,
-    originalCents: pricing.originalCents,
+    originalCents: concealed ? pricing.finalCents : pricing.originalCents,
     finalCents: pricing.finalCents,
-    discountCents: pricing.discountCents,
+    discountCents: concealed ? 0 : pricing.discountCents,
     monthlyEquivalentCents: pricing.monthlyEquivalentCents,
-    adjustments: pricing.adjustments,
-    referral,
+    adjustments: concealed ? [] : pricing.adjustments,
   };
 }
 
@@ -486,6 +498,90 @@ async function quoteAll(userId: number): Promise<TierQuotes[]> {
     return tiers;
 }
 
+/**
+ * 把一笔待支付订单结算成「已支付 + 会员生效」。**渠道无关、且幂等。**
+ *
+ * 之所以把它从 `payOrder()` 里抽出来：规划 §5.4 接入真实支付后，有两条路会走到
+ * 「钱到账了」—— 模拟支付（`payOrder`）与渠道异步回调（`features/payments/payments.service`）。
+ * 如果各写一遍，第二次改规则（比如会员区间的算法、返现结算时机）必然只改一处，
+ * 于是「模拟支付测通了、真渠道上线后行为不同」。两条路都调用这里，只有一处实现。
+ *
+ * 幂等由事务里的 `updateMany({ where: { id, status: 'pending' } })` 保证：
+ * 渠道重复投递同一个回调时返回 `changed: false`，不重复加会员时长、不重复返现。
+ */
+export async function applyPaidOrder(input: {
+  orderId: string;
+  /** 渠道流水号；模拟支付时是本地生成的占位号 */
+  transactionId: string;
+  /** 渠道实收金额，用于和订单金额比对（比对失败时调用方就不该调进来） */
+  paidCents?: number;
+  paidAt?: Date;
+}): Promise<{ order: MembershipOrder; userId: number; changed: boolean }> {
+  const order = await prisma.membershipOrder.findUnique({ where: { id: input.orderId } });
+  if (!order) throw new NotFoundError('订单', input.orderId);
+  if (order.status === 'paid') return { order, userId: order.userId, changed: false };
+  if (order.status !== 'pending') throw new ConflictError('该订单已结束，请重新下单');
+
+  const userId = order.userId;
+  const now = input.paidAt ?? new Date();
+  const state = await resolveMembership(userId);
+  const currentExpiry = state.expiresAt ? new Date(state.expiresAt) : null;
+  // 同档续费接着剩余时长；升级/跨档从此刻重新起算（剩余的旧档时长由
+  // tier_upgrade 定价规则以抵扣的形式补偿，见 membership.constants.ts）。
+  const sameTier = state.tier === order.tier;
+  const periodStart = sameTier && currentExpiry && currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
+  const periodEnd = addMonths(periodStart, PERIOD_MONTHS[order.period as BillingPeriod] ?? 1);
+
+  const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const claimed = await tx.membershipOrder.updateMany({
+      where: { id: order.id, status: 'pending' },
+      data: {
+        status: 'paid',
+        paidAt: now,
+        transactionId: input.transactionId,
+        startsAt: periodStart,
+        expiresAt: periodEnd,
+      },
+    });
+    if (claimed.count === 0) throw new ConflictError('订单状态已变化，请刷新后重试');
+
+    await tx.user.update({
+      where: { id: userId },
+      data: {
+        membershipTier: order.tier,
+        membershipExpiresAt: periodEnd,
+        membershipStartedAt: state.startedAt ? new Date(state.startedAt) : now,
+        membershipAutoRenew: order.autoRenew,
+        membershipRenewTier: order.autoRenew ? order.tier : null,
+        firstPaidAt: state.firstPaidAt ? undefined : now,
+        totalPaidCents: { increment: order.amountCents },
+      },
+    });
+
+    return tx.membershipOrder.findUniqueOrThrow({ where: { id: order.id } });
+  });
+
+  // 返现与优惠券的结算放在事务之外，并且整体 try/catch 兜住：
+  // 此刻钱已经到账、会员已经生效，返现失败只该记日志（可以事后补），
+  // 绝不能把会员一起回滚掉 —— 那才是真正的「付了钱没到账」。
+  try {
+    await referralService.onOrderPaid({
+      orderNo: order.orderNo,
+      userId,
+      amountCents: order.amountCents,
+      tier: order.tier,
+      period: order.period,
+      isFirstPurchase: !state.firstPaidAt,
+      isAutoRenew: false,
+    });
+    if (order.couponId) await referralService.consumeCoupon(order.couponId, order.orderNo);
+  } catch (error) {
+    logger.error({ msg: 'referral settlement failed', orderNo: order.orderNo, err: error });
+  }
+
+  return { order: updated, userId, changed: true };
+}
+
 export const membershipService = {
   /** 家长端会员中心：当前状态 + 每档套餐的动态报价。 */
   async getOverview(userId: number) {
@@ -500,6 +596,12 @@ export const membershipService = {
     userId: number,
     input: { planCode: string; payChannel: string; couponId?: string },
   ) {
+    // 假渠道只存在于测试环境（规划 §5.4）：它不联网、回调签名是 md5，
+    // 一旦在生产可用，就等于给「不花开会员」留了后门。dto 里允许这个枚举值，
+    // 真正的闸在这里 —— dto 只校验形状，环境判断属于业务规则。
+    if (input.payChannel === PAY_CHANNEL_FAKE && !fakeProviderAllowed()) {
+      throw new BadRequestError('测试支付渠道仅在测试环境可用');
+    }
     const plan = await prisma.membershipPlan.findUnique({ where: { code: input.planCode } });
     if (!plan || !plan.enabled) throw new NotFoundError('套餐', input.planCode);
     if (!isPurchasableTier(plan.tier)) throw new BadRequestError('该套餐不可购买');
@@ -587,18 +689,18 @@ export const membershipService = {
   },
 
   /**
-   * 模拟支付回调。
+   * 模拟支付（规划 §5.4 之前的过渡路径）。
    *
-   * 真实接入时这里换成渠道异步通知的验签入口，本函数退化为「回调查询」；
-   * 现在它直接扮演渠道：outcome=success 即视为收到支付成功通知。
+   * `MEMBERSHIP_MOCK_PAY=true` 时家长端可以直接把订单标成成功，让整条
+   * 「下单 → 支付 → 会员生效 → 返现」在没有商户号的情况下也能走通。
+   * 真实渠道走 `features/payments` 的回调，但**两边的结算都调用同一个
+   * `applyPaidOrder()`**，所以不存在「模拟能过、真渠道不过」的第二套逻辑。
    */
   async payOrder(userId: number, orderNo: string, outcome: 'success' | 'fail') {
     const order = await prisma.membershipOrder.findFirst({ where: { orderNo, userId } });
     if (!order) throw new NotFoundError('订单', orderNo);
     if (order.status === 'paid') throw new ConflictError('该订单已经支付过了');
     if (order.status !== 'pending') throw new ConflictError('该订单已结束，请重新下单');
-
-    const now = new Date();
 
     if (outcome === 'fail') {
       const failed = await prisma.membershipOrder.update({
@@ -608,62 +710,13 @@ export const membershipService = {
       return { order: toOrderView(failed), status: await resolveMembership(userId) };
     }
 
-    const state = await resolveMembership(userId);
-    const currentExpiry = state.expiresAt ? new Date(state.expiresAt) : null;
-    // 同档续费接着剩余时长；升级/跨档从此刻重新起算（剩余的旧档时长由
-    // tier_upgrade 定价规则以抵扣的形式补偿，见 membership.constants.ts）。
-    const sameTier = state.tier === order.tier;
-    const periodStart = sameTier && currentExpiry && currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
-    const periodEnd = addMonths(periodStart, PERIOD_MONTHS[order.period as BillingPeriod] ?? 1);
-
-    const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      const claimed = await tx.membershipOrder.updateMany({
-        where: { id: order.id, status: 'pending' },
-        data: {
-          status: 'paid',
-          paidAt: now,
-          transactionId: mockTransactionId(order.orderNo, order.payChannel),
-          startsAt: periodStart,
-          expiresAt: periodEnd,
-        },
-      });
-      if (claimed.count === 0) throw new ConflictError('订单状态已变化，请刷新后重试');
-
-      await tx.user.update({
-        where: { id: userId },
-        data: {
-          membershipTier: order.tier,
-          membershipExpiresAt: periodEnd,
-          membershipStartedAt: state.startedAt ? new Date(state.startedAt) : now,
-          membershipAutoRenew: order.autoRenew,
-          membershipRenewTier: order.autoRenew ? order.tier : null,
-          firstPaidAt: state.firstPaidAt ? undefined : now,
-          totalPaidCents: { increment: order.amountCents },
-        },
-      });
-
-      return tx.membershipOrder.findUniqueOrThrow({ where: { id: order.id } });
+    // 结算逻辑只有一处（applyPaidOrder），真实渠道回调走的是同一个函数
+    const settled = await applyPaidOrder({
+      orderId: order.id,
+      transactionId: mockTransactionId(order.orderNo, order.payChannel),
     });
-
-    // 返现与优惠券的结算放在事务之外，并且整体 try/catch 兜住：
-    // 此刻钱已经到账、会员已经生效，返现失败只该记日志（可以事后补），
-    // 绝不能把会员一起回滚掉 —— 那才是真正的「付了钱没到账」。
-    try {
-      await referralService.onOrderPaid({
-        orderNo: order.orderNo,
-        userId,
-        amountCents: order.amountCents,
-        tier: order.tier,
-        period: order.period,
-        isFirstPurchase: !state.firstPaidAt,
-        isAutoRenew: false,
-      });
-      if (order.couponId) await referralService.consumeCoupon(order.couponId, order.orderNo);
-    } catch (error) {
-      logger.error({ msg: 'referral settlement failed', orderNo: order.orderNo, err: error });
-    }
-
-    return { order: toOrderView(updated), status: await resolveMembership(userId) };
+    if (!settled.changed) throw new ConflictError('该订单已经支付过了');
+    return { order: toOrderView(settled.order), status: await resolveMembership(userId) };
   },
 
   async cancelOrder(userId: number, orderNo: string) {

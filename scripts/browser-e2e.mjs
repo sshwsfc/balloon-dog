@@ -197,7 +197,16 @@ class CDP {
     return this.eval(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return false;
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      /*
+       * 设置框里的值必须用**元素自己那个原型**上的 setter：拿 HTMLInputElement 的
+       * setter 去写 <textarea> 会抛 "TypeError: Illegal invocation"（本仓库第一次
+       * 往 textarea 里填字时才暴露出来）。React 受控组件也只认这种方式 ——
+       * 直接 el.value = x 不会触发 onChange。
+       */
+      const proto = el instanceof window.HTMLTextAreaElement
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
       setter.call(el, ${JSON.stringify(value)});
       el.dispatchEvent(new Event('input', { bubbles: true }));
       return true;
@@ -418,6 +427,393 @@ async function testParent(cdp) {
       return { status: r.status, json };
     })()`)
 
+  // ── 家庭成员（规划 §5.1）────────────────────────────────────────────
+  // 一段设备可以由多位家长一起看，角色决定「能不能写」。
+  // 这里验主人视角的界面（名单 / 打码手机号 / 邀请表单）；
+  // 邀请、改角色、移除这些**写路径**由 server:e2e:device-members 的 67 项覆盖 ——
+  // 浏览器里重复一遍没有增量，反而要在种子库里造一堆账号。
+  section('家长端 5a. 家庭成员（主人视角）')
+  await cdp.goto('/devices')
+  await sleep(2600)
+  const { json: devsForRole } = await parentApi('/api/devices')
+  const ownerDev = (devsForRole?.devices ?? [])[0] ?? null
+  check(
+    '设备列表带角色字段：主人 canWrite / canManageMembers 都是 true',
+    ownerDev?.role === 'owner' && ownerDev?.canWrite === true && ownerDev?.canManageMembers === true,
+    JSON.stringify({
+      role: ownerDev?.role,
+      canWrite: ownerDev?.canWrite,
+      canManage: ownerDev?.canManageMembers,
+    }),
+  )
+  const openMembers = await cdp.clickText('家庭成员')
+  await sleep(1000)
+  const memberText = await cdp.eval('document.body.innerText')
+  check(
+    '主人点「家庭成员」能打开管理弹窗',
+    openMembers === true && memberText.includes('一台设备可以由多位家长一起看'),
+    memberText.slice(0, 160).replace(/\n/g, ' | '),
+  )
+  check('名单里第一行就是设备主人', memberText.includes('设备主人'))
+  check(
+    '成员手机号是打码的，不是完整号码',
+    /\d{3}\*{4}\d{4}/.test(memberText),
+    (memberText.match(/\d{3}\*{4}\d{4}/) || ['无'])[0],
+  )
+  check(
+    '主人能看到邀请表单（角色两档 + 邀请按钮）',
+    memberText.includes('邀请加入') &&
+      memberText.includes('只读（只能看）') &&
+      memberText.includes('管理员（能改设置）'),
+  )
+  await cdp.clickText('关闭')
+  await sleep(400)
+
+  // ── 孩子档案与今日任务（规划 §5.2）──────────────────────────────────
+  // 档案本身用接口建 / 挂设备 / 删（写路径已在 server:e2e:children 里逐个断言过），
+  // 浏览器这边只验「家长真的能看懂并操作」的那几步：列出档案、加一条任务、
+  // 勾一下完成、删掉档案后设备还在。
+  section('家长端 5d. 孩子档案与今日任务（界面增改删）')
+  const childName = `用例孩子${Date.now() % 100000}`
+  const { json: childCreated, status: childCreateStatus } = await parentApi('/api/children', {
+    method: 'POST',
+    // parentApi 把 init 原样交给 fetch：**对象 body 会被 fetch 变成 "[object Object]"**，
+    // 所以必须自己 JSON.stringify（本文件其它写请求也是这个写法）。
+    body: JSON.stringify({
+      name: childName,
+      birthYear: new Date().getFullYear() - 9,
+      school: '用例小学',
+    }),
+  })
+  const childId = childCreated?.child?.id ?? null
+  check(
+    '接口先建一份孩子档案（供界面用例使用）',
+    childCreateStatus === 201 && Boolean(childId),
+    `HTTP ${childCreateStatus}`,
+  )
+
+  await cdp.goto('/children')
+  await sleep(2600)
+  let childText = await cdp.eval('document.body.innerText')
+  check(
+    '孩子档案页列出刚建的档案',
+    childText.includes(childName),
+    childText.slice(0, 200).replace(/\n/g, ' | '),
+  )
+  check(
+    '年龄由出生年份现算，不是存下来的数字',
+    childText.includes('9 岁'),
+    (childText.match(/\d+ 岁/) || ['没找到年龄'])[0],
+  )
+  check('还没有任务时显示空态文案', childText.includes('今天还没有任务'))
+
+  await cdp.fill('input[placeholder*="练琴"]', '用例任务：练琴 30 分钟')
+  const addTaskClicked = await cdp.clickText('添加')
+  await sleep(2200)
+  childText = await cdp.eval('document.body.innerText')
+  check(
+    '界面上能加一条今日任务',
+    addTaskClicked === true && childText.includes('用例任务：练琴 30 分钟'),
+    childText.slice(0, 200).replace(/\n/g, ' | '),
+  )
+  const { json: tasksAfterAdd } = await parentApi(`/api/children/${childId}/tasks`)
+  check(
+    '任务真的落库了（接口核对标题与未完成状态）',
+    (tasksAfterAdd?.tasks ?? []).some(
+      (task) => task.title === '用例任务：练琴 30 分钟' && task.done === false,
+    ),
+    JSON.stringify(tasksAfterAdd?.tasks ?? []),
+  )
+
+  const toggledDone = await cdp.eval(`(() => {
+    const button = [...document.querySelectorAll('button[aria-label]')]
+      .find((node) => node.getAttribute('aria-label') === '标记完成');
+    if (!button) return false;
+    button.click();
+    return true;
+  })()`)
+  await sleep(2200)
+  childText = await cdp.eval('document.body.innerText')
+  check(
+    '点一下就把任务标记完成，进度跟着变',
+    toggledDone === true && childText.includes('已完成 1/1'),
+    childText.slice(0, 200).replace(/\n/g, ' | '),
+  )
+
+  const { json: devsForChild } = await parentApi('/api/devices')
+  const childDevice = (devsForChild?.devices ?? [])[0] ?? null
+  if (!childDevice) {
+    check('库里没有设备时跳过设备归属断言（不算失败）', true, '没有可用设备')
+  } else {
+    const { status: assignStatus } = await parentApi(`/api/children/${childId}/devices`, {
+      method: 'PUT',
+      body: JSON.stringify({ deviceIds: [childDevice.id] }),
+    })
+    await cdp.goto('/children')
+    await sleep(2400)
+    childText = await cdp.eval('document.body.innerText')
+    check(
+      '设备归属整组替换后，档案里出现这台设备',
+      assignStatus === 200 && childText.includes(childDevice.name),
+      `HTTP ${assignStatus} / ${childText.slice(0, 200).replace(/\n/g, ' | ')}`,
+    )
+  }
+
+  const { status: childDeleteStatus } = await parentApi(`/api/children/${childId}`, {
+    method: 'DELETE',
+  })
+  await cdp.goto('/children')
+  await sleep(2400)
+  childText = await cdp.eval('document.body.innerText')
+  check(
+    '删掉档案后列表里不再有它',
+    childDeleteStatus === 200 && !childText.includes(childName),
+    `HTTP ${childDeleteStatus}`,
+  )
+  if (childDevice) {
+    const { json: devsAfterDelete } = await parentApi('/api/devices')
+    check(
+      '删档案只是解绑：设备还在，childId 被清空',
+      (devsAfterDelete?.devices ?? []).some(
+        (device) => device.id === childDevice.id && !device.childId,
+      ),
+      JSON.stringify(
+        (devsAfterDelete?.devices ?? []).map((d) => ({ id: d.id, childId: d.childId })),
+      ),
+    )
+  }
+
+  // ── 合规与隐私（规划 §5.3）────────────────────────────────────────────
+  // 同意留痕 / 最小必要采集说明 / 导出 / 注销。这里**只做不破坏种子库的动作**：
+  // 「同意」是幂等的（重复同意不会造假记录），可以真点一遍界面；
+  // 「撤回」和「注销」会立刻删掉这个账号的设备记录，所以只验界面能不能走到确认那一步，
+  // 不提交 —— 破坏性路径由 server:e2e:privacy 的 76 项覆盖。
+  section('家长端 5e. 合规与隐私（授权 / 采集说明 / 导出 / 注销界面）')
+  const { json: privacyDocs, status: docsStatus } = await parentApi('/api/privacy/docs')
+  check(
+    '合规目录接口可用：两份必读文档 + 最小必要采集清单',
+    docsStatus === 200 &&
+      (privacyDocs?.docs ?? []).length === 2 &&
+      (privacyDocs?.collection ?? []).length >= 10 &&
+      Boolean(privacyDocs?.version),
+    `HTTP ${docsStatus} / docs=${(privacyDocs?.docs ?? []).length} / collection=${(privacyDocs?.collection ?? []).length}`,
+  )
+
+  await cdp.goto('/privacy')
+  await sleep(2600)
+  let privacyText = await cdp.eval('document.body.innerText')
+  check(
+    '合规页把四件事都摆在页面上',
+    privacyText.includes('合规与隐私') &&
+      privacyText.includes('监护授权与告知') &&
+      privacyText.includes('我们收集什么、留多久') &&
+      privacyText.includes('导出我的数据') &&
+      privacyText.includes('注销账号'),
+    privacyText.slice(0, 200).replace(/\n/g, ' | '),
+  )
+
+  await cdp.clickText('我们收集什么、留多久')
+  await sleep(700)
+  privacyText = await cdp.eval('document.body.innerText')
+  check(
+    '采集清单展开后逐项写清用途、保存期限与存放位置',
+    privacyText.includes('位置与轨迹') &&
+      privacyText.includes('保留到账号删除') &&
+      privacyText.includes('用途') &&
+      privacyText.includes('存放位置'),
+    privacyText.slice(0, 240).replace(/\n/g, ' | '),
+  )
+
+  const { json: consentsBefore } = await parentApi('/api/privacy/consents')
+  const pendingDoc = (consentsBefore?.consents ?? []).find((item) => !item.accepted) ?? null
+  if (!pendingDoc) {
+    // 没有待同意的文档时也凑满同样条数，免得套件总数随「这台账号同意过没有」忽多忽少。
+    check(
+      '已全部同意时服务端两名文档都是 accepted',
+      (consentsBefore?.consents ?? []).length === 2 &&
+        (consentsBefore?.consents ?? []).every((item) => item.accepted),
+      JSON.stringify((consentsBefore?.consents ?? []).map((item) => [item.docType, item.accepted])),
+    )
+    check(
+      '已同意的记录里存的是当前版本（不是旧版本硬撑）',
+      (consentsBefore?.consents ?? []).every(
+        (item) => item.record?.docVersion === item.version,
+      ) && Boolean(privacyDocs?.version),
+      JSON.stringify((consentsBefore?.consents ?? []).map((item) => item.record?.docVersion)),
+    )
+  } else {
+    const openedRead = await cdp.clickText('阅读并同意')
+    await sleep(900)
+    const readText = await cdp.eval('document.body.innerText')
+    check(
+      '点「阅读并同意」先给出全文，不是直接记一条同意',
+      openedRead === true && readText.includes('我已阅读并同意'),
+      readText.slice(0, 200).replace(/\n/g, ' | '),
+    )
+    const accepted = await cdp.clickText('我已阅读并同意')
+    await sleep(2400)
+    const { json: consentsAfter } = await parentApi('/api/privacy/consents')
+    const nowAccepted = (consentsAfter?.consents ?? []).find(
+      (item) => item.docType === pendingDoc.docType,
+    )
+    check(
+      '确认后服务端真的留下了同意记录（版本 + 时间）',
+      accepted === true && nowAccepted?.accepted === true && Boolean(nowAccepted?.record?.docVersion),
+      JSON.stringify(nowAccepted?.record ?? null),
+    )
+  }
+
+  await cdp.goto('/privacy')
+  await sleep(2400)
+  const afterConsentText = await cdp.eval('document.body.innerText')
+  // 这一条必须在同意之后读：一份都没同意时页面本来就不该给「撤回同意」。
+  check('已同意的文档同时给出「撤回同意」入口', afterConsentText.includes('撤回同意'))
+  const openedDeletion = await cdp.clickText('申请注销')
+  await sleep(900)
+  const deletionText = await cdp.eval('document.body.innerText')
+  check(
+    '注销只从确认框开始：要密码，还要手打确认词',
+    openedDeletion === true &&
+      deletionText.includes('申请注销账号') &&
+      deletionText.includes('请输入「删除我的账号」以确认'),
+    deletionText.slice(0, 200).replace(/\n/g, ' | '),
+  )
+  check(
+    '确认框写清了「立刻做什么、冷静期后做什么」',
+    deletionText.includes('现在立刻') && deletionText.includes('7 天后'),
+  )
+  await cdp.clickText('稍后再说')
+  await sleep(700)
+  const { json: deletionAfterClose } = await parentApi('/api/privacy/deletion')
+  check(
+    '关掉确认框不会真的排期注销',
+    !deletionAfterClose?.deletion?.scheduled,
+    JSON.stringify(deletionAfterClose?.deletion ?? null),
+  )
+
+  const { json: exported, status: exportStatus } = await parentApi('/api/privacy/export')
+  check(
+    '导出接口给出账号与采集清单（元数据，不含照片文件本身）',
+    exportStatus === 200 &&
+      String(exported?.account?.phone ?? '').startsWith('138') &&
+      (exported?.collection ?? []).length >= 10,
+    `HTTP ${exportStatus}`,
+  )
+
+  // ── 会员中心的支付管线（规划 §5.4）──────────────────────────────────
+  // 这一段的边界要写清楚：**只读 + 只点开收银台，不真的付款、也不退款**。
+  // 种子库里的演示家长是「超级会员」，真付出一次会把档位换成订单那一档
+  // （默认 tab 是「会员」），退款又会把它降回 free —— 后面依赖会员身份的用例
+  // 会跟着变色。下单 → 回调 → 开通 → 退款 → 收回权益的完整链路，由
+  // `server:e2e:payments`（82 项，自带后端 + 假渠道）覆盖；这里只验家长端看得见的：
+  // 渠道实况是否如实、没配的渠道缺哪个变量、收银台有没有标「模拟支付」、
+  // 以及「只点开收银台」不会凭空产生订单。
+  section('家长端 5f. 会员中心与支付管线（目录实况 / 渠道缺什么 / 收银台）')
+  {
+    const { json: catalog, status: catalogStatus } = await parentApi('/api/payments/catalog')
+    check(
+      '支付目录接口给出渠道实况、退款窗口与提示文案',
+      catalogStatus === 200 &&
+        (catalog?.channels ?? []).length === 2 &&
+        typeof catalog?.notice === 'string' &&
+        catalog.notice.length > 0 &&
+        catalog?.refundWindowDays >= 1,
+      `HTTP ${catalogStatus} / channels=${(catalog?.channels ?? []).length} / window=${catalog?.refundWindowDays}`,
+    )
+
+    const unconfigured = (catalog?.channels ?? []).filter((c) => !c.configured)
+    check(
+      '没配的渠道如实列出「缺哪个环境变量」，而不是假装可用',
+      unconfigured.length === 0 ||
+        unconfigured.every(
+          (c) =>
+            (c.missing ?? []).length > 0 &&
+            c.missing.every((key) => /^[A-Z][A-Z0-9_]*$/.test(key)),
+        ),
+      JSON.stringify(unconfigured.map((c) => [c.key, c.missing])),
+    )
+
+    check(
+      '测试渠道只在测试环境出现，且写明「不联网、不扣款」',
+      !catalog?.fakeAvailable ||
+        (catalog?.available ?? []).some(
+          (c) => c.key === 'fake' && /不联网|不扣款/.test(c.note ?? ''),
+        ),
+      JSON.stringify((catalog?.available ?? []).map((c) => c.key)),
+    )
+
+    const { json: ordersBefore } = await parentApi('/api/payments/orders?pageSize=10')
+    const ordersBeforeCount = (ordersBefore?.orders ?? []).length
+
+    await cdp.goto('/membership')
+    await sleep(2600)
+    let memberText = await cdp.eval('document.body.innerText')
+    check(
+      '会员中心把服务端那句渠道实况原样显示出来（文案不由前端编）',
+      memberText.includes(catalog.notice),
+      memberText.slice(0, 200).replace(/\n/g, ' | '),
+    )
+    check(
+      '支付宝与微信支付都列在页面上，没配的标「未配置」',
+      memberText.includes('支付宝') &&
+        memberText.includes('微信支付') &&
+        (unconfigured.length === 0 || memberText.includes('未配置')),
+      unconfigured.map((c) => c.key).join('、') || '两个都配好了',
+    )
+    check(
+      '页面写明退款窗口天数（取自目录，不是前端写死的）',
+      memberText.includes(`支付后 ${catalog.refundWindowDays} 天内可以自助退款`),
+      `目录说 ${catalog.refundWindowDays} 天`,
+    )
+    check('充值记录区块在位', memberText.includes('充值记录'))
+
+    // 打开收银台：套餐卡本身就是一个 button，点它才会拉起支付弹层。
+    const opened = await cdp.eval(`(() => {
+      const b = [...document.querySelectorAll('button')].find(
+        (x) => /￥/.test(x.textContent) && /折合|自动续费/.test(x.textContent),
+      );
+      if (!b) return false;
+      b.click();
+      return true;
+    })()`)
+    await sleep(1400)
+    const cashierText = await cdp.eval('document.body.innerText')
+    check(
+      '收银台给出支付方式与应付金额',
+      opened === true &&
+        cashierText.includes('支付方式') &&
+        /确认支付\s*￥/.test(cashierText),
+      cashierText.slice(0, 200).replace(/\n/g, ' | '),
+    )
+    check(
+      '还开着模拟支付时收银台显著标注「不会真的扣款」；关了则如实说缺什么',
+      catalog.mockPay
+        ? cashierText.includes('不会真的扣款')
+        : cashierText.includes('缺少：'),
+      `mockPay=${catalog.mockPay}`,
+    )
+
+    // 只点开、不确认：重新进页面后订单数必须没变。
+    await cdp.goto('/membership')
+    await sleep(2200)
+    const { json: ordersAfter } = await parentApi('/api/payments/orders?pageSize=10')
+    check(
+      '只点开收银台不会凭空多出订单（没点确认支付就什么都没提交）',
+      (ordersAfter?.orders ?? []).length === ordersBeforeCount,
+      `之前 ${ordersBeforeCount} / 之后 ${(ordersAfter?.orders ?? []).length}`,
+    )
+
+    const bareStatus = await cdp.eval(`(async () => {
+      const r = await fetch('/api/payments/orders');
+      return r.status;
+    })()`)
+    check(
+      '支付订单接口未登录时 401，而不是把别人的订单吐出来',
+      bareStatus === 401,
+      `HTTP ${bareStatus}`,
+    )
+  }
+
   // 种子库里多数设备没有应用清单，挑一台真有清单的设备来测；一台都没有就退化成断言空态。
   const { json: deviceList } = await parentApi('/api/devices')
   let fixture = null
@@ -526,6 +922,376 @@ async function testParent(cdp) {
   // 安全区一直有个「能停用围栏」的假印象：服务端有 enabled 字段、也按它过滤下发，
   // 但家长端类型里没这个字段、界面上没有开关 —— 家长根本做不到「先停掉学校这条，
   // 放假期间别报警」。这里从 UI 真实点一遍开关，并回接口核对。
+  // ── 帮助与反馈（规划 §5.5）──────────────────────────────────────────
+  // 工单属于账号，不属于设备。这里验「家长能提交、能补充说明、关闭后不能再回」，
+  // 以及三条诚实边界：**没有附件上传**、正文长度上限取服务端的值、家长视图里
+  // **看不到客服账号名**。后台那一侧的列表 / 状态流转由 server:e2e:tickets 的 69 项覆盖。
+  section('家长端 5g. 帮助与反馈（工单提交 / 补充说明 / 关闭后不可回）')
+  {
+    const { json: supportConfig, status: configStatus } = await parentApi('/api/support/config')
+    check(
+      '工单配置来自服务端：分类、未关闭上限、正文上限与边界说明都在',
+      configStatus === 200 &&
+        (supportConfig?.categories ?? []).length >= 5 &&
+        supportConfig.categories.every((c) => c.key && c.label) &&
+        typeof supportConfig.openLimit === 'number' &&
+        supportConfig.openLimit >= 1 &&
+        supportConfig.bodyMax >= 100 &&
+        typeof supportConfig.notice === 'string' &&
+        supportConfig.notice.length > 5,
+      `HTTP ${configStatus} / 分类 ${(supportConfig?.categories ?? []).length} / 未关闭上限 ${supportConfig?.openLimit} / 正文上限 ${supportConfig?.bodyMax}`,
+    )
+    const category =
+      (supportConfig?.categories ?? []).find((c) => c.key === 'payment') ?? supportConfig.categories[0]
+
+    // 反复跑这一套会留下历史工单。把上一次遗留的「用例工单」关掉，
+    // 否则未关闭数量可能顶到上限、新建按钮被禁用（这不是产品缺陷，是测试自己的卫生）。
+    const adminLogin = await cdp.eval(`(async () => {
+      const r = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: ${JSON.stringify(ADMIN_USER)}, password: ${JSON.stringify(ADMIN_PASS)} }),
+      });
+      const json = await r.json().catch(() => null);
+      return { status: r.status, token: json?.token ?? null };
+    })()`)
+    check('后台账号可登录（供后台接口配合本节的关闭流程）', adminLogin.status === 200 && !!adminLogin.token, `HTTP ${adminLogin.status}`)
+    const adminApi = (path, options = {}) =>
+      cdp.eval(`(async () => {
+        const headers = Object.assign(
+          { Authorization: 'Bearer ' + ${JSON.stringify(adminLogin.token)} },
+          ${JSON.stringify(options.body ? { 'Content-Type': 'application/json' } : {})},
+        );
+        const init = Object.assign({}, ${JSON.stringify({ ...options, headers: undefined })}, { headers });
+        const r = await fetch(${JSON.stringify(path)}, init);
+        let json = null;
+        try { json = await r.json() } catch {}
+        return { status: r.status, json };
+      })()`)
+
+    const { json: before } = await parentApi('/api/support/tickets')
+    const leftovers = (before?.tickets ?? []).filter(
+      (item) => item.status !== 'closed' && item.subject.startsWith('用例工单'),
+    )
+    for (const item of leftovers) {
+      await adminApi(`/api/admin/tickets/${item.ticketNo}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'closed' }),
+      })
+    }
+
+    await cdp.goto('/support')
+    await sleep(2600)
+    let supportText = await cdp.eval('document.body.innerText')
+    check(
+      '帮助与反馈页面打开，标题与「边界说明」都显示出来',
+      supportText.includes('帮助与反馈') && supportText.includes(supportConfig.notice),
+      supportText.slice(0, 180).replace(/\n/g, ' | '),
+    )
+    check(
+      '页面上完全没有附件上传入口（不做假按钮）',
+      (await cdp.eval(`document.querySelectorAll('input[type="file"]').length`)) === 0,
+    )
+
+    const subject = `用例工单：端到端 ${Date.now()}`
+    check('打开「新建工单」弹窗', await cdp.clickText('新建工单'))
+    await sleep(900)
+    check(
+      '分类按钮按服务端下发的 label 渲染',
+      await cdp.clickText(category.label),
+      category.label,
+    )
+    if (category.hint) {
+      check(
+        '选中分类后给出「该写什么」的提示语',
+        (await cdp.eval('document.body.innerText')).includes(category.hint),
+        category.hint,
+      )
+    }
+    await cdp.fill('input[placeholder*="一句话说明问题"]', subject)
+    await cdp.fill('textarea', '浏览器端到端验证：提交一条工单，然后补充说明。')
+    check(
+      '正文长度上限用服务端的值（不是前端写死）',
+      (await cdp.eval(`document.querySelector('textarea')?.maxLength`)) === supportConfig.bodyMax,
+      `DOM ${await cdp.eval(`document.querySelector('textarea')?.maxLength`)} / 服务端 ${supportConfig.bodyMax}`,
+    )
+    check(
+      '弹窗里也没有附件上传入口',
+      (await cdp.eval(`document.querySelectorAll('input[type="file"]').length`)) === 0,
+    )
+    check('提交工单', await cdp.clickText('提交'))
+    await sleep(2400)
+    supportText = await cdp.eval('document.body.innerText')
+    check(
+      '新工单出现在列表里，状态是服务端下发的「待处理」',
+      supportText.includes(subject) && supportText.includes('待处理'),
+      supportText.slice(0, 200).replace(/\n/g, ' | '),
+    )
+
+    const { json: mine } = await parentApi('/api/support/tickets')
+    const ticket = (mine?.tickets ?? []).find((item) => item.subject === subject)
+    check(
+      '工单真的落库了（服务端查得到，角色与分类都对）',
+      !!ticket && ticket.status === 'open' && ticket.category === category.key && ticket.replies.length === 0,
+      JSON.stringify(ticket ?? null).slice(0, 220),
+    )
+    check(
+      '家长视图里没有客服账号名（服务端不下发）',
+      !JSON.stringify(ticket ?? {}).includes('adminName'),
+    )
+
+    const opened = await cdp.eval(`(() => {
+      const card = [...document.querySelectorAll('[class*="cursor-pointer"]')].find((el) => el.textContent.includes(${JSON.stringify(subject)}));
+      if (!card) return false;
+      card.click();
+      return true;
+    })()`)
+    check('点开工单详情', opened)
+    await sleep(1300)
+    const detailText = await cdp.eval('document.body.innerText')
+    check(
+      '详情里能看到自己写的正文与状态',
+      detailText.includes('浏览器端到端验证') && detailText.includes('待处理'),
+      detailText.slice(0, 200).replace(/\n/g, ' | '),
+    )
+    await cdp.fill('textarea', '补充说明：这是端到端验证追加的一条回复。')
+    check('发送补充说明', await cdp.clickText('发送'))
+    await sleep(2000)
+    const { json: replied } = await parentApi(`/api/support/tickets/${ticket.ticketNo}`)
+    check(
+      '补充说明写进了工单，角色是家长',
+      (replied?.ticket?.replies ?? []).some((r) => r.by === 'parent' && r.body.includes('端到端验证追加')),
+      JSON.stringify(replied?.ticket?.replies ?? []).slice(0, 200),
+    )
+
+    const adminReply = await adminApi(`/api/admin/tickets/${ticket.ticketNo}/replies`, {
+      method: 'POST',
+      body: JSON.stringify({ body: '客服回复：收到，我们看一下。' }),
+    })
+    check('客服能回复（后台接口，家长端会看到）', adminReply.status === 200 || adminReply.status === 201, `HTTP ${adminReply.status}`)
+    const adminClose = await adminApi(`/api/admin/tickets/${ticket.ticketNo}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status: 'closed' }),
+    })
+    check('工单可以被关闭', adminClose.status === 200, `HTTP ${adminClose.status}`)
+
+    await cdp.goto('/support')
+    await sleep(2400)
+    supportText = await cdp.eval('document.body.innerText')
+    check(
+      '列表上这条工单已显示「已关闭」',
+      supportText.includes(subject) && supportText.includes('已关闭'),
+      supportText.slice(0, 200).replace(/\n/g, ' | '),
+    )
+    const reopened = await cdp.eval(`(() => {
+      const card = [...document.querySelectorAll('[class*="cursor-pointer"]')].find((el) => el.textContent.includes(${JSON.stringify(subject)}));
+      if (!card) return false;
+      card.click();
+      return true;
+    })()`)
+    check('再次打开已关闭的工单', reopened)
+    await sleep(1300)
+    const closedText = await cdp.eval('document.body.innerText')
+    check(
+      '已关闭的工单里写着「不能再回，请新建一条」',
+      closedText.includes('新建一条工单'),
+      closedText.slice(0, 220).replace(/\n/g, ' | '),
+    )
+    check(
+      '已关闭的工单不再提供回复输入框（关闭不是颜色，是真的关）',
+      (await cdp.eval(`document.querySelectorAll('textarea').length`)) === 0,
+    )
+    check('详情里能看到客服的回复', closedText.includes('客服回复：收到'), closedText.slice(0, 200).replace(/\n/g, ' | '))
+    await cdp.clickText('关闭')
+    await sleep(500)
+
+    // 入口开关（规划 §5.5 的 `support.tickets`）：关掉之后家长端不能再提新的，
+    // 但**历史必须还能看** —— 关一个入口不能顺手把用户的问题记录弄丢。
+    // server:e2e:tickets 验的是接口契约，这里验界面有没有如实照做。
+    const flagOff = await adminApi('/api/admin/flags/support.tickets', {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled: false }),
+    })
+    check('运营能关掉工单入口（后台接口）', flagOff.status === 200, `HTTP ${flagOff.status}`)
+    await cdp.goto('/support')
+    await sleep(2400)
+    const intakeClosedText = await cdp.eval('document.body.innerText')
+    check(
+      '入口关掉后页面如实说明，且不再给「新建工单」按钮',
+      intakeClosedText.includes('客服工单暂时关闭') &&
+        (await cdp.eval(`[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === '新建工单')`)) === false,
+      intakeClosedText.slice(0, 160).replace(/\n/g, ' | '),
+    )
+    check(
+      '入口关掉后历史工单仍然看得见（历史不能随入口一起消失）',
+      intakeClosedText.includes(subject),
+      subject,
+    )
+    const flagOn = await adminApi('/api/admin/flags/support.tickets', {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled: true }),
+    })
+    check('开关恢复开启（不给下一次运行留雷）', flagOn.status === 200, `HTTP ${flagOn.status}`)
+  }
+
+  // ── 绑定新设备：对话框里的孩子端下载入口 ─────────────────────────────
+  // 「还没装孩子端」的家长点开绑定对话框时手上是空的：绑定码在孩子端首页，
+  // 而孩子端还没装。所以下载方式与二维码必须在**这个对话框里**，不能指望他
+  // 关掉对话框、自己去别处找安装入口（新手引导只在第一次打开时出现）。
+  // 这里点真实按钮打开对话框，并把二维码真的解码一遍 —— 二维码与手敲地址
+  // 对不上时，家长是「扫了没反应」，连报错都没有，是最难排查的一类问题。
+  section('家长端 5h. 绑定新设备（对话框里的孩子端下载入口）')
+  {
+    await cdp.goto('/devices')
+    await sleep(2600)
+    // 已有设备时是「绑定新设备」，一台都没有时是空态里的「绑定设备」——
+    // 两个入口打开的是同一个对话框。
+    const opened = await cdp.eval(`(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const target =
+        buttons.find((b) => (b.textContent || '').includes('绑定新设备')) ??
+        buttons.find((b) => (b.textContent || '').trim() === '绑定设备');
+      if (!target) return false;
+      target.click();
+      return true;
+    })()`)
+    check('设备页能打开绑定对话框', opened === true)
+    await sleep(700)
+
+    const dialog = await cdp.eval(`(async () => {
+      const content = document.querySelector('[data-slot="dialog-content"]');
+      if (!content) return { found: false };
+      const text = content.innerText;
+      const svgs = Array.from(content.querySelectorAll('svg')).filter((s) => s.querySelector('path'));
+      const best = svgs
+        .map((el) => ({
+          el,
+          d: Array.from(el.querySelectorAll('path')).map((p) => p.getAttribute('d') || '').join(''),
+        }))
+        .sort((a, b) => b.d.length - a.d.length)[0];
+      const link = content.querySelector('a[download]');
+      let decoded = 'no-detector';
+      if (best && typeof BarcodeDetector !== 'undefined') {
+        try {
+          const xml = new XMLSerializer().serializeToString(best.el);
+          const blobUrl = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml' }));
+          const img = new Image();
+          await new Promise((res, rej) => {
+            img.onload = res;
+            img.onerror = rej;
+            img.src = blobUrl;
+          });
+          const codes = await new BarcodeDetector({ formats: ['qr_code'] }).detect(
+            await createImageBitmap(img),
+          );
+          decoded = codes.length ? codes[0].rawValue : '';
+          URL.revokeObjectURL(blobUrl);
+        } catch (error) {
+          decoded = 'error: ' + error.message;
+        }
+      }
+      const shownUrl = Array.from(content.querySelectorAll('p'))
+        .map((p) => (p.textContent || '').trim())
+        .find((t) => t.startsWith('http') && t.endsWith('/download/balloon-dog-agent.apk'));
+      return {
+        found: true,
+        hasHeading: text.includes('还没装孩子端？先下载'),
+        hasWhy: text.includes('孩子端只装在被管的那台手机上'),
+        hasManual: text.includes('手动下载方式'),
+        linkHref: link ? link.getAttribute('href') : null,
+        codeInput: Array.from(content.querySelectorAll('input')).some((i) =>
+          (i.getAttribute('placeholder') || '').includes('A3F9K2M7'),
+        ),
+        // 下载入口加进来之后，最容易犯的错是「把必填的绑定码挤到折叠线以下」——
+        // 绑新设备的家长手上就有码，不该为了填它先滚一屏。
+        codeInputBottom: (() => {
+          const el = Array.from(content.querySelectorAll('input')).find((i) =>
+            (i.getAttribute('placeholder') || '').includes('A3F9K2M7'),
+          );
+          return el ? Math.round(el.getBoundingClientRect().bottom) : null;
+        })(),
+        viewportHeight: window.innerHeight,
+        decoded,
+        shownUrl: shownUrl || '',
+        best: best ? { d: best.d, title: (best.el.querySelector('title') || {}).textContent || '' } : null,
+      };
+    })()`)
+    check(
+      '绑定对话框里有孩子端下载入口与「为什么」',
+      dialog.found === true && dialog.hasHeading === true && dialog.hasWhy === true,
+      JSON.stringify({ found: dialog.found, hasHeading: dialog.hasHeading, hasWhy: dialog.hasWhy }),
+    )
+    check(
+      '对话框里渲染出二维码（不是空白 svg）',
+      !!dialog.best && dialog.best.d.length > 500,
+      dialog.best ? `模块路径长=${dialog.best.d.length} 标题=${dialog.best.title}` : '对话框里没有 svg',
+    )
+    check(
+      '对话框里的二维码能解码出孩子端安装包地址',
+      typeof dialog.decoded === 'string' && dialog.decoded.endsWith('/download/balloon-dog-agent.apk'),
+      `解码结果=${dialog.decoded}`,
+    )
+    check(
+      '对话框里的二维码与可手敲地址一致 + <a download> 指向真实路径',
+      dialog.decoded === dialog.shownUrl && dialog.linkHref === '/download/balloon-dog-agent.apk',
+      `二维码=${dialog.decoded} 页面=${dialog.shownUrl} href=${dialog.linkHref}`,
+    )
+    check('下载入口没有挤掉绑定码输入框', dialog.codeInput === true)
+    check(
+      '绑定码输入框不用滚动就看得见（默认折叠状态下）',
+      dialog.codeInputBottom !== null && dialog.codeInputBottom <= dialog.viewportHeight,
+      `输入框底部=${dialog.codeInputBottom}px 视口高=${dialog.viewportHeight}px`,
+    )
+    check('对话框里保留手动下载方式作为退路', dialog.hasManual === true)
+
+    // 默认（排障引导折叠）状态的截图：家长点开对话框先看到的就是这一屏
+    await cdp.shot('/tmp/balloon-dog-bind-dialog.png')
+
+    // 装不上时的排障引导（怎么传过去 / 各厂商怎么放开「禁止安装」）折叠在同一处
+    const guide = await cdp.eval(`(async () => {
+      const content = document.querySelector('[data-slot="dialog-content"]');
+      if (!content) return { found: false };
+      const toggle = Array.from(content.querySelectorAll('button')).find((b) =>
+        (b.textContent || '').includes('装不上？'),
+      );
+      if (!toggle) return { found: false };
+      const expandedBefore = toggle.getAttribute('aria-expanded');
+      toggle.click();
+      await new Promise((r) => setTimeout(r, 350));
+      const text = content.innerText;
+      return {
+        found: true,
+        expandedBefore,
+        expandedAfter: toggle.getAttribute('aria-expanded'),
+        hasTransfer: text.includes('把安装包放到孩子手机上'),
+        hasVendor: text.includes('小米 / 红米'),
+      };
+    })()`)
+    check(
+      '排障引导默认折叠、点开后才展开',
+      guide.found === true && guide.expandedBefore === 'false' && guide.expandedAfter === 'true',
+      JSON.stringify(guide),
+    )
+    check(
+      '展开后能看到「怎么传过去」与各厂商放开「禁止安装」的路径',
+      guide.hasTransfer === true && guide.hasVendor === true,
+    )
+
+    // 再留一张展开排障引导后的截图，便于人工复核折叠内容的排版
+    await cdp.shot('/tmp/balloon-dog-bind-dialog-guide.png')
+    console.log(
+      '\n📸 绑定新设备对话框截图：/tmp/balloon-dog-bind-dialog.png、/tmp/balloon-dog-bind-dialog-guide.png',
+    )
+
+    // 收尾：关掉对话框，别把下一节的起点留在一个遮罩上
+    await cdp.eval(`(() => {
+      const close = document.querySelector('[data-slot="dialog-content"] [data-slot="dialog-close"]');
+      if (close) close.click();
+      return true;
+    })()`)
+    await sleep(400)
+  }
+
   section('家长端 5c. 安全区启停开关（真实点击 + 落库核对）')
   {
     const { json: devs } = await parentApi('/api/devices')
@@ -679,6 +1445,7 @@ async function testAdmin(cdp) {
     ['/admin/quiz-records', ['答题记录'], '答题记录'],
     ['/admin/sms-codes', ['验证码审计'], '验证码审计'],
     ['/admin/membership', ['会员', '套餐'], '会员管理'],
+    ['/admin/payments', ['支付', '收款统计'], '支付'],
     ['/admin/referral', ['分享提成', '统计概览'], '分享提成'],
     ['/admin/logs', ['操作日志'], '操作日志'],
     ['/admin/settings', ['账号设置'], '账号设置'],
@@ -693,13 +1460,14 @@ async function testAdmin(cdp) {
   await cdp.goto('/admin/users')
   await sleep(2800)
   text = await cdp.eval('document.body.innerText')
-  check('家长账号列表显示演示账号', text.includes('张小明') || text.includes(PARENT_PHONE))
   /*
-   * 再确认一次「搜得到」。上面那条依赖演示账号恰好落在第一页，而冒烟测试每跑一次
-   * 都会注册两个临时家长账号 —— 攒到几十个之后，按注册时间倒序的第一页就全是
-   * 「后台处置测试」，演示账号被挤到第二页，这条断言会无缘无故地红。
-   * 搜索路径不依赖分页顺序，和操作日志那节用的是同一个办法。
+   * 只断言「列表真的渲染出了账号行」，**不**断言演示账号在第一页。
+   * 第一页是「按注册时间倒序」，这个顺序不是产品不变量：只要库里攒了足够多的
+   * 账号（每次注册/扫码登录都会留一条），演示账号就会被挤到第二页，这条断言
+   * 就会无缘无故地红 —— 而它红的时候页面其实完全正常。演示账号的存在由下面
+   * 那条「搜得到」来证，搜索不依赖分页顺序（和操作日志那节同一个办法）。
    */
+  check('家长账号列表渲染出账号行', /1[3-9]\d{9}/.test(text), text.slice(0, 140).replace(/\n/g, ' | '))
   await cdp.fill('input[placeholder*="搜索手机号"]', PARENT_PHONE)
   await sleep(2200)
   const searched = await cdp.eval('document.body.innerText')
@@ -788,6 +1556,305 @@ async function testAdmin(cdp) {
       clicked === true && panel.trim().length > 20 && !panel.includes('数据加载失败'),
       panel.trim().slice(0, 90).replace(/\n/g, ' | ') || '内容区是空的',
     )
+  }
+
+  /*
+   * 支付四页（规划 §5.4）：和会员、分享提成一样是「一条路由挂多个标签」。
+   * 另外单独验一件只有后台能看到的事：**渠道没配时后台必须说「未配置」**，
+   * 不能因为统计接口有默认值就显示成一切正常 —— 家长那边下不了单，
+   * 后台却是绿色的，是最容易漏掉的一种坏法。
+   */
+  section('后台 5b. 支付四页（订单 / 退款 / 发票 / 渠道体检）')
+  await cdp.goto('/admin/payments')
+  await sleep(3000)
+  const PAYMENT_TABS = ['收款统计', '订单', '退款', '发票']
+  const paymentsText = await cdp.eval('document.body.innerText')
+  check(
+    '四个标签都在',
+    PAYMENT_TABS.every((label) => paymentsText.includes(label)),
+    PAYMENT_TABS.filter((label) => !paymentsText.includes(label)).join('、') || '全部命中',
+  )
+  for (const label of PAYMENT_TABS) {
+    const clicked = await cdp.eval(`(() => {
+      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)})
+      if (!btn) return false
+      btn.click()
+      return true
+    })()`)
+    await sleep(2200)
+    const panel = await cdp.eval(`(() => {
+      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)})
+      const bar = btn && btn.parentElement
+      const box = bar && bar.nextElementSibling
+      return box ? box.innerText : ''
+    })()`)
+    check(
+      `切到「${label}」后内容区渲染出内容且没落进错误分支`,
+      clicked === true && panel.trim().length > 20 && !panel.includes('数据加载失败'),
+      panel.trim().slice(0, 90).replace(/\n/g, ' | ') || '内容区是空的',
+    )
+    if (label === '收款统计') {
+      check(
+        '渠道体检如实写「已配置 / 未配置」，而不是一律显示正常',
+        /已配置|未配置/.test(panel) && panel.includes('支付渠道配置'),
+        panel.includes('未配置') ? '当前按未配置显示' : '当前显示已配置',
+      )
+    }
+    if (label === '订单') {
+      check(
+        '订单页要么渲染表头、要么明确空态，不留白屏',
+        panel.includes('订单号') || panel.includes('没有符合条件的订单'),
+        panel.trim().slice(0, 90).replace(/\n/g, ' | '),
+      )
+    }
+  }
+
+  const { json: payStats, status: payStatsStatus } = await cdp.eval(`(async () => {
+    const r = await fetch('/api/admin/payments/stats', {
+      headers: { Authorization: 'Bearer ' + localStorage.getItem('balloon_dog_admin_token') },
+    });
+    let json = null;
+    try { json = await r.json() } catch {}
+    return { status: r.status, json };
+  })()`)
+  check(
+    '后台支付统计接口给出渠道体检与坏签名计数',
+    payStatsStatus === 200 &&
+      Array.isArray(payStats?.channels) &&
+      payStats.channels.length >= 1 &&
+      typeof payStats?.badSignatures === 'number' &&
+      typeof payStats?.fakeProvider === 'boolean',
+    `HTTP ${payStatsStatus} / channels=${(payStats?.channels ?? []).length} / badSignatures=${payStats?.badSignatures}`,
+  )
+  check(
+    '统计里的渠道缺哪个环境变量与家长端目录一致',
+    (payStats?.channels ?? []).every(
+      (c) => c.configured === true || (c.missing ?? []).length > 0,
+    ),
+    JSON.stringify((payStats?.channels ?? []).map((c) => [c.key, c.configured, c.missing?.length])),
+  )
+
+  /*
+   * 后台运营三页（规划 §5.5）：告警大盘 / 灰度开关 / 客服工单。
+   *
+   * 这三页最容易的坏法是「界面好看但和口径不一致」—— 所以关键断言都拿接口回值去对：
+   * 告警的阈值与触发来自 overview，开关命中的判定来自 preview，工单的历史来自列表。
+   * 口径本身（分母、null、稳定散列）由 server:e2e:alerts / flags 逐条核算，这里只验
+   * 界面有没有把服务端那句话原样显示出来。
+   */
+  section('后台 5c. 运营三页（告警大盘 / 灰度开关 / 客服工单）')
+  {
+    const adminApi = (path, options = {}) =>
+      cdp.eval(`(async () => {
+        const headers = Object.assign(
+          { Authorization: 'Bearer ' + localStorage.getItem('balloon_dog_admin_token') },
+          ${JSON.stringify(options.body ? { 'Content-Type': 'application/json' } : {})},
+        );
+        const init = Object.assign({}, ${JSON.stringify({ ...options, headers: undefined })}, { headers });
+        const r = await fetch(${JSON.stringify(path)}, init);
+        let json = null;
+        try { json = await r.json() } catch {}
+        return { status: r.status, json };
+      })()`)
+
+    // ── 告警大盘 ─────────────────────────────────────────────────
+    const { json: overview, status: overviewStatus } = await adminApi('/api/admin/alerts/overview')
+    const alerts = overview?.alerts ?? []
+    check(
+      '告警总览给出五条规则，每条都带单位、阈值与口径说明',
+      overviewStatus === 200 &&
+        alerts.length === 5 &&
+        alerts.every(
+          (a) =>
+            !!a.key &&
+            !!a.label &&
+            (a.unit === '%' || a.unit === '条') &&
+            typeof a.threshold === 'number' &&
+            typeof a.triggered === 'boolean' &&
+            typeof a.denominatorText === 'string' &&
+            a.denominatorText.length > 0,
+        ),
+      `HTTP ${overviewStatus} / ${alerts.length} 条 / ${alerts.map((a) => a.key).join(',')}`,
+    )
+    /*
+     * 这条是全节的灵魂：**分母为 0 必须是 null（「没有可统计的对象」），不能是 0**
+     * —— 0% 的意思是「查过了，都正常」，两者混在一张大盘上等于骗人。
+     */
+    const metrics = overview?.metrics ?? []
+    check(
+      '率类指标的分母为 0 时值是 null 而不是 0（「没有数据」不是「都正常」）',
+      metrics.length === 5 &&
+        metrics.every((m) =>
+          m.unit === '条'
+            ? typeof m.value === 'number'
+            : m.denominator === 0
+              ? m.value === null
+              : typeof m.value === 'number',
+        ),
+      metrics.map((m) => `${m.key}:${m.value}/${m.denominator}`).join(' | '),
+    )
+    check(
+      '分母口径写在接口里（未认领的设备不进失联率的分母）',
+      (metrics.find((m) => m.key === 'device_offline')?.denominatorText ?? '').includes('已绑定'),
+      metrics.find((m) => m.key === 'device_offline')?.denominatorText ?? '(缺)',
+    )
+
+    await cdp.goto('/admin/alerts')
+    await sleep(3000)
+    let opsText = await cdp.eval('document.body.innerText')
+    check(
+      '告警大盘三个标签都在，且概览渲染出规则而不是白屏',
+      ['告警总览', '告警规则', '确认记录'].every((label) => opsText.includes(label)) &&
+        !opsText.includes('数据加载失败') &&
+        alerts.filter((a) => opsText.includes(a.label)).length >= 4,
+      opsText.slice(0, 180).replace(/\n/g, ' | '),
+    )
+    // 规则页：改一条阈值再恢复默认，验的是「后台能改口径」与「缺行时回代码默认」两条契约
+    const { json: rulesBefore } = await adminApi('/api/admin/alerts/rules')
+    const targetRule = (rulesBefore?.rules ?? []).find((r) => r.key === 'payment_anomaly')
+    check(
+      '规则列表带代码默认值（便于「恢复默认」）',
+      !!targetRule && typeof targetRule.threshold === 'number' && typeof targetRule.defaultThreshold === 'number',
+      JSON.stringify(targetRule ?? null).slice(0, 160),
+    )
+    const changedThreshold = targetRule.defaultThreshold + 3
+    const patched = await adminApi('/api/admin/alerts/rules/payment_anomaly', {
+      method: 'PATCH',
+      body: JSON.stringify({ threshold: changedThreshold }),
+    })
+    check('后台可以改告警阈值', patched.status === 200, `HTTP ${patched.status}`)
+    const resetOk = await adminApi('/api/admin/alerts/rules/payment_anomaly/reset', { method: 'DELETE' })
+    const { json: rulesAfter } = await adminApi('/api/admin/alerts/rules')
+    const restored = (rulesAfter?.rules ?? []).find((r) => r.key === 'payment_anomaly')
+    check(
+      '「恢复默认」把阈值退回代码里的值（不是留在改过的数上）',
+      resetOk.status === 200 && restored?.threshold === restored?.defaultThreshold,
+      `HTTP ${resetOk.status} / 现在 ${restored?.threshold} / 默认 ${restored?.defaultThreshold}`,
+    )
+    // 确认告警：确认只是「我看过了」，既不改指标也不解除触发
+    const ackCreated = await adminApi('/api/admin/alerts/acks', {
+      method: 'POST',
+      body: JSON.stringify({ key: 'payment_anomaly', note: '端到端验证：这条我看过了' }),
+    })
+    const ackId = ackCreated.json?.ack?.id
+    check('确认告警会留下记录（含确认那一刻的指标快照）', (ackCreated.status === 200 || ackCreated.status === 201) && !!ackId,
+      `HTTP ${ackCreated.status} / ${JSON.stringify(ackCreated.json?.snapshot ?? null).slice(0, 120)}`)
+    await cdp.goto('/admin/alerts')
+    await sleep(2800)
+    opsText = await cdp.eval('document.body.innerText')
+    check(
+      '界面上这条告警变成「已确认」并给出「撤销确认」入口',
+      opsText.includes('撤销确认') && /端到端验证：这条我看过了|已由/.test(opsText),
+      opsText.slice(0, 200).replace(/\n/g, ' | '),
+    )
+    const ackRevoked = await adminApi(`/api/admin/alerts/acks/${ackId}`, { method: 'DELETE' })
+    check('撤销确认是删除记录（不是把状态改成未读）', ackRevoked.status === 200, `HTTP ${ackRevoked.status}`)
+    const { json: acksAfter } = await adminApi('/api/admin/alerts/acks?pageSize=50')
+    check(
+      '撤销后确认列表里没有它了',
+      !(acksAfter?.acks ?? []).some((a) => a.id === ackId),
+      `${(acksAfter?.acks ?? []).length} 条确认记录`,
+    )
+
+    // ── 灰度开关 ─────────────────────────────────────────────────
+    const { json: flags, status: flagsStatus } = await adminApi('/api/admin/flags')
+    const flagRows = flags?.flags ?? []
+    check(
+      '灰度开关清单来自代码（五个开关，各带放量对象与比例）',
+      flagsStatus === 200 &&
+        flagRows.length === 5 &&
+        flagRows.every((f) => !!f.key && ['user', 'device', 'none'].includes(f.bucket) && typeof f.rolloutPercent === 'number'),
+      `HTTP ${flagsStatus} / ${flagRows.length} 个 / ${flagRows.map((f) => f.key).join(',')}`,
+    )
+    const previewUser = flagRows.find((f) => f.bucket === 'user')?.key
+    /*
+     * 试算这块要先把它按比例放量：默认是 100%（全量），全量时「没给对象」也会命中，
+     * 看不出「不确定就不放行」。改成 50% 之后，三条纪律才可验：
+     * 命中与否有明确理由、同一个对象两次一致（稳定散列）、没给对象时保守关闭。
+     */
+    const rolloutPatch = await adminApi(`/api/admin/flags/${previewUser}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ rolloutPercent: 50 }),
+    })
+    check('后台可以把一个能力按比例放量', rolloutPatch.status === 200, `HTTP ${rolloutPatch.status}`)
+    const { json: hitA, status: hitStatus } = await adminApi(`/api/admin/flags/${previewUser}/preview?subjectId=1`)
+    const { json: hitB } = await adminApi(`/api/admin/flags/${previewUser}/preview?subjectId=1`)
+    check(
+      '试算接口对具体对象给出明确命中结果与理由（不猜）',
+      hitStatus === 200 &&
+        typeof hitA?.preview?.hit === 'boolean' &&
+        typeof hitA?.preview?.reasonText === 'string' &&
+        hitA.preview.reasonText.length > 0,
+      `HTTP ${hitStatus} / ${JSON.stringify(hitA?.preview ?? null).slice(0, 140)}`,
+    )
+    check(
+      '同一个对象两次试算结果一致（稳定散列，不是每次抽签）',
+      hitA?.preview?.hit === hitB?.preview?.hit,
+      `${hitA?.preview?.hit} / ${hitB?.preview?.hit}`,
+    )
+    const { json: noSubject } = await adminApi(`/api/admin/flags/${previewUser}/preview`)
+    check(
+      '需要灰度对象却没给时保守判「不命中」并说明原因（不确定就不放行）',
+      noSubject?.preview?.hit === false && /对象/.test(noSubject?.preview?.reasonText ?? ''),
+      JSON.stringify(noSubject?.preview ?? null).slice(0, 140),
+    )
+    const flagReset = await adminApi(`/api/admin/flags/${previewUser}/reset`, { method: 'DELETE' })
+    check(
+      '恢复默认把放量比例退回代码里的值（不给下一次运行留雷）',
+      flagReset.status === 200 && flagReset.json?.flag?.rolloutPercent === 100,
+      `HTTP ${flagReset.status} / ${flagReset.json?.flag?.rolloutPercent}`,
+    )
+    await cdp.goto('/admin/flags')
+    await sleep(2800)
+    opsText = await cdp.eval('document.body.innerText')
+    check(
+      '开关页把每个开关的口径、放量比例与「恢复默认」都渲染出来',
+      flagRows.every((f) => opsText.includes(f.label)) &&
+        opsText.includes('放量比例') &&
+        opsText.includes('恢复默认') &&
+        !opsText.includes('数据加载失败'),
+      opsText.slice(0, 180).replace(/\n/g, ' | '),
+    )
+
+    // ── 客服工单 ─────────────────────────────────────────────────
+    const { json: ticketList, status: ticketStatus } = await adminApi('/api/admin/tickets?pageSize=20')
+    const ticketRows = ticketList?.tickets ?? []
+    check(
+      '后台能看到家长提交的工单（含账号打码信息与分类）',
+      ticketStatus === 200 && ticketRows.length >= 1 && ticketRows.every((t) => !!t.ticketNo && !!t.subject && !!t.status),
+      `HTTP ${ticketStatus} / ${ticketRows.length} 张`,
+    )
+    const newestTicket = ticketRows[0]
+    check(
+      '后台列表给的是客服名字，不下发管理员的登录 id',
+      !JSON.stringify(ticketRows).includes('adminId'),
+      newestTicket ? newestTicket.ticketNo : '(无)',
+    )
+    await cdp.goto('/admin/tickets')
+    await sleep(3000)
+    opsText = await cdp.eval('document.body.innerText')
+    check(
+      '工单页渲染出列表（要么有行、要么是明确空态），不留白屏',
+      !opsText.includes('数据加载失败') && (ticketRows.length === 0 || opsText.includes(newestTicket.subject)),
+      opsText.slice(0, 180).replace(/\n/g, ' | '),
+    )
+    if (newestTicket) {
+      const opened = await cdp.eval(`(() => {
+        const row = [...document.querySelectorAll('tr')].find((el) => el.textContent.includes(${JSON.stringify(newestTicket.subject)}));
+        if (!row) return false;
+        row.click();
+        return true;
+      })()`)
+      await sleep(1600)
+      const detail = await cdp.eval('document.body.innerText')
+      check(
+        '点开一张工单能看到家长写的正文与状态/优先级控件',
+        !opened || (detail.includes(newestTicket.subject.slice(0, 8)) && /状态|优先级/.test(detail)),
+        detail.slice(0, 200).replace(/\n/g, ' | '),
+      )
+      await cdp.clickText('关闭')
+      await sleep(600)
+    }
   }
 
   section('后台 6. 详情弹窗')
@@ -901,6 +1968,13 @@ const RESPONSIVE_ROUTES = [
   { path: '/mode/schedule', wide: false, must: '时段' },
   { path: '/mode/apps', wide: true, must: '应用' },
   { path: '/eye-care', wide: false, must: '护眼' },
+  { path: '/device-health', wide: false, must: '设备健康' },
+  { path: '/notifications', wide: false, must: '消息中心' },
+  { path: '/notifications/settings', wide: false, must: '通知设置' },
+  { path: '/children', wide: false, must: '孩子档案' },
+  { path: '/privacy', wide: false, must: '合规与隐私' },
+  { path: '/support', wide: false, must: '帮助与反馈' },
+  { path: '/time-requests', wide: false, must: '孩子的申请' },
   { path: '/app-plugins', wide: true, must: '插件' },
   { path: '/app-audit', wide: false, must: '审批' },
   { path: '/membership', wide: false, must: '会员中心' },
@@ -1342,6 +2416,7 @@ const TIP_ROUTES = [
   ['/schedule', 'schedule'],
   ['/mode', 'mode'],
   ['/eye-care', 'eyeCare'],
+  ['/device-health', 'deviceHealth'],
   ['/app-plugins', 'appPlugins'],
   ['/app-audit', 'appAudit'],
   ['/call-sms', 'callSms'],
@@ -1734,7 +2809,7 @@ async function testUx(cdp) {
   await cdp.eval(`localStorage.setItem('balloon_dog_language', 'en')`)
   const enProblems = []
   const seedZh = seedChineseRuns()
-  for (const [path] of [['/'], ['/location'], ['/schedule'], ['/insights'], ['/media'], ['/profile'], ['/onboarding']]) {
+  for (const [path] of [['/'], ['/location'], ['/schedule'], ['/insights'], ['/media'], ['/profile'], ['/onboarding'], ['/device-health'], ['/notifications'], ['/notifications/settings'], ['/time-requests']]) {
     await cdp.goto(path)
     await sleep(1500)
     // 数「界面上还剩多少中文」：先扣掉种子数据里的用户内容，再看还剩多少中文

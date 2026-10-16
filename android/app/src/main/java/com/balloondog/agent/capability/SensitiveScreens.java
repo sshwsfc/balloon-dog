@@ -188,7 +188,7 @@ public final class SensitiveScreens {
 
     /** 打开一个放行窗口：应用内即将跳去系统页面。 */
     public static void allowTemporarily(Context context, String hint) {
-        long until = System.currentTimeMillis() + ALLOW_WINDOW_MS;
+        long until = TrustedClock.now() + ALLOW_WINDOW_MS;
         prefs(context).edit()
                 .putLong(KEY_ALLOW_UNTIL, until)
                 .putString(KEY_ALLOW_HINT, hint)
@@ -200,7 +200,7 @@ public final class SensitiveScreens {
     /** 家长还在系统页面里操作时续期，避免读到一半被推走。 */
     public static void renew(Context context) {
         prefs(context).edit()
-                .putLong(KEY_ALLOW_UNTIL, System.currentTimeMillis() + ALLOW_WINDOW_MS)
+                .putLong(KEY_ALLOW_UNTIL, TrustedClock.now() + ALLOW_WINDOW_MS)
                 .apply();
     }
 
@@ -211,7 +211,7 @@ public final class SensitiveScreens {
     /** 当前放行窗口是哪种引导。窗口过期后返回空串。 */
     public static String allowHint(Context context) {
         SharedPreferences p = prefs(context);
-        if (System.currentTimeMillis() >= p.getLong(KEY_ALLOW_UNTIL, 0L)) return "";
+        if (TrustedClock.now() >= p.getLong(KEY_ALLOW_UNTIL, 0L)) return "";
         return p.getString(KEY_ALLOW_HINT, "");
     }
 

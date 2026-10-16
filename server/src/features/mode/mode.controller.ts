@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ah } from '../../shared/asyncHandler';
 import { authenticate, authenticateDevice } from '../../middleware/auth';
-import { resolveDevice, currentDeviceId, currentUserId } from '../../shared/deviceScope';
+import { currentDeviceId, currentUserId, resolveDevice, resolveWritableDevice } from '../../shared/deviceScope';
 import { devicesService } from '../devices/devices.service';
 import { prisma } from '../../prisma';
 import { NotFoundError } from '../../errors';
@@ -40,7 +40,7 @@ export async function getMode(req: Request, res: Response) {
 /** PUT /api/device-mode */
 export async function updateMode(req: Request, res: Response) {
   const patch = updateModeSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json({ success: true, mode: await modeService.updateMode(device, patch) });
 }
 
@@ -53,7 +53,7 @@ export async function getSlots(req: Request, res: Response) {
 /** PUT /api/study-slots —— 整表替换 */
 export async function replaceSlots(req: Request, res: Response) {
   const { slots } = replaceSlotsSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json({ success: true, ...(await modeService.replaceSlots(device, slots)) });
 }
 
@@ -66,14 +66,14 @@ export async function listModeApps(req: Request, res: Response) {
 /** POST /api/mode-apps */
 export async function addModeApp(req: Request, res: Response) {
   const input = addModeAppSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json({ success: true, app: await modeService.addModeApp(device, input) });
 }
 
 /** DELETE /api/mode-apps/:id */
 export async function removeModeApp(req: Request, res: Response) {
   const { id } = modeAppIdSchema.parse(req.params);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json(await modeService.removeModeApp(device, id));
 }
 
@@ -86,7 +86,7 @@ export async function listDeviceApps(req: Request, res: Response) {
 
 /** POST /api/device-apps/refresh —— 让设备重新上报应用清单（走指令队列） */
 export async function refreshDeviceApps(req: Request, res: Response) {
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   // dispatchCommand 返回的是 { success, command }，这里解一层再往外包，
   // 否则前端会拿到 { success, command: { success, command } } 这种双层嵌套
   const dispatched = await devicesService.requestAppSync(currentUserId(req), device);
@@ -121,7 +121,7 @@ export async function getEyeCare(req: Request, res: Response) {
 /** PUT /api/eye-care */
 export async function updateEyeCare(req: Request, res: Response) {
   const patch = updateEyeCareSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json({ success: true, config: await modeService.updateEyeCare(device, patch) });
 }
 
@@ -134,7 +134,7 @@ export async function listAppPlugins(req: Request, res: Response) {
 /** PUT /api/app-plugins */
 export async function updateAppPlugins(req: Request, res: Response) {
   const input = updatePluginsSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json({ success: true, ...(await modeService.updateAppPlugins(device, input)) });
 }
 

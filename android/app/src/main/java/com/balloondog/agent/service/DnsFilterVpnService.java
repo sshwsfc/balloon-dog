@@ -12,8 +12,10 @@ import android.os.ParcelFileDescriptor;
 
 import androidx.annotation.Nullable;
 
+import com.balloondog.agent.capability.BlockedAddresses;
 import com.balloondog.agent.capability.DnsMessage;
 import com.balloondog.agent.capability.DomainBlocker;
+import com.balloondog.agent.capability.IpPackets;
 import com.balloondog.agent.data.AgentStore;
 import com.balloondog.agent.data.Constants;
 import com.balloondog.agent.data.EventLog;
@@ -26,12 +28,15 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -110,6 +115,20 @@ public class DnsFilterVpnService extends VpnService {
     /** 黑名单缓存时长：读一次配置够用一阵，不必每个包都解析字符串。 */
     private static final long BLOCKLIST_CACHE_MS = 5_000L;
 
+    /**
+     * 直连阻断的地址表刷新间隔（规划 §4.1）。
+     *
+     * <p>为什么需要定时刷新：被拦域名的 IP 会变（CDN 尤其频繁）。只学一次的话，
+     * 一周后拦的可能是别人家的地址，而真正的那台机器又通了。
+     */
+    private static final long ADDRESS_REFRESH_INTERVAL_MS = 5 * 60_000L;
+
+    /** 一次最多自己解析几个被拦域名（启动时同步做，不能让开机卡住）。 */
+    private static final int ADDRESS_LEARN_MAX_DOMAINS = 8;
+
+    /** 自己解析被拦域名时的等待上限。 */
+    private static final int ADDRESS_LEARN_TIMEOUT_MS = 1_500;
+
     private static volatile boolean running;
 
     private AgentStore store;
@@ -124,6 +143,32 @@ public class DnsFilterVpnService extends VpnService {
 
     private volatile List<String> cachedBlocked = new ArrayList<>();
     private volatile long cachedBlockedAt;
+
+    /**
+     * 当前引进隧道的地址规则（IP 字面量 / CIDR / 从 DNS 应答学到的 /32）。
+     *
+     * <p>这些是<b>路由</b>级别的拦截：包只要目的地落在里面就会进 tun，
+     * 不管它是怎么拿到这个 IP 的、走的是 53 还是 853 还是别的端口。
+     */
+    private volatile List<String> sinkholeRules = new ArrayList<>();
+
+    /** 建立隧道时实际加进去的路由键，用来判断「地址表变了没有」。 */
+    private volatile List<String> establishedRouteKeys = new ArrayList<>();
+
+    /** 被阻断的连接数（含 TCP 与 UDP），与被阻断的加密 DNS 次数。 */
+    private final AtomicLong droppedConnectionCount = new AtomicLong();
+    private final AtomicLong droppedEncryptedDnsCount = new AtomicLong();
+
+    private ScheduledExecutorService addressRefresher;
+
+    /**
+     * 隧道代数：每次重建 +1。
+     *
+     * <p>重建隧道会关掉旧的文件描述符，读循环里那次阻塞的 {@code read()} 会因此返回。
+     * 如果它把这个当成「隧道没了」而退出，重建就等于把服务弄死；所以读循环记住自己
+     * 拿的是第几代，发现代数变了就继续读新的那个。
+     */
+    private volatile int tunnelGeneration;
 
     public static boolean isRunning() {
         return running;
@@ -301,6 +346,16 @@ public class DnsFilterVpnService extends VpnService {
             builder.addDnsServer(TUN_ADDRESS);
             // 只把这个 DNS 地址的流量导进来（见类注释：刻意不做 0.0.0.0/0）
             builder.addRoute(TUN_ADDRESS, TUN_PREFIX_LENGTH);
+            // 再加上「被拦域名的地址」：这些包进来后我们直接丢掉（含 853 的 DoT、
+            // 以及孩子用缓存 IP / 直连 IP 的情况）。见 collectSinkholeRules()。
+            //
+            // 这里刻意**不查 DNS**（learn=false）：这条路径跑在主线程上，一次解析最坏要
+            // 1.5 秒 × N 个上游，几个域名就够 ANR 了。家长手写的 IP / 网段是现成的，
+            // 先用它们建隧道；域名解析出来的地址由定时刷新线程补上（会重建隧道）。
+            for (String rule : collectSinkholeRules(false)) {
+                addRoute(builder, rule);
+            }
+            establishedRouteKeys = BlockedAddresses.routeKeys(sinkholeRules);
             tunnel = builder.establish();
         } catch (Exception e) {
             EventLog.error("建立 VPN 隧道失败：" + e.getMessage());
@@ -325,6 +380,8 @@ public class DnsFilterVpnService extends VpnService {
         running = true;
         forwardedCount.set(0);
         blockedCount.set(0);
+        droppedConnectionCount.set(0);
+        droppedEncryptedDnsCount.set(0);
         forwarders = Executors.newFixedThreadPool(4, runnable -> {
             Thread thread = new Thread(runnable, "dns-forwarder");
             thread.setDaemon(true);
@@ -332,14 +389,26 @@ public class DnsFilterVpnService extends VpnService {
         });
         ForegroundCompat.start(this, Constants.NOTIFICATION_ID_VPN,
                 AgentNotifications.buildAgentNotification(this, "网址拦截已开启",
-                        "只拦截 DNS 解析层；直连 IP、DoH/DoT、已缓存域名可绕过（设置页有说明）"),
+                        "拦 DNS 解析与被拦域名的地址（含 853 的加密 DNS）；换一个没被拦的加密解析器仍可绕过（设置页有说明）"),
                 0);
 
         Thread reader = new Thread(this::readLoop, "dns-filter-reader");
         reader.setDaemon(true);
         reader.start();
+
+        // 定时重新解析被拦域名：IP 会变（CDN），只学一次等于过一阵就失效
+        ScheduledExecutorService refresher = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "dns-address-refresh");
+            thread.setDaemon(true);
+            return thread;
+        });
+        addressRefresher = refresher;
+        refresher.scheduleWithFixedDelay(this::refreshSinkholeRoutes,
+                ADDRESS_REFRESH_INTERVAL_MS, ADDRESS_REFRESH_INTERVAL_MS, TimeUnit.MILLISECONDS);
+
         EventLog.success("网址拦截已启动：上游 DNS " + describeUpstreams()
-                + "；仅覆盖 DNS 解析层，已知可绕过方式见 README");
+                + "；直连阻断覆盖 " + establishedRouteKeys.size() + " 个地址"
+                + "；仅覆盖解析层与已拦域名的地址，已知可绕过方式见 README");
     }
 
     private void stopTunnel(String reason) {
@@ -348,6 +417,10 @@ public class DnsFilterVpnService extends VpnService {
         if (forwarders != null) {
             forwarders.shutdownNow();
             forwarders = null;
+        }
+        if (addressRefresher != null) {
+            addressRefresher.shutdownNow();
+            addressRefresher = null;
         }
         // 关掉 tun 会让阻塞中的 read 抛异常返回，读线程据此退出
         if (tunnel != null) {
@@ -363,9 +436,13 @@ public class DnsFilterVpnService extends VpnService {
         synchronized (recentlyBlocked) {
             recentlyBlocked.clear();
         }
+        sinkholeRules = new ArrayList<>();
+        establishedRouteKeys = new ArrayList<>();
         if (wasRunning) {
             EventLog.warn("网址拦截已停止：" + reason + "（本次共放行 " + forwardedCount.get()
-                    + " 条查询，拦截 " + blockedCount.get() + " 条）");
+                    + " 条查询，拦截 " + blockedCount.get() + " 条，阻断直连 "
+                    + droppedConnectionCount.get() + " 次，其中加密 DNS "
+                    + droppedEncryptedDnsCount.get() + " 次）");
         }
         ForegroundCompat.stop(this);
     }
@@ -374,30 +451,33 @@ public class DnsFilterVpnService extends VpnService {
 
     private void readLoop() {
         byte[] packet = new byte[MAX_PACKET_BYTES];
-        try {
-            while (running) {
-                FileInputStream in = tunnelIn;
-                if (in == null) break;
-                int length = in.read(packet);
-                if (length <= 0) {
-                    if (length < 0 && running) {
-                        EventLog.warn("VPN 隧道读取结束（tun 已关闭）");
-                        break;
-                    }
-                    continue;
-                }
-                try {
-                    handlePacket(packet, length);
-                } catch (Exception e) {
-                    // 单个包处理失败不能拖垮整个读循环
-                    EventLog.warn("处理 DNS 包失败：" + e.getMessage());
-                }
+        while (running) {
+            FileInputStream in = tunnelIn;
+            int generation = tunnelGeneration;
+            if (in == null) break;
+            int length;
+            try {
+                length = in.read(packet);
+            } catch (Exception e) {
+                if (!running) break;
+                if (generation != tunnelGeneration) continue; // 只是换了隧道（旧 fd 关了）
+                EventLog.warn("VPN 读循环退出：" + e.getMessage());
+                break;
             }
-        } catch (Exception e) {
-            if (running) EventLog.warn("VPN 读循环退出：" + e.getMessage());
-        } finally {
-            running = false;
+            if (length <= 0) {
+                if (!running) break;
+                if (generation != tunnelGeneration) continue; // 同上
+                EventLog.warn("VPN 隧道读取结束（tun 已关闭）");
+                break;
+            }
+            try {
+                handlePacket(packet, length);
+            } catch (Exception e) {
+                // 单个包处理失败不能拖垮整个读循环
+                EventLog.warn("处理包失败：" + e.getMessage());
+            }
         }
+        running = false;
     }
 
     private void handlePacket(byte[] packet, int length) {
@@ -408,11 +488,35 @@ public class DnsFilterVpnService extends VpnService {
         int ihl = (packet[0] & 0x0F) * 4;
         if (ihl < 20 || ihl + 8 > length) return;
         int protocol = packet[9] & 0xFF;
-        if (protocol != 17) return; // 只处理 UDP；tun 上其余协议没有可做的处理
 
+        // ① DNS 查询：唯一一条我们会「转发」的路径
+        if (protocol == 17) {
+            int dstPort = readU16(packet, ihl + 2);
+            if (dstPort == 53 && isTunAddress(packet)) {
+                handleDnsQuery(packet, length, ihl);
+                return;
+            }
+        }
+
+        // ② 被引进隧道的直连流量（家长拦的域名解析出来的 IP、IP 字面量规则）：
+        //    丢掉。TCP 还要回一个 RST，让连接「立刻失败」而不是让孩子对着转圈的白页等超时。
+        String destination = IpPackets.destIpv4(packet);
+        if (destination != null && BlockedAddresses.anyMatches(destination, sinkholeRules)) {
+            dropSinkholePacket(packet, destination, protocol, IpPackets.destPort(packet));
+        }
+    }
+
+    /** 目的地址是不是本服务在 tun 上的地址（DNS 查询就是发给它的）。 */
+    private boolean isTunAddress(byte[] packet) {
+        long tun = BlockedAddresses.parseIpv4(TUN_ADDRESS);
+        if (tun < 0 || packet.length < 20) return false;
+        return IpPackets.readU32(packet, 16) == tun;
+    }
+
+    /** 处理一条 DNS 查询：命中黑名单回 NXDOMAIN，其余转发给上游。 */
+    private void handleDnsQuery(byte[] packet, int length, int ihl) {
         int srcPort = readU16(packet, ihl);
         int dstPort = readU16(packet, ihl + 2);
-        if (dstPort != 53) return;
         int udpLength = readU16(packet, ihl + 4);
         if (udpLength < 8 || ihl + udpLength > length) return;
 
@@ -439,6 +543,199 @@ public class DnsFilterVpnService extends VpnService {
         }
 
         forward(request, ihl, srcPort, dstPort, dns);
+    }
+
+    // ---------------- 直连阻断（规划 §4.1） ----------------
+
+    /**
+     * 丢掉一个「被引进隧道」的包。
+     *
+     * <p>TCP 回 RST：不回的话孩子看到的是转圈到超时，像「网络坏了」；
+     * RST 让连接立刻失败，行为接近「这台主机拒绝连接」。UDP 只丢不答（见 {@link IpPackets}）。
+     */
+    private void dropSinkholePacket(byte[] packet, String destination, int protocol, int destPort) {
+        long count = droppedConnectionCount.incrementAndGet();
+        boolean encryptedDns = BlockedAddresses.isEncryptedDnsPort(destPort);
+        if (encryptedDns) droppedEncryptedDnsCount.incrementAndGet();
+        if (protocol == IpPackets.PROTOCOL_TCP) {
+            byte[] reset = IpPackets.buildTcpReset(packet);
+            if (reset != null) writeRaw(reset);
+        }
+        logDroppedConnection(destination, destPort, encryptedDns, count);
+    }
+
+    /** 阻断日志：同一个地址 60 秒最多一条，避免刷屏；同时给家长端留一条动态。 */
+    private void logDroppedConnection(String ip, int port, boolean encryptedDns, long count) {
+        long now = System.currentTimeMillis();
+        String key = "ip:" + ip;
+        synchronized (recentlyBlocked) {
+            Long last = recentlyBlocked.get(key);
+            if (last != null && now - last < BLOCK_LOG_INTERVAL_MS) return;
+            recentlyBlocked.put(key, now);
+        }
+        String what = encryptedDns ? "加密 DNS" : "直连";
+        EventLog.warn("网址拦截：已阻断" + what + " " + ip + ":" + port + "（累计 " + count + " 次）");
+        AgentService.recordEventStatic(Constants.EVENT_WEB_BLOCKED,
+                encryptedDns ? "已阻断加密 DNS：" + ip : "已阻断直连：" + ip);
+    }
+
+    /** 往 tun 里写一个我们自己构造的包（目前只有 RST）。 */
+    private void writeRaw(byte[] response) {
+        FileOutputStream out = tunnelOut;
+        if (out == null) return;
+        try {
+            synchronized (writeLock) {
+                out.write(response);
+                out.flush();
+            }
+        } catch (Exception e) {
+            if (running) EventLog.warn("写回 RST 失败：" + e.getMessage());
+        }
+    }
+
+    /** 把一条地址规则加进隧道；单条失败只记日志，不能让整个隧道起不来。 */
+    private void addRoute(Builder builder, String rule) {
+        int slash = rule.indexOf('/');
+        String address = slash < 0 ? rule : rule.substring(0, slash);
+        int prefix;
+        if (slash < 0) {
+            prefix = address.contains(":") ? 128 : 32;
+        } else {
+            try {
+                prefix = Integer.parseInt(rule.substring(slash + 1));
+            } catch (NumberFormatException e) {
+                return;
+            }
+        }
+        try {
+            builder.addRoute(address, prefix);
+        } catch (Exception e) {
+            EventLog.warn("网址拦截：加路由失败（" + rule + "）：" + e.getMessage());
+        }
+    }
+
+    /**
+     * 算出当前要引进隧道的地址表。
+     *
+     * <p>两部分：黑名单里<b>本来就是地址</b>的条目（IP / CIDR），
+     * 以及被拦<b>域名</b>自己解析出来的 A 记录 —— 后者是「孩子手里已经有缓存 IP」
+     * 这条绕过的对策。解析在启动时同步做（限量、限时），不能让开机卡住。
+     */
+    private List<String> collectSinkholeRules(boolean learn) {
+        // 刻意用 splitEntries 而不是 blockedEntries()：后者是「域名后缀匹配表」，
+        // 会把 IP 与网段丢掉（见 DomainBlocker 的注释），而这里要的正是它们。
+        List<String> entries = DomainBlocker.splitEntries(
+                store == null ? null : store.getBlockedUrls());
+        List<String> rules = new ArrayList<>(BlockedAddresses.addressRules(entries));
+        int learned = 0;
+        for (String entry : learn ? entries : Collections.<String>emptyList()) {
+            if (learned >= ADDRESS_LEARN_MAX_DOMAINS) break;
+            if (BlockedAddresses.isIpLiteral(entry)) continue;      // 上面已经收成路由了
+            if (DomainBlocker.normalize(entry) == null) continue;    // 不是域名，别浪费一次解析
+            learned++;
+            for (String ip : learnDomainIps(entry)) {
+                BlockedAddresses.addIp(rules, ip);
+            }
+        }
+        sinkholeRules = rules;
+        return rules;
+    }
+
+    /** 用一条 protected 的 UDP 查询把域名解析成 A 记录（绕开 VPN，避免查回自己）。 */
+    private List<String> learnDomainIps(String domain) {
+        List<String> result = new ArrayList<>();
+        int id = (int) (System.currentTimeMillis() & 0xFFFF);
+        byte[] query = DnsMessage.buildQuery(domain, id);
+        if (query == null) return result;
+        for (String upstream : upstreams()) {
+            DatagramSocket socket = null;
+            try {
+                socket = new DatagramSocket();
+                if (!protect(socket)) return result;
+                socket.setSoTimeout(ADDRESS_LEARN_TIMEOUT_MS);
+                socket.send(new DatagramPacket(query, query.length,
+                        InetAddress.getByName(upstream), 53));
+                byte[] buffer = new byte[2048];
+                DatagramPacket reply = new DatagramPacket(buffer, buffer.length);
+                socket.receive(reply);
+                byte[] payload = Arrays.copyOfRange(reply.getData(), reply.getOffset(),
+                        reply.getOffset() + reply.getLength());
+                for (String ip : DnsMessage.parseIpv4Answers(payload)) {
+                    BlockedAddresses.addIp(result, ip);
+                }
+                return result;
+            } catch (Exception e) {
+                // 换下一个上游试
+            } finally {
+                if (socket != null) socket.close();
+            }
+        }
+        return result;
+    }
+
+    /** 定时任务：地址表变了就重建隧道（路由只能在 establish 时给）。 */
+    private void refreshSinkholeRoutes() {
+        if (!running) return;
+        try {
+            collectSinkholeRules(true);
+            List<String> keys = BlockedAddresses.routeKeys(sinkholeRules);
+            if (keys.equals(establishedRouteKeys)) return;
+            EventLog.info("网址拦截：被拦域名的地址有变化（" + establishedRouteKeys.size()
+                    + " → " + keys.size() + " 条），重建隧道");
+            rebuildTunnel();
+        } catch (Exception e) {
+            EventLog.warn("刷新直连阻断地址失败：" + e.getMessage());
+        }
+    }
+
+    /** 用新的地址表重建隧道；失败就保留原隧道（宁可少拦，不能把 DNS 也弄停）。 */
+    private void rebuildTunnel() {
+        Builder builder = new Builder();
+        builder.setSession("气球狗网址拦截");
+        builder.addAddress(TUN_ADDRESS, TUN_PREFIX_LENGTH);
+        builder.addDnsServer(TUN_ADDRESS);
+        builder.addRoute(TUN_ADDRESS, TUN_PREFIX_LENGTH);
+        for (String rule : sinkholeRules) addRoute(builder, rule);
+
+        ParcelFileDescriptor replacement;
+        try {
+            replacement = builder.establish();
+        } catch (Exception e) {
+            EventLog.warn("重建隧道失败（保留原隧道）：" + e.getMessage());
+            return;
+        }
+        if (replacement == null) {
+            EventLog.warn("重建隧道失败：系统拒绝（保留原隧道）");
+            return;
+        }
+
+        try {
+            tunnelIn = new FileInputStream(replacement.getFileDescriptor());
+            tunnelOut = new FileOutputStream(replacement.getFileDescriptor());
+        } catch (Exception e) {
+            try {
+                replacement.close();
+            } catch (IOException ignored) {
+                // 关不上也没有补救手段
+            }
+            EventLog.warn("重建隧道失败（打不开新 fd，保留原隧道）：" + e.getMessage());
+            return;
+        }
+
+        ParcelFileDescriptor previous = tunnel;
+        tunnel = replacement;
+        // 先换字段再关旧 fd：读循环会被旧 fd 的关闭唤醒，靠代数认出这只是重建
+        tunnelGeneration++;
+        establishedRouteKeys = BlockedAddresses.routeKeys(sinkholeRules);
+        if (previous != null) {
+            try {
+                previous.close();
+            } catch (IOException ignored) {
+                // 旧隧道已经不再使用，关不上也无所谓
+            }
+        }
+        EventLog.success("网址拦截：隧道已重建，直连阻断覆盖 "
+                + establishedRouteKeys.size() + " 个地址");
     }
 
     /** 命中黑名单时记日志 + 一条事件（家长端能在动态里看到「拦了哪个网站」）。 */

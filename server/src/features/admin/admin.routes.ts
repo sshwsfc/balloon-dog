@@ -3,7 +3,6 @@ import rateLimit from 'express-rate-limit';
 import { ah } from '../../shared/asyncHandler';
 import { authenticateAdmin, requireSuperAdmin } from '../../middleware/auth';
 import { config } from '../../config';
-import { adminAudit } from './admin.audit';
 import * as controller from './admin.controller';
 import { membershipAdminRoutes } from '../membership/membership.admin.routes';
 import { referralAdminRoutes } from '../referral/referral.admin.controller';
@@ -20,8 +19,8 @@ import { referralAdminRoutes } from '../referral/referral.admin.controller';
  */
 export const adminRoutes = Router();
 
-// 审计挂在最前面：无论后面成功、失败还是 401，都会被记录
-adminRoutes.use(adminAudit);
+// 审计不在这里挂：app.ts 已把 adminAudit 挂在整个 /api/admin 前缀上（见那里的注释），
+// 这样 /api/admin/payments、/api/admin/flags 这些独立挂载点也在审计范围内。再挂一次会写两条日志。
 
 /**
  * 登录接口单独限流：后台账号价值高，是爆破的首要目标。

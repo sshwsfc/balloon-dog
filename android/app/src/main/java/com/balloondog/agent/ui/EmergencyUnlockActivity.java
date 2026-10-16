@@ -10,6 +10,7 @@ import com.balloondog.agent.capability.PasswordLockController;
 import com.balloondog.agent.data.AgentStore;
 import com.balloondog.agent.data.EventLog;
 import com.balloondog.agent.databinding.ActivityEmergencyUnlockBinding;
+import com.balloondog.agent.capability.TrustedClock;
 
 /**
  * 应急解锁页。
@@ -56,7 +57,7 @@ public class EmergencyUnlockActivity extends AppCompatActivity {
         // 家长既然已经拿到手机，不该 1 秒后又被锁回去
         PasswordLockController.disengage(this, store);
         store.setLockState(false, 0L);
-        store.setManualUnlockUntil(System.currentTimeMillis() + 10 * 60_000L);
+        store.setManualUnlockUntil(TrustedClock.now() + 10 * 60_000L);
         Toast.makeText(this, "已解锁，10 分钟内不会自动锁定", Toast.LENGTH_LONG).show();
         finish();
     }

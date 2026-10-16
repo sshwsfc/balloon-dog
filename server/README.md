@@ -50,7 +50,7 @@ server/
 │  ├─ migrations/          # 迁移历史
 │  └─ seed.ts              # 种子数据（幂等）
 ├─ scripts/
-│  ├─ smoke-test.mjs       # 端到端冒烟测试（158 项断言，无第三方依赖）
+│  ├─ smoke-test.mjs       # 端到端冒烟测试（167 项断言，无第三方依赖）
 │  ├─ device-agent-example.mjs  # 可运行的设备端 Agent 参考实现
 │  └─ clean-test-data.ts   # 清理冒烟测试留下的临时账号/设备
 ├─ src/
@@ -303,6 +303,8 @@ npm run dev              # 本机开发（5173，带 HMR；家长端与后台同
 | POST | `/api/device/lock` | 锁屏/解锁（下发指令） |
 | POST | `/api/device/temp-unlock` | 临时解锁 N 分钟 |
 | POST | `/api/device/cancel-temp-unlock` | 取消临时解锁 |
+| GET | `/api/device/time-requests` | 孩子的申请列表。`?status=pending`（默认）/`approved`/`rejected`/`all`；响应 `{ items: TimeRequestView[] }`，每项 `{ id, kind, kindLabel, minutes, reason, status, reviewNote, grantedMinutes, reviewedAt, createdAt }`（`kindLabel` 是服务端给的中文类型名，前端在渲染处包 `t()`） |
+| POST | `/api/device/time-requests/:id/review` | 批准/拒绝一条申请。body: `{ status: 'approved'\|'rejected', minutes?, note? }`。**批准会真的下发 `temp_unlock` 指令**（服务端绝不自己宣布已解锁），且 `minutes` 只能**改小**（`Math.min(输入, 申请值)`），实际给的存进 `grantedMinutes` 留痕；拒绝不发指令。已处理过再改 → `409 这条申请已经处理过了` |
 | POST | `/api/device/remote-photo` | 远程拍照 |
 | POST | `/api/device/screenshot` | 屏幕截图 |
 | POST | `/api/device/start-recording` `/stop-recording` | 录像 |
@@ -310,11 +312,138 @@ npm run dev              # 本机开发（5173，带 HMR；家长端与后台同
 | POST | `/api/device/start-ambient` `/stop-ambient` | 环境监听（分片连续录音），需要 `audioRecord`；**`stop-ambient` 不校验开关**，保证随时停得下来 |
 | POST | `/api/device/remote-action` | 远程协助。body: `{ action: 'back'\|'home'\|'recents'\|'notifications'\|'open_app', packageName? }`，需要 `remoteHelp`；`action='open_app'` 必须带 `packageName` |
 | POST | `/api/device/sync-calls-sms` | 让设备立即上报通话/短信，需要 `callSms`（平时设备每 6 小时自报） |
+| GET | `/api/device/health` | 设备健康快照：哪些开关被关了、缺口原文、三档等级、在线分级 |
+| POST | `/api/device/health/check` | 下发 `self_check` 让设备立刻体检并回传快照 |
 | GET | `/api/device/commands` | 指令历史（可 `?status=` `?limit=`） |
 | POST | `/api/device/commands/:commandId/cancel` | 撤销未执行的指令 |
 
 > 下发类接口返回 `202` + `{ command, device, warning? }`。
 > 设备离线时 `warning` 会明确告知「指令将在设备上线后执行」。
+
+### 设备健康与权限可见性
+
+孩子端 20 多项管控能力全都压在两三个开关上（设备所有者 / 无障碍看门狗 / 运行时权限 /
+电池白名单 / VPN）。任意一个被关掉，管控就**静默失效** —— 设备照样在线、家长端照样绿灯。
+这一块把「设备自己知道的事」变成「家长端一眼看得见 + 一点就能修」。
+
+**上报**（设备令牌，覆盖式，不是增量）：
+
+```
+POST /api/agent/health
+{
+  level?: 'ok'|'warn'|'danger',        // 设备端自己的结论；缺省时服务端兜底推算（老版本 Agent）
+  gaps: [{ id, label, detail, importance: critical|major|minor,
+           fixability: auto|manual|none, fixHint }],
+  checks:        { deviceOwner: true, accessibility: false, ... },   // 容忍未知 key
+  permissions:   { location: 'granted'|'denied', ... },
+  restrictions:  [{ id, label, supported, applied }],                // OwnerHardening.audit() 原样
+  serviceRunning, clockSkewSeconds, healCount, lastHealAt
+}
+→ { success, serverTime, level, openGaps }
+```
+
+四条设计约束：
+
+- **`checks` 刻意不写成固定 key 的 object**：设备端版本可能比服务端新（先发了新检查项）
+  也可能更旧（还没实现某项）。固定 key 会让老设备直接 422，或者让缺失项的 `default(false)`
+  变成一条「开关被关掉」的**假警报**。所以只约束「值必须是 boolean」，缺 key 就是「未知」，
+  家长端显示「未知」而不是猜一个绿灯。
+- **缺口原文透传**：`detail` 就是设备端 `LongevityGuard` 那句中文，服务端与家长端都不重写。
+  两边各写一套迟早会出现「设备说无障碍被关、家长端说悬浮窗被关」的矛盾。
+- **等级以设备端为准**，服务端只在 `level` 缺失时才用 `deriveHealthLevel` 兜底
+  （关键项关着 → danger，否则有缺口 → warn）。
+- **整份覆盖**：某条缺口修好后不再出现在 `gaps` 里，`openGaps` 会跟着降下来，不是累加。
+
+**读取**：`GET /api/device/health` 返回三档等级（`ok` 管控正常 / `warn` 部分能力降级 /
+`danger` 管控已实质失效，还有「尚未检测」）、**在线分级** `liveness`
+（`online` / `delayed` / `offline` / `lost` / `never`，按 `lastActiveAt` 现算）、
+开关一览（on/off/**unknown**）、权限一览、缺口清单（含严重程度与修复方式）、加固项审计、
+`serviceRunning` / `healCount` / `clockSkewSeconds`。
+
+- **快照陈旧判定**：超过 30 分钟没再上报就标 `stale` —— 过期的绿灯比红灯更危险，
+  家长端会把整页降级显示成「数据陈旧」。
+- **`clockSkewSeconds`**：设备墙钟与服务端的偏差，由设备端用「开机时长 + 服务端 `serverTime`」
+  算出来（做法与取舍见 `android/README.md` §5.9）。**没有锚定过的设备报 0**，
+  所以 0 的含义是「不知道或一致」，不是「一定准」；家长端在 `|skew| ≥ 60 秒` 时把这行标红，
+  文案是「孩子手机的时间和服务端相差 N 秒」。服务端**不**因为偏差去改健康等级 ——
+  时钟不准会让规则提前/推迟生效，但它本身不是「管控已失效」。
+- **失联补记动态**：读健康页时若设备已 offline/lost，顺带写一条 `agent_offline`
+  设备事件（6 小时去重），家长反复刷新不会刷出一屏重复告警。这也是唯一一处
+  「读接口写数据」，理由是一次失联值得留在时间线上。
+
+**「重新检测」**：`POST /api/device/health/check` 下发 `self_check` 指令（走指令队列，
+服务端不能替设备看系统开关）→ 设备端跑 `LongevityGuard.selfHeal`（幂等）→ 立刻回传新快照。
+家长端轮询 `updatedAt` 等回报，15 秒没等到就如实说「设备可能离线」，
+**绝不乐观置绿**。设备端漏加 `self_check` 的 switch 分支就是「家长端显示已下发、设备毫无反应」，
+所以它同时出现在 `COMMAND_TYPES`、`CommandExecutor` 与设备端常量表三处。
+
+### 站内通知 `/api/notifications`
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/` | 消息列表，分页（`?page=&pageSize=&unreadOnly=&type=&level=`），响应额外带 `unreadCount` |
+| GET | `/unread-count` | 只取未读数（家长端角标轮询用） |
+| POST | `/:notificationId/read` | 标记单条已读 |
+| POST | `/read-all` | 全部已读 |
+| DELETE | `/:notificationId` | 删除单条 |
+| GET | `/preferences` | 八类通知 × 三个通道的偏好（没有行 = 用默认值） |
+| PUT | `/preferences` | **整份替换**偏好，不是逐条 PATCH |
+
+**为什么不复用 `DeviceEvent`**：那张表是设备视角的运行日志 —— 没有「已读」，没有「这条是给
+哪个家长的」，也不该被家长删掉。通知是**家长级**的：`Notification` 有 `userId`（必填）、
+可选的 `deviceId`（账号级事件如会员到期为 null）、`readAt`，以及 `@@unique([userId, dedupeKey])`。
+
+**幂等靠唯一约束，不靠先查后写**：`createIdempotent` 里先 `findUnique(userId_dedupeKey)`
+命中就 no-op，未命中才 create。去重键由生产点自己给（例如失联用这一天的时间桶），
+所以「同一次失联」只会有一条消息，重试也不会变成两条。
+
+**关掉某一类之后，服务端就不再产生它** —— 过滤发生在**写入侧**（`notificationsService.notify`
+先读偏好，`inApp: false` 直接 return），不是前端隐藏。否则家长的未读角标会一直亮着，
+点进去却什么都没有。这也是 `e2e-notifications` 专门断言的一条。
+
+**标题与正文存的是「模板 + 参数」，不是拼好的句子**：`title` / `body` 是 key 形状的模板（`'{{v0}} 已失联'`），
+变量单独放在 `titleParams` / `bodyParams` 两个 JSONB 列里。**为什么**：生产者若把 `` `${device.name} 已失联` ``
+拼好再落库，整句就不是一条 i18n key，家长切到英文时必然露出中文（`e2e:ux` 的英文扫描抓到过
+`/notifications: 18 个中文字`）。前端渲染时把模板与每个字符串参数都过一遍 `t()` —— 参数里常常
+本来就是 key（`无障碍看门狗`、`申请加时`），而设备名、孩子写的理由这类用户数据查不到词典会原样回显。
+**注意 `DeviceEvent.detail` 仍是拼好的中文**：那是设备日志，不在通知这条规则里。
+
+**微信服务号模板消息（第二个通道，规划 §2.1 第二档）**：站内之外只有这一条真实通道，
+它靠 `NotificationDelivery` 投递表 + `notifications.wechat.ts` 的发送函数实现。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/channels/wechat/test` | 发一条测试消息。body: `{ notificationId? }`。未配置 → **503**、未绑定微信 → **400**、指定的 `notificationId` 不存在/不属于自己 → **404**；微信报错时把 `errcode` 原文带进 503 的 message |
+
+- **`configured` 由环境变量决定**：`WECHAT_LOGIN_APP_ID` + `WECHAT_LOGIN_APP_SECRET` +
+  `WECHAT_TEMPLATE_ID` 齐了才算配好；`bound` 看 `User.wechatOpenid`（用微信扫码登录过一次就有）。
+  偏好页的逐类微信开关只在两者都成立时出现，否则显示「未配置」/「未绑定微信」。
+- **投递是懒的，但不会丢**：`notify()` 在写入通知成功后才入队一条 `NotificationDelivery`
+  （幂等键是 `notificationId`）。真正发送发生在家长「打开消息中心 / 拉未读数」时
+  （`dispatchWechatDeliveries`，放在 `runLazyChecks` 的 `finally` 里 —— 普通账号的会员分支
+  `return` 过这条路径，写成 try 后面的普通语句会永远走不到）。没配置或没绑定时停在
+  `pending`，**不是 failed**：配好之后同一条会照发。
+- **重试与令牌**：`WECHAT_DELIVERY_MAX_ATTEMPTS = 3`（一次投递最多发 3 次，失败原因截断 500 字存
+  `lastError`）；微信的 `40001/40014/42001/42007` 视为令牌失效，
+  服务端作废缓存令牌、重取一次再发（假上游就是靠这个行为做的断言）。
+- **`WECHAT_API_BASE_URL`** 只是为了本地对着假上游联调（`server/scripts/mock-wechat-server.mjs`，
+  默认 **:4100** —— 与 `server:mock:ai` 同一个默认端口，两者不要同时跑，冲突时用
+  `MOCK_WECHAT_PORT` 改开），生产留空即走 `api.weixin.qq.com`。
+- **厂商推送是「不适用」不是「未接入」**：小米/华为/OPPO 都需要原生 App 的推送 SDK，家长端是
+  移动网页。`channels.push` 回 `configured: false` + 一句原因，界面显示「不适用」。
+  `NotificationPreference.push` 这一列先留着，将来真有原生壳再启用。
+给一个存下来却永远不会生效的开关，比不给更糟。
+
+**只读接口里唯一会写数据的地方**是「会员到期懒检查」：没有定时任务，所以在
+`GET /`（列表）与 `GET /unread-count`（角标）里顺带看一眼 `membershipExpiresAt`
+（7 天内 + 未关掉该类 → 写一条，去重键按到期日）。放在角标接口里是**故意的** ——
+否则家长不点开消息中心就永远看不到到期提醒。
+
+**六个生产点**：`devicesService.getDeviceHealth` 的失联分支（与 `agent_offline` 动态同源、
+同一个去重桶）、`reportHealth` 发现新的 critical 缺口、`modeService.reportEvents` 的安全区进出、
+`devicesService.createAuditRequest` 的孩子申请装应用（仅新建时才写）、
+`devicesService.createTimeRequest` 的孩子申请加时/延后锁屏、
+`devicesService.sos` 的孩子求助（danger 级；一分钟内连点只发一条，但动态每次都写）。
 
 ### 功能配置 `/api/features`
 
@@ -326,8 +455,8 @@ npm run dev              # 本机开发（5173，带 HMR；家长端与后台同
 | PUT | `/app-limit` | 应用时长限制 |
 | DELETE | `/app-limit/:appName` | 移除应用限制 |
 | POST | `/app-audit` | 审批应用（批准后自动写入 60 分钟限制） |
-| POST | `/web-block` | 添加拦截域名（自动归一化为纯域名） |
-| DELETE | `/web-block/:url` | 取消拦截 |
+| POST | `/web-block` | 添加拦截规则：域名（自动归一化成主机名）、IPv4/IPv6 字面量、或 `10.0.0.0/8` 这样的网段；既不是域名也不是地址的一律 **400**（规划 §4.1） |
+| DELETE | `/web-block/:url` | 取消拦截（与写入同一套归一化；网段的斜杠要转义成 `%2F`） |
 
 > ⚠️ `GET /api/features` 的 `appLimit.apps` 的值已由 `number`（每日分钟上限）改为
 > `{ dailyLimit, usedTodaySeconds }` 对象（键仍是应用名）：`usedTodaySeconds` 是设备上报的
@@ -547,8 +676,19 @@ Android 的 `StudyModeEngine` 用于本地强制执行（断网也要生效）�
 被邀请注册的家长**价格更高**：邀请人拿到的分享返现（首充最高 50%）是平台出的，这笔成本
 必须落在被邀请家长的订单上，否则每拉一个新用户平台就净亏一笔返现。规则表
 `MembershipReferralPriceRule` 由后台 `/api/admin/membership/referral-rules` 维护，
-默认两条：**首单上浮 100%**（priority 20）、**续费上浮 25%**（priority 10）。返现按实付价算，所以「上浮 s、返现率 r」要满足 `(1+s)(1−r) ≥ 1`；首充返现最高 50% → 要上浮 100%（付两倍、返一半、平台拿原价），续费返现兜底 20% → 上浮 25% 正好打平。
-50% 不是随手拍的 —— 它正好等于邀请人首充返现的最高档。
+默认两条：**首单上浮 100%**（priority 20）、**续费上浮 25%**（priority 10）。返现按**实付价**算，
+所以「上浮 s、返现率 r」要满足 `(1+s)(1−r) ≥ 1`，即 `s ≥ r ÷ (1−r)`：
+
+| 邀请人档位（返现率） | 打平所需上浮 |
+| --- | --- |
+| 0-3 人 → 50% | **100%** |
+| 4-9 人 → 40% | 67% |
+| ≥10 人 → 20% | 25% |
+
+首单取最坏的一档（50%）兜底：付两倍、返一半，平台拿回原价。续费**有意只对齐 20% 那一档** ——
+真按 100% 默认，受邀用户续费永远是双倍价，产品上没法接受；代价是邀请人还在 50%/40% 档时这笔续费
+平台是倒贴的，要彻底不亏得把续费规则调到 67%/100%，或下调活动配置里的「续费返现比例」。
+不能自动按档位算：档位看的是**邀请人**的邀请人数，而受邀定价只拿得到「买家是不是受邀注册的」。
 
 公式分两步，**先算常规定价，再在其上取更高的那个价**：
 
@@ -568,15 +708,21 @@ Android 的 `StudyModeEngine` 用于本地强制执行（断网也要生效）�
   规则就一定生效，不用去猜现有规则的优先级。`priority` 只在同价时决定展示哪一条。
 - 三个条件字段：`targetTier` / `targetPeriod`（`all` 表示不限）、`firstPurchaseOnly`
   （默认 true，首单限定）、`requireActiveReferral`（默认 true，邀请关系被判 `invalid`
-  的自买自返账号不再加价）。没生效时**不静默按原价**，而是把理由（`reason`）一起下发，
-  家长端直接显示为什么贵、后台试算也能看到。
+  的自买自返账号不再加价）。没生效时不静默按原价，理由（`reason`）在**后台试算**里能看到，
+  但不下发家长端（见下一条）。
 - 是否受邀是**账号级**属性：`buildReferralPricingContext(userId)` 查 `User.referredById`
   与 `Referral` 那一行；`Referral` 不存在按「有效」处理（老账号没有这行，不该因为升级而被加价）。
 - **订单存快照**：`MembershipOrder.referralRuleId` / `referralRuleName` /
   `referralSurchargeCents` 三列，规则后台改价或删除都不影响历史订单的解释。
 - **加价不进 `adjustments`**：那是一份「逐条相加 == 常规优惠」的清单，把正数混进去这条
-  恒等式就假了。所以关系是 `finalCents === 常规实付 + surchargeCents`，家长端把加价单独
-  显示一行（灰色，不混在琥珀色的优惠标签里）。
+  恒等式就假了。内部关系是 `finalCents === 常规实付 + surchargeCents`。
+- **对家长端完全隐蔽**（`membership.service.ts` 的 `quoteOf` / `toOrderView`）：接口不下发
+  `referral`（规则名、上浮额、命中条数一个都没有）；受邀价生效时连**优惠明细和原价一起压平**
+  （`originalCents = finalCents`、`adjustments = []`、`discountCents = 0`）—— 那份明细是按
+  加价**之前**的常规定价算的，摆出来就是一份自相矛盾的账单（`15 − 3.75 ≠ 22.5`），等于把
+  上浮写在脸上。价格本身照旧是加价后的，家长只看到一个干净的数字。完整快照仍在
+  `MembershipOrder` 的三列里，后台订单页照常展示；规则名、理由与试算一律只在
+  `/api/admin/*` 返回。
 
 ### 分享提成（邀请返现）
 
@@ -667,6 +813,11 @@ npm run agent:example        # 注册一台模拟设备并打印绑定码
 | POST | `/api/agent/apps` | 上报已安装应用清单（整表替换）。body: `{ apps: [{ packageName, appName, isSystem, isLaunchable, icon? }] }`；`icon` 是**图标 PNG 的 base64**（不带 `data:` 前缀，解出来 ≤ 16KB，孩子端建议压到 12KB / 48×48）。返回 `{ success, count, icons }`，`icons` 是这次上报之后有图标的应用数（含沿用的旧图），供设备端对账。**不带 `icon` 不等于删除图标**（见「应用图标」） |
 | POST | `/api/agent/audit-requests` | 设备请求安装审核。body: `{ appName, packageName }`；同设备同包名已有 `pending` 时**幂等**返回同一条（`200`），新建返回 `201`；响应 `{ id, status }` |
 | GET | `/api/agent/audit-requests/:id` | 轮询某条申请的状态，返回 `{ status }`（`pending`/`approved`/`rejected`） |
+
+| POST | `/api/agent/time-requests` | 孩子端提交「申请加时 / 申请延后锁屏」。body: `{ kind: 'extend_time'\|'delay_lock', minutes, reason? }`（`5 ≤ minutes ≤ 240`，越界 `422`）；同设备同类型已有 `pending` 时**幂等**返回同一条（`200`，且**内容没变不刷新 `createdAt`**：否则孩子反复点「申请」会把「已经等了多久」一次次清零），新建返回 `201`；响应 `{ id, status, minutes, created }` |
+| GET | `/api/agent/time-requests/:id` | 孩子端轮询结果，返回 `{ status, minutes, note }` —— `minutes` 是 `grantedMinutes ?? minutes`（批准后是**家长实际给的**），`note` 是家长的批注 |
+| GET | `/api/agent/child-home` | 孩子端主页的「谁在守护」：`{ bound, deviceName, parentName, parentPhone }`。未认领时 `bound:false`、后两者为 `null`。主页其余内容（今天还剩多少、现在能不能用）都是**设备端自己算的** —— 这里只给孩子一个能拨出去的号码 |
+| POST | `/api/agent/sos` | 孩子的求助。body `{ message? }`（≤200 字，越界 `422`）。写一条 `sos` 设备动态 + 发一条 `child_sos`（**danger** 级）通知，标题模板 `'{{v0}} 发起了求助'`；幂等键 `child_sos:<设备>:<分钟>` —— **一分钟内连点不会重复打扰家长，但每次点击都留一条动态**。返回 `{ success, parentName, parentPhone }`；设备**未被认领**时返回 `{ success:false, reason:'unbound' }` 且**一个字都不写**（没有收件人的通知不该存在） |
 | POST | `/api/agent/app-usage` | 上报当日各应用已用时长。body: `{ usage: [{ packageName, appName, seconds }] }`，**整表替换当日数据**（未上报的已设限应用归零；只写已存在的限额行） |
 | POST | `/api/agent/calls` | 批量上报通话记录，body `{ calls: [...] }`，整表替换最近 500 条 |
 | POST | `/api/agent/sms` | 批量上报短信，body `{ messages: [...] }`（也接受 `sms` 作为包装字段），整表替换最近 500 条 |
@@ -688,6 +839,7 @@ npm run agent:example        # 注册一台模拟设备并打印绑定码
 | `start_ambient` / `stop_ambient` | — | `audioRecord`（`stop_ambient` 不做开关校验，随时可停） |
 | `remote_action` | `{ action: 'back'\|'home'\|'recents'\|'notifications'\|'open_app', packageName? }` | `remoteHelp`（`open_app` 必须带 `packageName`） |
 | `sync_calls_sms` | — | `callSms` |
+| `self_check` | — | —（自愈巡检 + 回传健康快照） |
 
 > `/api/agent/config` 额外返回 `screenMonitor` 块：是否开启截屏、间隔、每包帧数、
 > 分析模式，以及 `usageBudget`（游戏局数 / 动画集数上限）。设备端据此**本地**执行，
@@ -712,7 +864,7 @@ POST /api/agent/commands/<指令id>/result
 ## 测试
 
 ```bash
-npm run smoke            # 端到端冒烟测试：158 项断言
+npm run smoke            # 端到端冒烟测试：167 项断言
 npm run typecheck        # tsc --noEmit
 npm run lint             # ESLint
 npm run build            # 编译到 dist/
@@ -727,12 +879,26 @@ npm run server:mock:ai        # 起一个假的 OpenAI 兼容视觉服务（默�
 MOCK_AI_SCENARIO=game npm run server:e2e:ai   # 对着假服务跑 AI 全链路，28 项
 ```
 
-会员与分享提成同样各有一条（**都打真实数据库、真实 HTTP，自己注册并清理临时家长**）：
+会员、分享提成与设备健康同样各有一条（**都打真实数据库、真实 HTTP，自己注册并清理临时家长/设备**）：
 
 ```bash
-npm run server:e2e:membership  # 动态定价 → 订单快照 → 三种周期 → 续费/升级 → 门禁 403 → 受邀用户定价，175 项
+npm run server:e2e:membership  # 动态定价 → 订单快照 → 三种周期 → 续费/升级 → 门禁 403 → 受邀用户定价，180 项
 npm run server:e2e:referral    # 邀请码 → 首充阶梯 → 续费 → 券 → 结算 → 提现审核 → 风控，159 项
+npm run server:e2e:time-requests # 孩子申请加时/延后 → 家长批准 → 真的下发 temp_unlock，73 项
+npm run server:e2e:wechat    # 微信模板消息：配置门禁 → 入队 → 懒投递 → 令牌失效重取 → 重试上限，52 项（自带假上游）
+npm run server:e2e:health      # 健康快照 → 缺口透传 → 未知不猜 → 在线分级 → 失联动态去重 → self_check 全链路 → 分机型修复步骤，91 项
+npm run server:e2e:device-members # 家庭成员与角色：邀请 / 升管理员 / 移除 / 上限 / 只读成员每个写入口 403，67 项
+npm run server:e2e:children    # 孩子档案与今日任务：档案 CRUD / 年龄现算 / 设备整组替换 / 任务勾选，74 项
+npm run server:e2e:privacy     # 合规留痕：同意版本与重签 / 撤回即停监控并删设备记录 / 注销冷静期与真删 / 导出，76 项
+npm run server:e2e:payments    # 支付管线：下单 → 回调验签与幂等 → 退款（自助/后台）→ 开票 → 后台统计，82 项（自带假渠道后端）
+npm run server:e2e:flags       # 运行时灰度开关：代码默认值 / 稳定哈希放量 / 白名单 / 接进支付与退款路径 / reset / 留痕，45 项
+npm run server:e2e:alerts      # 后台告警大盘：五条规则 / 分母为 0 是 null / 三值一致 / 改阈值只影响触发 / 确认不放行，65 项
+npm run server:e2e:tickets     # 客服工单：提交 → 越权 404 → 分派与回复 → 关闭后不可回 → 入口开关，69 项
 ```
+
+`server:e2e:health` 里三组「在线分级」断言要直接改库里的 `lastActiveAt` 来构造时间边界，
+所以它动态 import `@prisma/client`；拿不到数据库时这几条会**明确标注跳过**，不伪装成通过
+（其余 80 项只走 HTTP，照常跑）。
 
 `server:e2e:referral` 会在**开头和结尾**都把活动配置与奖励阶梯写回平台默认值 ——
 脚本中途抛错时 `finally` 仍会复位，否则一次中断留下的「活动已暂停 + 首档 45%」
@@ -812,6 +978,274 @@ npm run seed                         # 重新灌入干净的演示数据
 
 ---
 
+## 孩子的申请（加时 / 延后锁屏）
+
+孩子被锁住时，除了「等」什么也做不了 —— 那正是亲子冲突的来源，所以后端给它开了一个正式出口。
+
+**为什么不复用 `AppAuditRequest`**：那张表的幂等键是 `packageName`、语义是「能不能装这个包」、
+落地动作是装应用放行；加时申请的幂等键是 `(设备, 类型)`、落地动作是 `temp_unlock`。
+硬塞一张表要靠一堆可空字段区分两种语义，家长端两个列表还会互相污染。
+所以另建 `TimeRequest`（`prisma/schema.prisma`），但复用它的**约定**：请假条式留痕、批准不删记录。
+
+三条刻意的取舍（都有 e2e 断言）：
+
+1. **批准 = 真的下发指令**。`reviewTimeRequest()` 批准时调 `tempUnlock(..., { accumulate: true })`，
+   由指令队列把 `temp_unlock` 送到设备，设备回报成功后状态才落地。服务端**绝不**自己把
+   `locked` 改成 false —— 那样孩子会看到「家长已同意」但屏幕仍锁着，比不做这个功能更伤信任。
+   `accumulate` 的语义是「在已有到期时间上叠加」而不是覆盖（家长连批两次不该把第二次吃掉）。
+2. **家长只能改小，不能改大**。`granted = Math.min(input.minutes ?? request.minutes, request.minutes)`。
+   孩子申请 120 分钟、家长给 30 分钟是常态；反过来只可能是误触或改包。
+   实际给了多少存进 `grantedMinutes`，与申请值分开留痕。
+3. **反复申请收敛成一条**。按 `(deviceId, kind, status = pending)` 幂等；内容没变时
+   **不刷新 `createdAt`**，否则孩子每点一次「申请」，「已经等了多久」就重置一次，
+   家长的待办列表也跟着乱跳。改了时长/理由才更新，并同样不新增通知行
+   （通知的 `dedupeKey` 是 `child_request:<id>`）。
+
+隔离照既有约定走 `shared/deviceScope.ts`：不是自己的设备 → `403`；自己的设备但申请不属于它 → `404`
+（不泄漏别处是否存在这个 id）；自己的设备确实没有申请 → `200` + 空列表。
+
+---
+
+## 家庭成员与角色（规划 §5.1）
+
+一台设备可以由**多个家长账号**共同看护。设备的主人仍然是 `ChildDevice.userId`（唯一、不可转让），
+被邀请进来的家长落在 `DeviceMember` 表：
+
+| 字段 | 说明 |
+| --- | --- |
+| `deviceId` / `userId` | `@@unique([deviceId, userId])` —— 同一台设备同一个人只有一行 |
+| `role` | `admin`（能改设置、能下指令）或 `viewer`（只能看） |
+| `nickname` | 家长自己填的备注（显示时非空优先于账号昵称） |
+| `invitedBy` | 邀请人，只用于追溯 |
+
+**角色只有两档**，不做细粒度权限矩阵：真正的分歧是「谁有权改设置」，而矩阵必然会在某个新加的
+写接口上漏一格 —— 漏掉的那一格就是越权。**主人不写进 `DeviceMember`**：主人的身份由
+`ChildDevice.userId` 表达，再写一行「主人成员」就会有「这一行被删掉算不算解绑」这种自相矛盾的状态。
+
+读写分档由 `shared/deviceScope.ts` 强制，**每个接口自己声明它要哪一档**：
+
+- 读（设备列表 / 详情 / 媒体 / 洞察）：`resolveDevice`、`requireDeviceAccess`
+- 写（改设置、下指令、审批、加减规则）：`resolveWritableDevice`、`requireWritableDevice`
+  —— `viewer` 得到 `403 你是这台设备的只读成员，不能修改设置`
+- 主人专属：`requireOwnerDevice` —— 只给**解绑设备**与**增删改家庭成员**用
+  （`403 只有设备的主人可以执行这个操作`）
+
+接口（`server/src/features/devices/devices.routes.ts`，前缀 `/api/devices`）：
+
+| 方法 | 路径 | 谁能做 |
+| --- | --- | --- |
+| `GET` | `/:deviceId/members` | 主人与成员（无关家长 403） |
+| `POST` | `/:deviceId/members` | 只有主人（`{ phone, role?, nickname? }`） |
+| `PATCH` | `/:deviceId/members/:memberId` | 只有主人（`{ role?, nickname? }`，至少改一项） |
+| `DELETE` | `/:deviceId/members/:memberId` | 只有主人 |
+
+`GET /api/devices` 与设备详情会带上 `role` / `canWrite` / `canManageMembers`，家长端据此决定
+「解绑」「家庭成员」按钮给不给 —— **但这只是界面便利，服务端每个写接口都会重新判一次**。
+
+几条边界：上限 `DEVICE_MEMBER_LIMIT = 5`（**主人不占名额**），第 6 个人 → `409`；手机号一律
+**打码**（`138****8000`）—— 共同看护的家长不该因为一次邀请就拿到对方完整号码；邀请只认
+**已经注册的手机号**（查不到 → `404`），不做「邀请未注册用户」：那需要真实短信通道与待接受状态机，
+现在做只会做出一个发不出去的假入口。邀请成功给对方写一条 `device_shared` 站内通知（模板 + 参数，
+见上文「站内通知」）。`DeviceMember` 对 user / device 都是 `onDelete: Cascade`，所以设备没了成员行也没了。
+
+**验证**：`npm run server:e2e:device-members`（67 项，真实库真实角色）。**没有设备端部分** ——
+这是纯服务端 + 家长端能力，孩子的设备不受影响（`child-home` 仍然返回主人的名字与电话）。
+
+## 孩子档案与今日任务（规划 §5.2）
+
+在 §5.2 之前系统里只有「设备」，没有「孩子」：双胞胎的两台手机在库里毫无关联，年龄也只在
+家长的脑子里。现在 `Child`（姓名 / 出生年份 / 学校 / 头像）是**家长账号级**实体，
+`ChildTask` 挂在孩子身上，`ChildDevice.childId` 表示「这台设备现在算在哪个孩子名下」。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET / POST | `/api/children` | 自己的档案列表（含现算的 `age` 与今日任务 `todayTasks{total,done}`）/ 新建 |
+| PATCH / DELETE | `/api/children/:childId` | 改名 / 出生年份 / 学校；删档案（**设备只是解绑**） |
+| PUT | `/api/children/:childId/devices` | 设备归属**整组替换**（最多 10 台） |
+| GET / POST | `/api/children/:childId/tasks` | `?date=YYYY-MM-DD`（默认今天）/ 布置任务 |
+| PATCH / DELETE | `/api/children/:childId/tasks/:taskId` | 改内容 / 勾完成 / 取消完成 / 删 |
+| POST | `/api/agent/tasks/:taskId` | **孩子端**回报完成（`{ done: boolean }`，设备令牌） |
+
+几个刻意的决定：
+
+1. **存出生年份、不存年龄**：年龄每次现算（`今年 - 出生年份`）。存下来的年龄每年都会悄悄
+   过期一次，而「孩子几岁」直接影响家长看到的每一句文案。
+2. **日期是 `YYYY-MM-DD` 字符串**，不是时间戳 —— 任务清单不该因为跨时区而整体挪一天。
+3. **`PUT .../devices` 是整组替换**：勾选框就是最终状态。做成增删两个接口就会出现「加了新
+   设备但旧设备没摘掉」这种半截状态；一台设备只能属于一个孩子，换孩子时自动从原档案移走
+   （同一事务，失败整体回滚）。
+4. **删档案不删设备**（`onDelete: SetNull`）：整理档案最怕顺手把孩子的手机一起删了。
+5. **档案只有档案主人看得见**：§5.1 的家庭成员（哪怕是 `admin`）读别人家孩子的档案一律
+   `404`（不是 `403` —— 不泄漏「这个 id 存不存在」），成员对设备的写权限完全不受影响。
+6. **上限**：`CHILD_LIMIT = 5` 份档案、`CHILD_DEVICE_LIMIT = 10` 台设备、`CHILD_TASK_LIMIT = 20`
+   条任务/天，超了一律 `409`（不是静默截断）。
+
+`GET /api/agent/child-home` 现在多返回两段：`childName`（设备挂着的孩子，没挂就是 `null`）
+与 `tasks`（今天的任务清单）。孩子端勾掉一条 → `POST /api/agent/tasks/:taskId` 落 `doneAt`
+并给家长写一条 `child_task` 站内通知（标题模板 `'{{v0}} 完成了「{{v1}}」'`，`linkPath` 是
+`/children`）；`dedupeKey` 用 `child_task:<taskId>`，所以**同一条任务重复勾选只会通知一次**，
+而家长自己代勾不会打扰自己。
+
+**验证**：`npm run server:e2e:children`（74 项，真实库：越权 / 事务 / 通知 / child-home 全链路）
++ `npm run server:e2e:notifications`（69 项 —— 通知类型从 9 类长到 10 类）。
+
+## 网址拦截的规则形状（规划 §4.1）
+
+家长端能填三种东西，服务端统一用 `normalizeBlockedEntry()`（`devices.service.ts`）归一化：
+
+- **域名 / 网址**：`https://Gambling.com/lobby?x=1` → `gambling.com`（去协议、userinfo、路径、
+  查询、端口、`*.` 前缀、首尾点、大小写）。
+- **IPv4 字面量**：`1.2.3.4` 原样保存。
+- **网段**：`10.0.0.0/8` 保存为**主机位清零**后的写法（`10.1.2.3/8` 也变成 `10.0.0.0/8`）——
+  否则同一网段的两种写法会被设备端当成两条路由。
+- **IPv6 字面量**：只支持字面量，不支持 v6 网段。
+- 其它输入 → `400 请输入有效的域名或 IP，例如 gambling.com、1.2.3.4`。
+
+为什么允许 IP / 网段：设备端把它们变成**隧道 /32 路由**，于是「应用缓存里的 IP」和
+「直接连 IP」这两条绕过路径也走不通（细节见 `android/README.md` §5.13）。服务端的归一化
+与设备端 `BlockedAddresses` 必须同一口径 —— 否则家长填得进去、设备端不认。
+`server:smoke` 有 5 项钉死这个契约。
+
+## 合规留痕、导出与注销（规划 §5.3）
+
+在这之前应用里**没有任何**「同意」记录：家长端有说明页，但点没点过、同意的是哪一版，库里查不到。
+没有同意记录的「同意页」比没有更糟 —— 它看起来像留了痕。现在：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/privacy/docs` | 当前版本的文档目录（两份必读 + 版本号）与最小必要采集清单 |
+| GET / POST | `/api/privacy/consents` | 自己的同意状态（含 `needsReaccept`、历史记录）/ 记一条同意 |
+| POST | `/api/privacy/consents/:consentId/revoke` | 撤回（要密码 + 手打确认词），**立即停监控并删设备记录** |
+| GET | `/api/privacy/deletion` | 注销状态（是否已排期、到期时间、能否撤销） |
+| POST / DELETE | `/api/privacy/deletion` | 申请注销（7 天冷静期）/ 撤销注销 |
+| GET | `/api/privacy/export` | 一次性导出（账号 / 设备 / 孩子 / 任务 / 同意 / 通知 / 订单…的元数据） |
+
+`ConsentRecord` 存 `docType` + `docVersion` + `acceptedAt` + `revokedAt` + IP + UA。**版本是文本的
+指纹**：`PRIVACY_DOC_VERSION` 一改，旧记录仍然留着，但状态变成「需要重新同意」——不是静默续期，
+也不是把旧记录删掉假装从未同意过。`docType` 只有 `guardian_agreement`（家长监护授权与隐私说明）
+与 `minor_data_notice`（未成年人个人信息处理告知）两份，两份都必读。
+
+**最小必要采集清单是代码里的表**（`COLLECTION_CATALOG`），不是文案：每一项写着它的用途、
+保存期限与存放位置，且必须和实现一一对得上（写了「默认 7 天」就得有定时任务真的删文件，
+写了「服务端没有这张表」就不能有这张表）。`server:e2e:privacy` 会断言清单里每一项的
+`key` 都能在服务端找到对应实现，防止这张表漂成宣传文案。
+
+**注销分两段，不是一次删除**：`POST /deletion` 当场做三件事 —— 停监控、**删除该账号下的设备记录**
+（含磁盘上的照片与截屏文件）、把 `User.deletionScheduledAt` 写到 7 天后。到期由
+`server.ts` 的 `privacyTimer`（每小时 + 启动时）调 `sweepExpiredDeletions()` 真删：先删文件，
+再 `user.delete` 让外键级联清掉孩子档案、任务、订单、同意记录。撤销注销能把账号救回来，
+但**设备记录已经删了** —— 撤销后要重新绑定设备才能恢复监控，确认框里写明了这一点。
+
+为什么撤回同意也要删设备记录：设备记录（`DeviceEvent` / `MediaAsset` / `ScreenBatch`）的归属
+是按 `deviceId` 归档的，设备行只要还在，下一个绑定它的家庭就可能读到上一个家庭的照片与事件。
+这是一条真实的越权路径，所以**停止监控 = 删设备行**，不是把 `userId` 置空。
+
+**已知缺口**（不在本轮修）：管理后台的 `forceUnbindDevice` 仍然只把 `ChildDevice.userId` 置空，
+所以一台被运营商强制解绑、随后被另一个家庭重新绑定的设备，仍可能看到上一家的历史数据。
+修它需要「按设备清数据 + 重置设备侧设置」的一套动作，属于另一轮的事；已如实记在
+`docs/FEATURE-STATUS.md` §4。
+
+**验证**：`npm run server:e2e:privacy`（76 项，真实库真实 HTTP：同意版本与重签、撤回即删设备记录
+与磁盘文件、注销冷静期与到期真删、导出内容与截断标记，外加越权与密码校验）。家长端界面
+由 `e2e` 的「家长端 5e. 合规与隐私」一段覆盖（只做不破坏种子库的动作：同意、采集清单展开、
+注销确认框走到但不提交）。
+
+## 真实支付渠道：下单 / 回调 / 退款 / 发票（规划 §5.4）
+
+在这之前只有一个 `MEMBERSHIP_MOCK_PAY` 开关：点「确认支付」直接把订单改成已支付。
+接真实渠道要补的不是一个 SDK 调用，而是**四条管线**：向渠道下单拿预支付信息、
+收渠道异步回调并把订单置为已支付、退款、发票。本轮把管线建全，凭据留成配置位。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/payments/catalog` | 家长端支付页需要的「现在能用什么」：渠道是否配好、缺哪个环境变量、退款窗口、发票上限、`notice` 文案 |
+| GET | `/api/payments/orders` | 自己的订单（含能否退款 / 发票状态，家长端不按状态猜） |
+| GET | `/api/payments/orders/:orderNo` | 单张订单（含 `events` 事件流） |
+| POST | `/api/payments/orders/:orderNo/pay` | 向渠道下单，返回 `prepayId` / `codeUrl` / `mode` |
+| POST | `/api/payments/refunds` | 自助退款（退款窗口内、未申请发票、非 `refunding`） |
+| GET | `/api/payments/refunds` | 自己的退款单 |
+| POST / GET | `/api/payments/invoices` | 申请开票 / 查自己的发票 |
+| POST | `/api/payments/notify/:channel` | **渠道回调**（`express.raw`，签名校验，幂等） |
+| GET | `/api/admin/payments/stats` | 后台：订单/收入/退款/坏签名/渠道配置实况 |
+| GET | `/api/admin/payments/orders`、`/orders/:orderNo/events` | 后台：订单列表（按手机号搜）与事件流 |
+| POST | `/api/admin/payments/refunds` | 后台：人工退款（家长超窗口、或渠道回调丢失时） |
+| GET | `/api/admin/payments/refunds`、`/invoices`、`PATCH /invoices/:invoiceId` | 后台：退款单、发票审核（`issued` 必须填发票号） |
+
+**渠道没配就不装成功**。`payments.constants.ts` 的 `missingEnvOf()` / `isChannelConfigured()` 是唯一的判据（`payments.provider.ts` 里另有 `providerReady` / `providerMissing` / `requireProvider` 做同一件事的服务端封装）：缺凭据时
+`createPayment` 返回 `mode: 'mock'`（仅在 `MEMBERSHIP_MOCK_PAY` 打开且非生产时）或
+`503` 并**列出缺哪几个环境变量**；`catalog.notice` 同一句话也写给家长端看。测试渠道
+（`PAY_CHANNEL_FAKE`，仅测试环境、要求 `PAYMENT_FAKE_PROVIDER=true`）走完整的
+下单 / 回调 / 退款管线但不联网：它就是 `server:e2e:payments` 的被测对象。
+
+**回调是唯一的真相来源**：`POST /api/payments/notify/:channel` 校验签名（微信 HMAC、
+支付宝 RSA 占位）→ 找到订单 → 核对渠道与金额 → `membership.service.applyPaidOrder()` 置为
+已支付。签名错、金额不符、订单不存在、渠道没配都会记一条 `PaymentEvent`（`bad_signature`
+/ `amount_mismatch` / `unknown_order` / …）并**不改变订单状态**，方便事后对账。同一个
+`transactionId` 重复回调是幂等的：不会重复开会员，也不会把 `expiresAt` 再往后推。
+
+**退款要收回权益**。自助退款只在窗口内（`PAYMENT_REFUND_WINDOW_DAYS`，默认 7 天）、
+订单未申请发票、状态不是 `refunding` 时受理；退款单号是 `RF<orderNo>`（渠道要求幂等，
+重试用同一个号）。会员撤销的前提是**当前生效的这段权益正是这张订单开的**：如果家长先
+退款 A 单、又用 B 单续过费，`applyPaidOrder` 会把 `tier` 降回 `free` 并扣回
+`totalPaidCents`；如果这单开的会员早就被后一单覆盖，就只退钱不降级 —— 否则会误伤。
+
+**发票是人工开的**：家长提交抬头/税号/邮箱 → `pending`；后台 `PATCH` 成 `issued` 时
+**必须**带 `invoiceNo`（zod refine）。`pending` 与 `issued` 都拦住自助退款，文案提示
+「先冲红」——发票已开而钱退了是财务上的漏洞。
+
+**验证**：`npm run server:e2e:payments`（82 项，自带 :4102 后端 + 假渠道，不需要
+`server:dev`，测完自行删掉订单）。覆盖：目录实况与「未配置」话术、未配置渠道下单 503 与
+缺失变量名、假渠道全流程下单 → 坏签名 401 → 金额不符 400 → 渠道不符 400 → 正确回调开通
+→ 重复回调幂等、别人的订单一律 404、自助退款与会员收回、超窗口 403 与后台人工退款、
+发票 `pending` 挡退款 / `issued` 必须填号、后台统计与事件流。**不测**真实微信/支付宝网络
+调用（没有凭据），`alipay` 适配层是对接位而非可用实现，已在下面「已知边界」写明。
+
+## 后台运营：告警大盘 / 灰度开关 / 客服工单（规划 §5.5）
+
+三件事的共同点是**「运营看得见、也改得动，但改不动事实」**：数字来自真实表，开关只决定放行，
+工单只记录沟通。口径写在 [`../docs/PLAN-admin-ops.md`](../docs/PLAN-admin-ops.md)。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/admin/alerts/overview` | 五个指标 + 每条规则的触发状态、样本、确认记录 |
+| GET / PATCH | `/api/admin/alerts/rules`、`/rules/:key` | 规则的开关 / 阈值 / 窗口 / 严重度 |
+| DELETE | `/api/admin/alerts/rules/:key/reset` | 恢复**代码里的**默认口径 |
+| GET / POST / DELETE | `/api/admin/alerts/acks` | 确认记录（谁、何时、当时的快照），撤销 = 删行 |
+| GET / PATCH / DELETE | `/api/admin/flags`、`/flags/:key`、`/flags/:key/reset` | 灰度开关 |
+| GET | `/api/admin/flags/:key/preview?subjectId=` | 试算某个账号/设备是否命中，并给出理由 |
+| GET | `/api/support/config`、`/tickets`、`/tickets/:ticketNo` | 家长端：入口自述、我的工单、详情 |
+| POST | `/api/support/tickets`、`/tickets/:ticketNo/replies` | 提交工单 / 追加回复 |
+| GET / PATCH | `/api/admin/tickets`、`/tickets/:ticketNo` | 后台：列表（状态/分类/优先级/关键词）与处理 |
+| POST | `/api/admin/tickets/:ticketNo/replies` | 客服回复（**回复即认领**，`open → waiting`） |
+
+**告警的纪律是「不把没有数据说成 0%」**。五个规则（设备失联率、管控失效率、指令失败率、
+支付异常、通知投递失败）各自带单位、分母口径与窗口（见 `features/opsalert/alerts.constants.ts`）；
+率类指标**分母为 0 时 `value` 是 `null`**（界面显示「—」），并且不触发 —— 没有可统计对象不等于
+事故。改阈值只影响 `triggered`，不会让指标本身变好看；确认（`AlertAck`）也只记「谁在什么时候
+看过、当时是多少」（`snapshot` 由服务端在确认那一刻算，前端传进来的数字不作数），**确认不会让
+告警消失**。
+
+**灰度开关的纪律是「缺行 = 代码默认，不是关闭」**。`RuntimeFlag` 里没有这一行时按
+`FLAG_DEFS` 的默认值放行（删掉一行不会把功能关死），读操作**不写库**，靠启动时的
+`ensureFlagDefaults()` 与后台的「恢复默认」补齐。放量用**稳定散列**
+（`sha256(flagKey:subjectId)`）而不是每次抽签，所以同一个账号刷新一百次结果一样；白名单优先于
+开关与百分比；需要对象（`bucket: 'user' | 'device'`）却没给出对象时**保守判不命中**并说明原因。
+接线点是真实路径而不是装饰：`pay.channel.wechat` / `pay.channel.alipay` 决定支付目录里渠道是否
+可用、`pay.refund.selfservice` 一关家长自助退款就 403（后台人工退款不受影响）、
+`notify.wechat.dispatch` 挡在微信投递入队前、`support.tickets` 一关入口就 503（历史仍可读）。
+
+**工单的纪律是「家长看不到后台内部信息，后台看得到处理人」**。家长视图只有 `by/at/body`
+（没有 `adminId`、没有客服账号名）；跨账号读写一律 404；未关闭工单最多 5 张（第 6 张 409）；
+客服回复即认领并把 `open` 推到 `waiting`，家长回话推回 `processing`，关闭后双方都不能再回
+（`closedAt` 落库）；后台**没有 DELETE** —— 工单是沟通记录，不是可随手清理的数据。删除账号时
+工单**级联删除**（迁移 `20261020010000_ticket_cascade`）：留着正文就等于「删了账号还留着用户内容」。
+
+环境变量只有 `SUPPORT_CONTACT`（家长端工单页显示的联系方式，留空就只显示「在工单里回复你」）。
+
+**验证**：`npm run server:e2e:alerts`（65 项，:4104）、`npm run server:e2e:flags`（45 项，:4103）、
+`npm run server:e2e:tickets`（69 项，:4105）各自拉起独立后端（假渠道 / 提高限流），不碰真实渠道、
+测完自己清理；浏览器侧由 `npm run e2e` 的后台套件覆盖三页面的渲染与接口一致性。
+
 ## 部署注意
 
 - **多实例**：数据都在 PostgreSQL，可水平扩展。但两处是进程内状态，需要替换后才能多实例：
@@ -828,3 +1262,14 @@ npm run seed                         # 重新灌入干净的演示数据
 以下能力后端已完整建模并给出接口，但**必须在孩子设备上安装 Agent 才能真正生效**：
 锁屏、临时解锁、远程拍照/截图/录像/录音、同屏监控、远程协助、通话短信、应用限制与网址拦截的强制执行。
 后端负责策略下发、指令排队与结果收敛，不负责（也无法负责）设备本地的执行。
+
+运营侧（§5.4 / §5.5）另有三条是**刻意没做**或**没有环境做**的，同样不要当成能力缺口：
+
+- **真实支付渠道没有可用的实现证据**：微信/支付宝适配层按公开文档写全了签名、下单报文、
+  回调验签与退款请求，但仓库里没有商户号与密钥，所以「真实下单/真实退款」从未联网跑过，
+  后台与家长端一律如实显示 `未配置`。有端到端证据的只有管线本身（假渠道）。
+- **告警不出站**：告警只出现在 `/admin/alerts` 大盘上，不发短信、不发邮件、不推微信
+  （微信模板消息是家长通知的通道，不是运维通道）。要看就得打开后台 —— 这是本轮的范围，
+  不是遗漏。
+- **工单只有文字**：没有附件上传、没有自动回复机器人、没有按技能轮询派单（客服回复即认领）。
+  工单正文与回复对家长与客服都是明文，别在工单里放密码或验证码。

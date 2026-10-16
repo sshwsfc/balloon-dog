@@ -349,6 +349,10 @@ export interface MembershipOrderRow {
   amountCents: number
   discountCents: number
   adjustments: MembershipAdjustment[]
+  /** 本单命中的受邀定价规则名；没命中为空串。受邀快照只对后台下发，家长端没有这两个字段。 */
+  referralRuleName: string
+  /** 本单因受邀定价多收的分；0 表示没生效。 */
+  referralSurchargeCents: number
   payChannel: string
   payChannelLabel: string
   status: string
@@ -640,7 +644,366 @@ export interface ReferralRiskResult {
   findings: ReferralRiskFinding[]
 }
 
+// ============================================================
+// 支付（server/src/features/payments）
+// ============================================================
+
+/**
+ * 订单上的发票摘要。
+ * 后台的订单/退款列表**不做** InvoiceRequest 关联，所以这里的值恒为 null；
+ * 申请单本身要在「发票」页签里看。
+ */
+export interface PaymentInvoiceBrief {
+  id: string
+  status: string
+  statusLabel: string
+  invoiceNo: string | null
+}
+
+/**
+ * 支付订单行。
+ *
+ * `notifiedOrderNo` 与 `invoice` 声明为可选：订单列表给了这两个字段，
+ * 退款列表只给订单号/家长/退款信息，既没有回调单号也没有发票关联。
+ * 硬写成必填只会让退款列表在类型上撒谎。
+ */
+export interface PaymentOrderRow {
+  orderNo: string
+  userId: number
+  userNickname: string | null
+  userPhone: string | null
+  planCode: string
+  tier: string
+  period: string
+  payChannel: string
+  payChannelLabel: string
+  status: string
+  statusLabel: string
+  amountCents: number
+  originalCents: number
+  couponCents: number
+  refundCents: number
+  refundReason: string | null
+  refundedAt: string | null
+  refundNo: string | null
+  transactionId: string | null
+  prepayId: string | null
+  notifiedOrderNo?: string | null
+  paidAt: string | null
+  startsAt: string | null
+  expiresAt: string | null
+  createdAt: string
+  canPay: boolean
+  canRefund: boolean
+  /** 退款窗口的截止时间；过了这个点 canRefund 就为 false。 */
+  refundDeadline: string | null
+  /** 这单所选渠道还缺哪些环境变量（渠道没配全时不为空）。 */
+  missingConfig: string[]
+  invoice?: PaymentInvoiceBrief | null
+}
+
+/** 渠道交互流水：下单/回调/查询都落在这里，坏签名的回调同样落库。 */
+export interface PaymentEventRow {
+  id: string
+  provider: string
+  kind: string
+  signatureOk: boolean
+  result: string
+  detail: string | null
+  createdAt: string
+}
+
+/** 开票申请。 */
+export interface InvoiceRow {
+  id: string
+  orderNo: string
+  userId: number
+  userNickname: string | null
+  userPhone: string | null
+  amountCents: number
+  /** 抬头；个人抬头可能没填税号。 */
+  title: string | null
+  taxNo: string | null
+  email: string | null
+  status: string
+  statusLabel: string
+  invoiceNo: string | null
+  note: string | null
+  issuedAt: string | null
+  createdAt: string
+}
+
+/** 一个支付渠道的配置情况：`missing` 就是还缺的环境变量名。 */
+export interface PaymentChannelConfig {
+  key: string
+  label: string
+  configured: boolean
+  missing: string[]
+}
+
+export interface PaymentsStats {
+  paidCents: number
+  paidOrders: number
+  refundedCents: number
+  refundedOrders: number
+  byChannel: { channel: string; label: string; cents: number; count: number }[]
+  /** 近 30 天按日聚合，`day` 是 YYYY-MM-DD。 */
+  byDay: { day: string; cents: number; count: number }[]
+  pendingInvoices: number
+  /** 回调验签失败的条数。>0 说明密钥/证书配错了：钱可能收了但系统不认。 */
+  badSignatures: number
+  /** 走了测试渠道的订单数——这些订单不会真的收钱。 */
+  mockPayOrders: number
+  channels: PaymentChannelConfig[]
+  /** 模拟支付总开关（开发/联调用）。 */
+  mockPay: boolean
+  /** 测试渠道开关。 */
+  fakeProvider: boolean
+}
+
+export interface PaymentOrderQuery {
+  status?: string
+  channel?: string
+  orderNo?: string
+  userId?: number
+}
+
+export interface PaymentInvoiceQuery {
+  status?: string
+}
+
+/** 人工退款：金额单位是分，必须与订单号一起提交。 */
+export interface PaymentRefundBody {
+  orderNo: string
+  amountCents: number
+  reason: string
+}
+
+/**
+ * 开票申请的状态流转。
+ * `status='issued'` 时 `invoiceNo` 必填 —— 这条规则前端先拦一次，
+ * 后端 `adminInvoiceUpdateSchema` 也会再拦一次（422）。
+ */
+export interface PaymentInvoiceUpdateBody {
+  status: 'pending' | 'issued' | 'rejected'
+  invoiceNo?: string
+  note?: string
+}
+
+/**
+ * 支付后台列表的**原始**返回结构。
+ * 与提成后台一样，后端不发 `items` / `totalPages`，而是按资源名给数组：
+ * `{ orders|refunds|invoices, total, page, pageSize }`。
+ * 这里如实声明，再由 `toPaged()` 归一化成 `Paged<T>`，页面就不用关心这个差异。
+ */
+interface RawPaymentList<T> {
+  total: number
+  page: number
+  pageSize: number
+  items?: T[]
+  orders?: T[]
+  refunds?: T[]
+  invoices?: T[]
+}
+
 type Query = Record<string, QueryValue>
+
+/** 后端的分页形状 → 后台统一的 `Paged<T>`（补齐 items 与 totalPages）。 */
+function toPaged<T>(rows: T[], raw: { total: number; page: number; pageSize: number }): Paged<T> {
+  const pageSize = Math.max(1, raw.pageSize || 0)
+  return {
+    items: rows,
+    total: raw.total,
+    page: raw.page,
+    pageSize: raw.pageSize,
+    totalPages: Math.max(1, Math.ceil(raw.total / pageSize)),
+  }
+}
+
+// ============================================================
+// 运营告警大盘（features/opsalert）
+// ============================================================
+
+export type AlertSeverity = 'info' | 'warn' | 'danger'
+export type AlertUnit = '%' | '条'
+
+export interface AlertSample {
+  title: string
+  detail: string
+}
+
+/**
+ * 一个指标的口径。
+ *
+ * **`value` 是百分数而不是 0-1 的比例**（后端 `ratio()` 已经乘过 100，
+ * 例如 30 表示 30%），所以展示时**不能**走 `formatRate()`（它还会再乘一次 100）。
+ * `value === null` 表示分母为 0（没有可统计对象），界面必须显示「—」而不是「0%」。
+ */
+export interface AlertMetric {
+  key: string
+  label: string
+  unit: AlertUnit
+  numerator: number
+  denominator: number
+  value: number | null
+  windowMinutes: number
+  denominatorText: string
+  samples: AlertSample[]
+}
+
+export interface AlertAckView {
+  id: string
+  adminName: string | null
+  note: string
+  /** 确认那一刻服务端自己算的快照（前端传的会被 422 拒绝）。 */
+  snapshot: Record<string, unknown>
+  createdAt: string
+}
+
+export interface AlertView {
+  key: string
+  label: string
+  enabled: boolean
+  severity: AlertSeverity
+  threshold: number
+  unit: AlertUnit
+  windowMinutes: number
+  note: string
+  denominatorText: string
+  value: number | null
+  numerator: number
+  denominator: number
+  samples: AlertSample[]
+  triggered: boolean
+  ack: AlertAckView | null
+  usingDefaults: boolean
+}
+
+export interface AlertOverview {
+  generatedAt: string
+  metrics: AlertMetric[]
+  alerts: AlertView[]
+}
+
+export interface AlertRuleRow {
+  key: string
+  label: string
+  enabled: boolean
+  severity: AlertSeverity
+  threshold: number
+  windowMinutes: number
+  unit: AlertUnit
+  denominatorText: string
+  defaultThreshold: number
+  defaultSeverity: AlertSeverity
+  defaultWindowMinutes: number
+  note: string
+  usingDefaults: boolean
+  updatedAt: string | null
+}
+
+export interface AlertAckRow {
+  id: string
+  key: string
+  subject: string
+  label: string
+  adminName: string | null
+  note: string
+  snapshot: Record<string, unknown>
+  createdAt: string
+}
+
+export interface AlertRulePatch {
+  enabled?: boolean
+  severity?: AlertSeverity
+  threshold?: number
+  windowMinutes?: number
+  note?: string
+}
+
+// ============================================================
+// 灰度开关（features/flags）
+// ============================================================
+
+export type FlagBucket = 'user' | 'device' | 'none'
+
+export type FlagReason =
+  | 'allowlisted'
+  | 'flag_disabled'
+  | 'rollout_full'
+  | 'rollout_zero'
+  | 'missing_subject'
+  | 'rollout_bucket'
+
+export interface FlagView {
+  key: string
+  label: string
+  description: string
+  bucket: FlagBucket
+  enabled: boolean
+  rolloutPercent: number
+  allowIds: string[]
+  updatedAt: string | null
+  updatedBy: number | null
+  usingDefaults: boolean
+  wiredAt: string
+}
+
+export interface FlagEvaluation {
+  key: string
+  hit: boolean
+  reason: FlagReason
+  reasonText: string
+  usingDefaults: boolean
+}
+
+export interface FlagPatch {
+  enabled?: boolean
+  rolloutPercent?: number
+  allowIds?: string[]
+  description?: string
+}
+
+// ============================================================
+// 客服工单（features/support）
+// ============================================================
+
+export type TicketStatus = 'open' | 'processing' | 'waiting' | 'closed'
+export type TicketPriority = 'low' | 'normal' | 'high'
+
+export interface TicketReplyRow {
+  by: 'parent' | 'admin'
+  adminName: string | null
+  at: string
+  body: string
+}
+
+export interface TicketRow {
+  ticketNo: string
+  userId: number | null
+  userPhone: string | null
+  userNickname: string | null
+  deviceId: string | null
+  contact: string
+  category: string
+  subject: string
+  body: string
+  status: TicketStatus
+  statusLabel: string
+  priority: TicketPriority
+  assigneeId: number | null
+  assigneeName: string | null
+  replies: TicketReplyRow[]
+  closedAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface TicketPatch {
+  status?: TicketStatus
+  priority?: TicketPriority
+  assigneeId?: number | null
+}
 
 // ============================================================
 // 接口
@@ -927,6 +1290,139 @@ export const api = {
 
     /** 只读风控清单：只列出来给人看，没有处罚动作。 */
     risk: (days: number) => request<ReferralRiskResult>('/admin/referral/risk', { query: { days } }),
+  },
+
+  /**
+   * 支付：真实支付接入的后台一半（渠道配置体检 / 订单流水 / 人工退款 / 开票）。
+   * 三个列表接口的后端形状都不是 `Paged<T>`，在下面统一归一化后再交给页面。
+   */
+  payments: {
+    stats: (q?: Query) => request<PaymentsStats>('/admin/payments/stats', { query: q }),
+
+    orders: (q: Query) =>
+      request<RawPaymentList<PaymentOrderRow>>('/admin/payments/orders', { query: q }).then((raw) =>
+        toPaged(raw.orders ?? raw.items ?? [], raw),
+      ),
+
+    orderEvents: (orderNo: string) =>
+      request<{ events: PaymentEventRow[] }>(
+        `/admin/payments/orders/${encodeURIComponent(orderNo)}/events`,
+      ),
+
+    refund: (body: PaymentRefundBody) =>
+      request<{ success: boolean; order: PaymentOrderRow; membershipRevoked: boolean }>(
+        '/admin/payments/refunds',
+        { method: 'POST', body },
+      ),
+
+    refunds: (q: Query) =>
+      request<RawPaymentList<PaymentOrderRow>>('/admin/payments/refunds', { query: q }).then((raw) =>
+        toPaged(raw.refunds ?? raw.items ?? [], raw),
+      ),
+
+    invoices: (q: Query) =>
+      request<RawPaymentList<InvoiceRow>>('/admin/payments/invoices', { query: q }).then((raw) =>
+        toPaged(raw.invoices ?? raw.items ?? [], raw),
+      ),
+
+    updateInvoice: (id: string, body: PaymentInvoiceUpdateBody) =>
+      request<{ success: boolean; invoice: InvoiceRow }>(
+        `/admin/payments/invoices/${encodeURIComponent(id)}`,
+        { method: 'PATCH', body },
+      ),
+  },
+
+  /**
+   * 运营告警大盘（规划 §5.5）。
+   *
+   * overview 的 `alerts` 已由后端排好序（触发的在前 → 严重度 → 值降序），
+   * 页面直接按顺序渲染即可，不要在前端再排一次 —— 排序口径只能有一处。
+   */
+  alerts: {
+    overview: () => request<AlertOverview>('/admin/alerts/overview'),
+
+    rules: () => request<{ rules: AlertRuleRow[] }>('/admin/alerts/rules'),
+
+    updateRule: (key: string, body: AlertRulePatch) =>
+      request<{ success: boolean; rule: AlertRuleRow }>(
+        `/admin/alerts/rules/${encodeURIComponent(key)}`,
+        { method: 'PATCH', body },
+      ),
+
+    resetRule: (key: string) =>
+      request<{ success: boolean; rule: AlertRuleRow }>(
+        `/admin/alerts/rules/${encodeURIComponent(key)}/reset`,
+        { method: 'DELETE' },
+      ),
+
+    /** 后端返回 `{ total, page, pageSize, acks }`，在这里归一化成 `Paged<T>`。 */
+    acks: (q: Query) =>
+      request<{ total: number; page: number; pageSize: number; acks: AlertAckRow[] }>(
+        '/admin/alerts/acks',
+        { query: q },
+      ).then((raw) => toPaged(raw.acks ?? [], raw)),
+
+    /** 确认告警。**不要传 snapshot**：服务端自己算，传了会被 422 拒绝。 */
+    ack: (body: { key: string; note?: string }) =>
+      request<{ success: boolean; ack: AlertAckRow }>('/admin/alerts/acks', { method: 'POST', body }),
+
+    removeAck: (id: string) =>
+      request<{ success: boolean; id: string; key: string }>(
+        `/admin/alerts/acks/${encodeURIComponent(id)}`,
+        { method: 'DELETE' },
+      ),
+  },
+
+  /** 灰度开关：**白名单**开关，界面只能改不能增删（新增开关要走代码 + 评审）。 */
+  flags: {
+    list: () => request<{ flags: FlagView[] }>('/admin/flags'),
+
+    /**
+     * 试算某个对象命中与否。
+     * 后端查询参数名是 **`subjectId`**（不是 `userId`）：传错名字会被静默忽略，
+     * 接口不报错但结果变成「没有对象 → 未命中」，很容易被误读成「这个账号没命中」。
+     */
+    preview: (key: string, subjectId: string) =>
+      request<{ preview: FlagEvaluation }>(`/admin/flags/${encodeURIComponent(key)}/preview`, {
+        query: { subjectId },
+      }),
+
+    update: (key: string, body: FlagPatch) =>
+      request<{ success: boolean; flag: FlagView }>(`/admin/flags/${encodeURIComponent(key)}`, {
+        method: 'PATCH',
+        body,
+      }),
+
+    reset: (key: string) =>
+      request<{ success: boolean; flag: FlagView }>(
+        `/admin/flags/${encodeURIComponent(key)}/reset`,
+        { method: 'DELETE' },
+      ),
+  },
+
+  /** 客服工单：家长给自己开的单，后台只负责看与回复（不能代家长新建）。 */
+  tickets: {
+    /** 后端返回 `{ total, page, pageSize, tickets }`，在这里归一化成 `Paged<T>`。 */
+    list: (q: Query) =>
+      request<{ total: number; page: number; pageSize: number; tickets: TicketRow[] }>(
+        '/admin/tickets',
+        { query: q },
+      ).then((raw) => toPaged(raw.tickets ?? [], raw)),
+
+    detail: (ticketNo: string) =>
+      request<{ ticket: TicketRow }>(`/admin/tickets/${encodeURIComponent(ticketNo)}`),
+
+    update: (ticketNo: string, body: TicketPatch) =>
+      request<{ success: boolean; ticket: TicketRow }>(
+        `/admin/tickets/${encodeURIComponent(ticketNo)}`,
+        { method: 'PATCH', body },
+      ),
+
+    reply: (ticketNo: string, body: { body: string }) =>
+      request<{ success: boolean; ticket: TicketRow }>(
+        `/admin/tickets/${encodeURIComponent(ticketNo)}/replies`,
+        { method: 'POST', body },
+      ),
   },
 }
 

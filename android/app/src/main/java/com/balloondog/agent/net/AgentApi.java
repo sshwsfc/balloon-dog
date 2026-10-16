@@ -17,10 +17,15 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import com.balloondog.agent.capability.ChildTasks;
+
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * {@code /api/agent/*} 这一组设备端接口的类型化封装。
  *
- * <p>七个接口，一个不多一个不少（对应 server/README.md 的「设备端 Agent 协议」）：
+ * <p>对应 server/README.md 的「设备端 Agent 协议」：
  * <table>
  *   <tr><td>POST</td><td>/agent/register</td><td>自助注册 / 续订令牌</td></tr>
  *   <tr><td>POST</td><td>/agent/heartbeat</td><td>报活（电量 / 网络 / 版本）</td></tr>
@@ -30,6 +35,9 @@ import org.json.JSONObject;
  *   <tr><td>POST</td><td>/agent/locations</td><td>上报位置</td></tr>
  *   <tr><td>POST</td><td>/agent/media</td><td>上传媒体（multipart）</td></tr>
  *   <tr><td>GET/POST</td><td>/agent/quiz/question, /agent/quiz/answer</td><td>答题解锁</td></tr>
+ *   <tr><td>GET</td><td>/agent/child-home</td><td>孩子端主页（家长的称呼 + 今天的任务）</td></tr>
+ *   <tr><td>POST</td><td>/agent/sos</td><td>孩子点的求助</td></tr>
+ *   <tr><td>POST</td><td>/agent/tasks/:id</td><td>勾 / 取消一条今日任务（规划 §5.2）</td></tr>
  * </table>
  */
 public class AgentApi {
@@ -141,6 +149,22 @@ public class AgentApi {
                 json.optBoolean("locked", false),
                 JsonUtils.parseIsoMillis(json.optString("tempUnlockUntil", null)),
                 json.optString("serverTime", null));
+    }
+
+    // ============================================================
+    // 2.5 健康快照（规划 §1 设备健康可见性）
+    // ============================================================
+
+    /**
+     * 上报一份完整的健康快照（覆盖式，不是增量）。
+     *
+     * <p>服务端会把它与前一份合并/替换，并把「哪些开关被关了」翻译成家长端能看的清单。
+     * 覆盖式的语义很重要：某条缺口修好后不再出现在 {@code gaps} 里，家长端才会消掉它。
+     *
+     * @return 服务端确认结果，含权威 {@code serverTime} 与它算出的等级
+     */
+    public JSONObject reportHealth(String baseUrl, JSONObject body) throws ApiException {
+        return client.post(base(baseUrl), Constants.PATH_HEALTH, body);
     }
 
     // ============================================================
@@ -525,6 +549,234 @@ public class AgentApi {
             // 常量 key
         }
         client.post(base(baseUrl), Constants.PATH_AGENT_SMS, body);
+    }
+
+    // ============================================================
+    // 孩子的申请：加时 / 延后锁屏（规划 §3.1）
+    // ============================================================
+
+    /**
+     * 向家长发起一次「加时 / 延后锁屏」申请。
+     *
+     * <p>与安装申请同理，服务端对「同一设备 + 同一类型 + 仍处于 pending」幂等：
+     * 孩子把同一份申请点两次不会在家长端堆出两条待办。
+     *
+     * <p>{@code reason} 可以为空 —— 「我想玩」也是有效的理由，不该因为没填就发不出去。
+     */
+    @NonNull
+    public TimeRequestResult submitTimeRequest(String baseUrl, String kind, int minutes,
+                                               @Nullable String reason) throws ApiException {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("kind", kind);
+            body.put("minutes", minutes);
+            if (reason != null && !reason.trim().isEmpty()) {
+                body.put("reason", reason.trim());
+            }
+        } catch (JSONException ignored) {
+            // 常量 key
+        }
+        JSONObject json = client.post(base(baseUrl), Constants.PATH_AGENT_TIME_REQUESTS, body);
+        return TimeRequestResult.from(json, kind, minutes);
+    }
+
+    /**
+     * 查一条申请的最新状态。
+     *
+     * <p>它只负责「把结果说清楚」：真正的解锁不依赖这个轮询 ——
+     * 家长批准后服务端会下发 temp_unlock 指令，设备端的放行窗口一生效，
+     * 锁定页自己就关了（见 LockScreenActivity 的每秒判定）。
+     */
+    @NonNull
+    public TimeRequestResult getTimeRequest(String baseUrl, String id) throws ApiException {
+        JSONObject json = client.get(base(baseUrl), Constants.pathTimeRequest(id), null, false);
+        return TimeRequestResult.from(json, "extend_time", 0);
+    }
+
+    /**
+     * 孩子端主页：这台设备是谁在守护、今天要做什么（规划 §3.2 / §5.2）。
+     *
+     * <p>孩子端主页上的「今天还剩多少」是**本机算的**（额度与用量都在本机，离线也算得出来）；
+     * 需要服务端的只有这些 —— 家长的称呼与手机号（让孩子能一键拨出去），以及家长布置的
+     * 今日任务（任务的取舍只有家长知道，本机不能猜）。
+     */
+    public ChildHomeResult getChildHome(String baseUrl) throws ApiException {
+        JSONObject json = client.get(base(baseUrl), Constants.PATH_AGENT_CHILD_HOME, null, false);
+        return ChildHomeResult.from(json);
+    }
+
+    /**
+     * 孩子勾上 / 取消一条今日任务（规划 §5.2）。
+     *
+     * <p>这是孩子端**唯一**会改服务端数据的地方，所以把它做小：只发一个布尔值，
+     * 回来的是服务端对齐后的那一条。家庭是「孩子说做完了」和「家长看到做完了」两个事实，
+     * 只要 `done` 变了就由服务端决定发不发通知，本机不自己判断。
+     */
+    public TaskAck setTaskDone(String baseUrl, String taskId, boolean done) throws ApiException {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("done", done);
+        } catch (JSONException ignored) {
+            // 常量 key
+        }
+        JSONObject json = client.post(base(baseUrl), Constants.pathChildTask(taskId), body);
+        return TaskAck.from(json);
+    }
+
+    /**
+     * 孩子点的求助（规划 §3.2）。
+     *
+     * <p>回包里带着家长手机号，所以求助完可以顺手把拨号盘打开 ——
+     * 但**能不能拨出去是系统的事**（没插 SIM 卡 / 没拨号权限时我们不假装成功，
+     * 服务端那条通知已经发出去了，那才是保底通道）。
+     */
+    public SosResult submitSos(String baseUrl, @Nullable String message) throws ApiException {
+        JSONObject body = new JSONObject();
+        try {
+            if (message != null && !message.trim().isEmpty()) {
+                body.put("message", message.trim());
+            }
+        } catch (JSONException ignored) {
+            // 常量 key
+        }
+        JSONObject json = client.post(base(baseUrl), Constants.PATH_AGENT_SOS, body);
+        return SosResult.from(json);
+    }
+
+    /** {@code GET /agent/child-home} 的回执。 */
+    public static final class ChildHomeResult {
+        /** 设备已被家长认领。false = 没人守护（这时求助发不出去，界面要如实说）。 */
+        public final boolean bound;
+        public final String deviceName;
+        /** 家长称呼；服务端没设昵称时为 null。 */
+        public final String parentName;
+        /** 家长手机号；没有时 null（可能家长账号已注销）。 */
+        public final String parentPhone;
+        /** 这台设备挂在哪个孩子的档案上；没挂档案时为 null（标题退回「今天的任务」）。 */
+        public final String childName;
+        /** 家长布置的今日任务；一条都没有时是空清单（不是 null）。 */
+        public final List<ChildTasks.Task> tasks;
+
+        public ChildHomeResult(boolean bound, String deviceName, String parentName, String parentPhone,
+                               String childName, List<ChildTasks.Task> tasks) {
+            this.bound = bound;
+            this.deviceName = deviceName;
+            this.parentName = parentName;
+            this.parentPhone = parentPhone;
+            this.childName = childName;
+            this.tasks = tasks;
+        }
+
+        static ChildHomeResult from(JSONObject json) {
+            return new ChildHomeResult(
+                    json.optBoolean("bound", false),
+                    json.optString("deviceName", ""),
+                    json.isNull("parentName") ? null : json.optString("parentName", null),
+                    json.isNull("parentPhone") ? null : json.optString("parentPhone", null),
+                    json.isNull("childName") ? null : json.optString("childName", null),
+                    parseTasks(json.optJSONArray("tasks")));
+        }
+    }
+
+    /** {@code POST /agent/tasks/:id} 的回执。 */
+    public static final class TaskAck {
+        public final boolean success;
+        /** 服务端对齐后的那一条；回包里没有 task 时为 null（界面就沿用本地的乐观值）。 */
+        public final ChildTasks.Task task;
+
+        public TaskAck(boolean success, ChildTasks.Task task) {
+            this.success = success;
+            this.task = task;
+        }
+
+        static TaskAck from(JSONObject json) {
+            return new TaskAck(json.optBoolean("success", false), parseTask(json.optJSONObject("task")));
+        }
+    }
+
+    /**
+     * 解析今日任务清单。
+     *
+     * <p>缺 id 或缺标题的行**直接丢掉**：一条点不动的任务比少一条任务更让人困惑
+     * （点不动的时候孩子只会以为是自己没点到）。服务端从不下发这种行，这里只是不让
+     * 一个坏字段把整块清单带崩。
+     */
+    static List<ChildTasks.Task> parseTasks(@Nullable JSONArray array) {
+        List<ChildTasks.Task> tasks = new ArrayList<>();
+        if (array == null) return tasks;
+        for (int i = 0; i < array.length(); i++) {
+            ChildTasks.Task task = parseTask(array.optJSONObject(i));
+            if (task != null) tasks.add(task);
+        }
+        return tasks;
+    }
+
+    @Nullable
+    static ChildTasks.Task parseTask(@Nullable JSONObject json) {
+        if (json == null) return null;
+        String id = json.optString("id", "");
+        String title = json.optString("title", "");
+        if (TextUtils.isEmpty(id) || TextUtils.isEmpty(title)) return null;
+        return new ChildTasks.Task(id, title, json.optBoolean("done", false));
+    }
+
+    /** {@code POST /agent/sos} 的回执。 */
+    public static final class SosResult {
+        /** 真的通知到家长了。false = 没人守护（reason=unbound），**不是**「成功了但你没看见」。 */
+        public final boolean success;
+        public final String parentPhone;
+        public final String reason;
+
+        public SosResult(boolean success, String parentPhone, String reason) {
+            this.success = success;
+            this.parentPhone = parentPhone;
+            this.reason = reason;
+        }
+
+        static SosResult from(JSONObject json) {
+            return new SosResult(
+                    json.optBoolean("success", false),
+                    json.isNull("parentPhone") ? null : json.optString("parentPhone", null),
+                    json.optString("reason", ""));
+        }
+    }
+
+    /** 加时 / 延后锁屏申请的回执。 */
+    public static final class TimeRequestResult {
+        public final String id;
+        /** {@code extend_time | delay_lock} */
+        public final String kind;
+        /** 已解析的分钟数：未审批时是孩子申请的，批准后是家长实际给的。 */
+        public final int minutes;
+        /** {@code pending | approved | rejected} */
+        public final String status;
+        /** 家长留的话（拒绝时最有用）。空串表示没留。 */
+        public final String note;
+
+        public TimeRequestResult(String id, String kind, int minutes, String status, String note) {
+            this.id = id;
+            this.kind = kind;
+            this.minutes = minutes;
+            this.status = status;
+            this.note = note;
+        }
+
+        /**
+         * 服务端两个接口返回的字段并不完全一样（新建只回 id/status/minutes，
+         * 查询回 status/minutes/note），缺的用提交时的本地值兜底。
+         */
+        static TimeRequestResult from(JSONObject json, String fallbackKind, int fallbackMinutes) {
+            return new TimeRequestResult(
+                    json.optString("id", ""),
+                    json.optString("kind", fallbackKind),
+                    json.optInt("minutes", fallbackMinutes),
+                    json.optString("status", "pending"),
+                    json.optString("note", ""));
+        }
+
+        public boolean isPending() {
+            return "pending".equals(status);
+        }
     }
 
     /** 安装申请的服务端回执。 */

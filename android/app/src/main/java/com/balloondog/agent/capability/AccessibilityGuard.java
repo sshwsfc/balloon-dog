@@ -63,7 +63,7 @@ public final class AccessibilityGuard {
 
     /** 供设置页展示：当前是不是学习模式。 */
     public static boolean isStudyNow(AgentStore store) {
-        return StudyModeEngine.isStudy(store.getModeConfig(), System.currentTimeMillis());
+        return StudyModeEngine.isStudy(store.getModeConfig(), TrustedClock.now());
     }
 
     /** 把界面文本压成一行便于 contains 匹配（转发到 {@link GuardRules#flatten}）。 */

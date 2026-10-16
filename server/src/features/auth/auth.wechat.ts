@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { config, wechatLoginConfigured } from '../../config';
+import { config, wechatApiBase, wechatLoginConfigured } from '../../config';
 import { logger } from '../../logger';
 import { BadRequestError, ServiceUnavailableError } from '../../errors';
 
@@ -168,7 +168,7 @@ export async function exchangeCodeForOpenid(code: string): Promise<{ openid: str
   const appId = config.WECHAT_LOGIN_APP_ID!;
   const secret = config.WECHAT_LOGIN_APP_SECRET!;
   const url =
-    'https://api.weixin.qq.com/sns/oauth2/access_token?' +
+    `${wechatApiBase()}/sns/oauth2/access_token?` +
     `appid=${appId}&secret=${secret}&code=${code}&grant_type=authorization_code`;
 
   const res = await fetch(url);
@@ -255,15 +255,20 @@ async function fetchWechatApi<T>(url: string, what: string): Promise<T> {
   return data;
 }
 
-/** 取（并缓存）公众号全局 access_token。 */
-async function getAccessToken(): Promise<string> {
+/**
+ * 取（并缓存）公众号全局 access_token。
+ *
+ * 同时给模板消息通道用（`notifications.wechat.ts`）：同一个公众号、同一份配额，
+ * 各建一份缓存只会让「每天 2000 次」的额度被重复消耗。
+ */
+export async function getAccessToken(): Promise<string> {
   const now = Date.now();
   if (cachedAccessToken && cachedAccessToken.expiresAt > now) return cachedAccessToken.value;
 
   const appId = config.WECHAT_LOGIN_APP_ID!;
   const secret = config.WECHAT_LOGIN_APP_SECRET!;
   const data = await fetchWechatApi<{ access_token?: string; expires_in?: number }>(
-    'https://api.weixin.qq.com/cgi-bin/token?' +
+    `${wechatApiBase()}/cgi-bin/token?` +
       `grant_type=client_credential&appid=${appId}&secret=${secret}`,
     'access_token',
   );
@@ -279,6 +284,16 @@ async function getAccessToken(): Promise<string> {
   return cachedAccessToken.value;
 }
 
+/**
+ * 丢掉 access_token 缓存。
+ *
+ * 微信可能在到期前就让令牌失效（重新授权、服务器换机），此时接口回 40001/42001；
+ * 调用方丢掉缓存重取一次即可，不要直接把这条消息判死。
+ */
+export function invalidateAccessToken(): void {
+  cachedAccessToken = null;
+}
+
 /** 取（并缓存）jsapi_ticket。 */
 async function getJsapiTicket(): Promise<string> {
   const now = Date.now();
@@ -286,7 +301,7 @@ async function getJsapiTicket(): Promise<string> {
 
   const accessToken = await getAccessToken();
   const data = await fetchWechatApi<{ ticket?: string; expires_in?: number }>(
-    'https://api.weixin.qq.com/cgi-bin/ticket/getticket?' +
+    `${wechatApiBase()}/cgi-bin/ticket/getticket?` +
       `access_token=${accessToken}&type=jsapi`,
     'jsapi_ticket',
   );

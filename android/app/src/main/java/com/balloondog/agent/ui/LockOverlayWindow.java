@@ -24,6 +24,7 @@ import com.balloondog.agent.data.AgentStore;
 import com.balloondog.agent.data.EventLog;
 import com.balloondog.agent.model.JsonUtils;
 import com.balloondog.agent.service.AgentService;
+import com.balloondog.agent.capability.TrustedClock;
 
 /**
  * 全屏锁定悬浮窗 —— 「按 Home 也切不走」的那一层。
@@ -90,7 +91,7 @@ public final class LockOverlayWindow {
         public void run() {
             if (!showing) return;
             LockState state = LockState.compute(
-                    LockEnforcer.buildInputs(store, System.currentTimeMillis()));
+                    LockEnforcer.buildInputs(store, TrustedClock.now()));
             if (!state.locked) {
                 EventLog.info("全屏锁定悬浮窗：判定应当解锁，自行移除");
                 hide();
@@ -302,7 +303,7 @@ public final class LockOverlayWindow {
     /** 刷新「临时可用剩余」文案。 */
     private static void updateCountdown() {
         if (countdownView == null || store == null) return;
-        long remaining = store.anyGrantUntil() - System.currentTimeMillis();
+        long remaining = store.anyGrantUntil() - TrustedClock.now();
         countdownView.setText(remaining > 0
                 ? "临时可用剩余 " + JsonUtils.humanizeDuration(remaining)
                 : "");

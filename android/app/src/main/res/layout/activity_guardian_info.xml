@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  「本设备由家长守护」知情说明页（规划 §3.4）。
+
+  正文不写死在这里：全部来自 capability/GuardianNotice（纯 Java，可被 JVM 测试断言，
+  也正是 crosstest 第 7 步拿去和 AndroidManifest.xml 对照的那份文本）。
+  布局只提供骨架，这样「页面上到底写了什么」只有一个来源 —— 不会出现
+  改了一处文案、测试看的是另一处的情况。
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#FFF6F6F6"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/title_guardian_info"
+            android:textColor="#FF1A1A1A"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="@string/guardian_info_subtitle"
+            android:textColor="#FF8A8A8A"
+            android:textSize="13sp" />
+
+        <!-- 现在正在发生什么：按本机真实开关生成（截屏 / 环境监听 / 位置 / 短信通话 / 服务） -->
+        <TextView
+            android:id="@+id/textLiveHeading"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/guardian_info_live_heading"
+            android:textColor="#FF1A1A1A"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/textLive"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:lineSpacingExtra="4dp"
+            android:textColor="#FF576B95"
+            android:textSize="13sp"
+            tools:text="周期截屏：未开启&#10;环境监听：未在进行&#10;位置上报：已授权，家长可以查看行踪" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="20dp"
+            android:background="#FFE5E5E5" />
+
+        <!-- 各节说明由 GuardianNotice.sections() 填进来 -->
+        <LinearLayout
+            android:id="@+id/noticeContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonNoticeBack"
+            style="@style/ButtonSecondary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:text="@string/action_notice_back" />
+
+    </LinearLayout>
+</ScrollView>

@@ -590,8 +590,10 @@ public final class ScreenCapturer {
     /** 轮询等待第一帧；MediaProjection 建立后通常 100~300ms 内就有画面。 */
     @Nullable
     private static Image awaitImage(ImageReader reader, long timeoutMs) {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        while (System.currentTimeMillis() < deadline) {
+        // 单调时钟：墙钟在这里没有意义，而设备改时间会把 System.currentTimeMillis()
+        // 往后拽 —— 那会让这个循环一直等下去（截屏卡死，家长端只看到「没反应」）。
+        long deadline = SystemClock.elapsedRealtime() + timeoutMs;
+        while (SystemClock.elapsedRealtime() < deadline) {
             Image image = reader.acquireLatestImage();
             if (image != null) return image;
             try {

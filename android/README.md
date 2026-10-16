@@ -23,7 +23,7 @@
 
 ## 1. 它做了什么
 
-### 1.1 完整实现设备端协议（17 组接口）
+### 1.1 完整实现设备端协议（18 组接口）
 
 | 方法 | 路径 | 本工程中的实现 |
 | --- | --- | --- |
@@ -38,6 +38,7 @@
 | POST | `/api/agent/screen-batches` | `FrameBatchUploader` — 把攒够的一包截图（zip：`frames/*.jpg` + `manifest.json`）上传给服务端做 AI 行为分析 |
 | GET | `/api/agent/screen-quiz/next` | `AgentApi.fetchScreenQuizQuestion()` — 取一道**基于当前屏幕内容**生成的题 |
 | POST | `/api/agent/screen-quiz/answer` | `AgentApi.submitScreenQuizAnswer()` — 交卷，答对即解锁并重置锁定倒计时 |
+| POST | `/api/agent/health` | `AgentService.reportHealthIfChanged()` — 每 3 分钟（或 `self_check` 指令、或有缺口变化时）把 `LongevityGuard` 的缺口清单与开关/权限快照整体上报，见 §5.8 |
 | POST | `/api/agent/apps` | `AgentService.reportAppsNow()` — 上报已安装应用清单（12 小时一次或 `sync_apps` 触发） |
 | POST | `/api/agent/events` | `AgentService.tickEventFlush()` — 批量上报本地事件（进出安全区、被拦应用/网址等），60 秒一批 |
 | POST | `/api/agent/audit-requests` | `AgentService.reportInstallAttempt()` — 检测到安装行为时向家长申请批准（同一包 10 分钟只报一次） |
@@ -61,6 +62,7 @@
 | `start_recording` / `stop_recording` | **MediaProjection + MediaRecorder** 录 H.264/MP4 → 上传 | `{recordingId}` / `{mediaId, recordingId, durationSeconds}` |
 | `start_audio` / `stop_audio` | **MediaRecorder**(MIC) 录 AAC/M4A → 上传 | `{recordingId}` / `{mediaId, recordingId, durationSeconds}` |
 | `fetch_location` | **LocationManager** 取点（含逆地理编码）→ 上报 | `{reported, latitude, longitude, accuracy, address}` |
+| `self_check` | 跑一遍 `LongevityGuard.selfHeal`（幂等）+ 立刻回报整份健康快照 | `{healed, gapCount, level, healCount, checkedAt}` |
 | `sync_config` | 立即重新拉取并应用管控策略 | `{synced, bound, locked, features}` |
 | `sync_apps` | 重新扫描并上报已安装应用清单 | `{synced, count}` |
 | `start_ambient` | 分片循环录音（默认 5 分钟/段），每段录完立即上传；有 1 小时安全阀 | `{chunkSeconds, maxTotalMinutes, message}` |
@@ -1342,7 +1344,319 @@ seed   = Settings.Secure.ANDROID_ID + "|" + 本地盐
 > 未绑定引导是**第二张卡**而不是第一张：`android/scripts/e2e-agent.mjs` 断言首页可见文本
 > 「运行状态」，把状态头挤出首屏会让 uiautomator 取不到屏幕外节点、弄坏既有回归契约。
 
+### 5.8 把「设备自己知道的事」交给家长（`/api/agent/health`）
+
+所有管控能力都压在设备所有者和无障碍看门狗上。孩子把无障碍关掉，**设备照样在线、
+家长端照样绿灯**，而 `LongevityGuard.problems()` 每 5 分钟就已经把这件事看明白了 ——
+它原先只喂给自己自愈用，家长一个字都看不到。这一轮把这个信息补上报。
+
+三个决定：
+
+- **整份覆盖，不做增量。** 某条缺口修好了就不再出现在 `gaps` 里；服务端的 `openGaps`
+  跟着降下来，而不是越积越多。增量上报的典型故障是「修好了但旧缺口还在」，
+  家长会开始无视这一页。
+- **缺口文案原文透传。** `label` / `detail` 就是 `LongevityGuard` 那两句中文，服务端与
+  家长端都不重写。两端各写一套，迟早出现「设备说无障碍被关、家长端说悬浮窗被关」的矛盾。
+- **开关只报「开/关」，不报「应该是开的」。** 设备端只回自己实测到的状态；
+  没上报过的项在家长端显示**未知**，绝不猜一个绿灯。老版本 Agent 完全不报时，
+  家长端显示「尚未检测」——**「不知道」和「一切正常」必须是两个不同的显示。**
+
+**`TrustedClock`：把服务端时间用起来。** 设备端所有时间判定现在都走
+`TrustedClock.now()` 而不是 `System.currentTimeMillis()`，理由、取舍与验证写在
+下面的 [§5.9](#59-设备时间不可信trustedclock规划-16)。
+
+> ⚠️ **`self_check` 要在三个地方同时存在**：后端 `COMMAND_TYPES`、本工程
+> `CommandExecutor` 的 switch、设备端常量表。漏掉本工程这一半，症状是
+> 「家长端显示已下发、设备毫无反应」—— 本项目已经栽过一次同类假成功（见 `docs/FEATURE-STATUS.md` §4.5 缺陷 3）。
+
+### 5.9 设备时间不可信：`TrustedClock`（规划 §1.6）
+
+<h4>问题</h4>
+
+设备端原来所有时间判定都直接读 `System.currentTimeMillis()`：定时锁屏、屏幕时间额度、
+护眼计时、答题奖励有效期。设备所有者时 `DISALLOW_CONFIG_DATE_TIME` 挡住了系统设置改时间，
+**非设备所有者时没有任何兜底** —— 孩子把时间调回昨天，定时锁屏立刻失效，
+而家长端看不出来（设备依旧在线、依旧报「已锁定」）。
+
+<h4>做法</h4>
+
+以 `SystemClock.elapsedRealtime()`（从开机起单调递增，**改墙钟不会动它**）为基准，
+每次心跳用服务端回的权威 `serverTime` 锚定出偏移：
+
+```
+offset = serverTime − elapsedRealtime     // 心跳那一刻锚定
+now    = elapsedRealtime + offset         // 判定统一走这个
+skew   = wallClock − serverTime           // 设备墙钟比服务端快/慢多少
+```
+
+- 两次心跳之间 `skew` 只可能因为「有人改了设备时间」而跳变（服务端时间与开机时长都在正常前进），
+  所以 `|Δskew| > 60 秒` 就是一次可疑动作：`sync()` 返回 true，`AgentService.doHeartbeat()`
+  记一条 `tamper` 事件（家长端动态里能看到）并立刻补一次健康上报。
+- **偏移不落盘**：进程重启后锚点作废，退回墙钟，等下一次心跳（≤15 秒）重新锚定。
+  持久化一份可能过期的偏移，比不持久化更危险。
+- 未锚定时 `skewSeconds()` 报 **0** 而不是编一个数字 —— 与「未知 ≠ 一切正常」同一条原则。
+
+<h4>哪些地方必须换，哪些地方故意不换</h4>
+
+| 用途 | 用哪个时钟 | 为什么 |
+| --- | --- | --- |
+| 锁定判定、放行截止、学习模式、敏感界面放行窗口、用量统计的「今天」、时间表边界 | **`TrustedClock.now()`** | 这些是**判定**：时间被改就等于规则失效 |
+| 媒体文件名（`photo-<millis>.jpg`）、日志行时间、中继/提醒节流窗口、「最后活着」的证据 | 墙钟 `System.currentTimeMillis()` | 这些是**测量与排查**：换成可信时钟只会让日志与实际时刻对不上 |
+| 等待循环的超时（`ScreenCapturer.awaitImage`）、闹钟的「还有多久」 | `SystemClock.elapsedRealtime()` | 与墙钟无关的**时长**，被改时间拽不动 |
+
+时间表边界闹钟原来用 `AlarmManager.RTC_WAKEUP` 排一个**绝对时刻** —— 孩子把时间调晚，
+「22:00 锁屏」就永远不会触发。现在改成：用可信时钟算出「距边界还有多久」，
+再用 `ELAPSED_REALTIME_WAKEUP` 排，单调时钟改不动。
+
+<h4>怎么测的（JVM 级，20 项）</h4>
+
+`TrustedClock` **刻意不依赖 `EventLog`**：它只做时间数学、不产生副作用（记事件与上报都在
+`AgentService` 里），所以能在普通 JVM 上跑。为了让「改墙钟」这个动作可复现，
+它留了一个仅供测试的注入点 `setSourceForTest(TimeSource)`：把「开机时长」与「系统墙钟」
+拆成两个可控的值 —— 这正是真实攻击的形状（孩子改的是墙钟，`elapsedRealtime` 一步不动）。
+
+`android/scripts/crosstest/PureLogicCheck.java` 里的 20 项覆盖：未锚定退回墙钟、
+锚定后跟着开机时长前进、**把墙钟调回一天前后 `now()` 一步都不动**、调快一小时同样检出、
+60 秒以内的抖动不报警（别把 NTP 微调当恶意）、设备重启后锚点作废、
+`serverTime` 为 null / 空串 / 非 ISO 时不崩且不破坏已有锚点、不带毫秒的 ISO 也认。
+`android/scripts/crosstest/stubs/android/os/SystemClock.java` 是个只有符号的桩 ——
+它的返回值永远读不到（用例总会先换掉时间源），存在的唯一理由是让 `TrustedClock.java` 能编译。
+
+> ⚠️ **设备级验证还没做**：`adb devices` 为空列表，「`adb shell date` 把时间调回去，
+> 断言定时锁屏仍然生效」这条**一次都没跑过**。`docs/FEATURE-STATUS.md` §3B 里如实标了 🟡。
+
+### 5.10 锁屏页要说得清「为什么锁 / 还剩多久 / 怎么申请」（规划 §3.3）
+
+<h4>问题</h4>
+
+原来的锁屏页只有一句「家长已锁定这台设备」+ 一个答题按钮。孩子不知道**为什么**被锁、
+**还要多久**、除了答题**还能做什么** —— 这正是亲子冲突的起点：不是规则本身，而是规则不可解释、
+没有任何出口。对照物是已有的 `AppBlockedActivity`（应用被拦截时有说明页），锁屏页当时还不如它。
+
+<h4>做法：只说算得准的</h4>
+
+| 要回答的问题 | 怎么算 | 说不了的时候 |
+| --- | --- | --- |
+| 为什么锁 | `LockState.detail`，取自**同一次判定**的结果 | 无 detail 时退回「家长已锁定这台设备」 |
+| 还剩多久 | `LockState.probeAutoUnlockAt(inputs)`：已锁时按分钟向前扫最多 24 小时，返回最早会自动解锁的时刻 | 远程锁定 → 「解锁时间由家长决定」；额度/预算耗尽 → 「明天重新开始计时」。**不编具体时间** |
+| 怎么申请 | 选时长（15/30/60/120 分钟）+ 一句话理由 → `POST /api/agent/time-requests` | 提交失败就说失败，不假装已送达 |
+
+- 原因文案**取自同一次判定**，不用拉起 Activity 时传进来的入参 —— 拉起来之后家长改了设置，
+  页面上那句话也不会过期。
+- `probeAutoUnlockAt()` **刻意不挂进每秒的 `compute()`**：那会变成每秒 1440 次判定。
+  只在锁屏页刷新时按需算一次，并按锁定状态缓存。
+- 按钮顺序是「**申请使用时间**」在前、「答题解锁」在后 —— 向家长开口比答题更像正常沟通，
+  别把唯一的出口设计成考试。
+- 申请必须在**后台线程**提交：OkHttp 的 `execute()` 是同步的，在主线程上会卡住锁屏页，
+  表现就是「孩子按什么都没反应」（比报错更糟）。
+- 申请 id / 类型 / 分钟数**落盘**（`AgentStore` 的 `KEY_PENDING_TIME_REQUEST_*`）：
+  锁屏页会被系统随时重建，不落盘就会重复提交、而且看不到家长的回复；
+  换绑设备时随其它策略缓存一起清掉（旧申请在新账号下查不到，留着只会让孩子一直等）。
+
+<h4>孩子端怎么拿到结果</h4>
+
+申请提交后按 5 秒一次轮询 `GET /api/agent/time-requests/:id`，三种结果对应三句话：
+「已发给家长，等待回应…（申请 N 分钟）」（按钮禁用，避免连点）、
+「家长已同意，给你 N 分钟，马上解锁」、以及拒绝时的家长原话（可「再申请一次」）。
+家长批准**不等于**设备已解锁：真正的解锁是家长批准时下发的那条 `temp_unlock` 指令落到
+`CommandExecutor` 之后才发生的。
+
+> ⚠️ **孩子端目前只用 `extend_time`（申请加时）**：`delay_lock`（申请延后锁屏）服务端与家长端
+> 都已支持、e2e 也覆盖了，但锁屏页的入口留给规划 §3.2 的锁屏预告一起做。
+> **设备级验证未做**：`adb devices` 为空，「真机上锁屏页三句话真的显示对」没有跑过。
+
+<h4>怎么测的（JVM 级，8 项）</h4>
+
+`PureLogicCheck.java` 的 `checkUnlockProbe()`：作息规则 21:00–次日 07:00、在 21:30 锁定 →
+探出次日 07:00（＝570 分钟后）；远程锁定返回 0（不编时间）；`dailyLimitExhausted` 返回 0；
+护眼 `eyeLockUntil` 正好等于探测值；本来没锁时返回 `now`。
+（陷阱：`LockState` 依赖 `ScheduleRule`，忘了 import 会在 `javac` 阶段报「找不到符号」。）
+
+### 5.11 孩子端主页：今天还剩多少 / 怎么赚时长 / 怎么找家长（规划 §3.2）
+
+`ui/ChildHomeActivity.java`。**只读页**：改设置一律在家长端，孩子的设备上不做家长开关 —— 连隐藏的入口也不留。
+
+| 孩子在问 | 页面上怎么答 | 说不了的怎么办 |
+| --- | --- | --- |
+| 今天还剩多少 | `capability/ChildStatus`：额度与用量都在本机（`AgentStore.getDailyLimitMinutes()` / `getUsageSecondsToday()`），离线也算得准 | 三种情况**分开说**：没设额度说「家长没有设置每日使用时长」、用完说「今天的时长已经用完，明天重新开始」；**绝不合并成「剩余 0 分钟」** |
+| 接下来会怎样 | 复用 §3.3 的 `LockState.probeAutoUnlockAt()`；没锁但即将休息时说「X后进入休息（作息：晚上睡觉）」 | 探不出自动解锁时刻（远程锁定、额度耗尽）就只说「解锁时间由家长决定」，**不编时间** |
+| 怎么赚时长 | 「答题解锁」按钮（`QuizActivity` 已有） | 家长没开答题时整颗按钮**不出现** —— 留一个点不动的按钮比没有更让人困惑 |
+| 怎么找家长 | 「求助家长」（可写一句话）→ `POST /api/agent/sos`；以及「给家长打电话」 | 没拿到手机号 / 设备不能打电话时**如实说**「请用求助通知家长」，绝不弹假的「已通知家长」 |
+
+**入口**：常驻通知上新增的「查看剩余时间」按钮（`AgentNotifications.buildAgentNotification` 的
+`addAction`）。桌面图标可能被家长隐藏（§3.8）、桌面也可能在 §4.4 被学习模式接管，
+而通知栏始终在 —— 这是孩子端唯一靠得住的本机入口。
+
+**三条实现上的硬要求**：
+
+1. **剩余时间的口径与锁定判定是同一组输入**。两边都直接读那两个 `AgentStore` 方法，不各自再折算一遍。
+   「主页说还剩 5 分钟、判定却认为已用完」比什么都不显示更伤信任 —— 与 §4.5 缺陷 3 是同一类问题。
+2. **需要网络的动作必须离开主线程**（OkHttp 的 `execute` 是同步的）。一个着急求助的孩子按下去没反应，
+   比没有这个按钮更糟。`ChildHomeActivity` 用单线程 `ExecutorService` + `Handler` 回主线程，
+   与 `QuizActivity` 同一套写法。
+3. **求助的「发不出去」与「发出去了」必须能区分**。`POST /agent/sos` 在设备未被认领时返回
+   `{ success:false, reason:'unbound' }`（服务端一个字都不写），页面据此显示「求助发不出去」；
+   网络异常时显示服务端那句中文。**任何时候都不显示「已通知家长」除非真的 2xx 且 `success:true`。**
+
+**怎么测的（JVM 级，15 项）**：`PureLogicCheck.java` 的 `checkChildStatus()` —— 额度 0 / 负数算「没设」
+（手滑设负数不该把孩子锁死）、已用正好等于额度算用完（与 `LockEnforcer` 同口径）、
+剩余 30 秒说「不到 1 分钟」而不是「还剩 0分钟」、已用秒数为负按 0 处理（时钟回拨不产生欠费）、
+进度条按**剩余**百分比并四舍五入（179/180 → 99）。
+`./gradlew :app:compileDebugJavaWithJavac` 通过。
+
+> ⚠️ **设备级验证未做**（`adb devices` 为空）：真机上主页显示对不对、求助真的弹到家长手机、
+> 拨号盘真的打开 —— 都没跑过。家长布置的「今日任务」后来在 §5.2 补上了（见 §5.15），
+> 但**同样只验到 JVM / 编译级**。
+
+### 5.12 知情与同意：孩子能查到「这台设备在做什么」（规划 §3.4）
+
+管控类应用对孩子最容易犯的两个错：一是什么都不说（孩子只感到被锁），二是说了假话
+（页面上写「不采集位置」，代码里明明在采集）。第二个更严重 —— 它把「家长在守护你」
+变成了「家长在骗你」。所以这一节的重点不是文案写得多温柔，而是**页面上的每一句都能被核对**。
+
+**页面是什么**（`ui/GuardianInfoActivity.java`，入口：孩子端主页底部的「本设备如何被守护」）：
+
+| 区块 | 内容 | 数据来源 |
+| --- | --- | --- |
+| 现在正在发生什么 | 周期截屏是否开启（带间隔）、环境监听是否在录音、位置/通话/短信是否已授权、守护服务是否在跑 | 本机真实开关与真实权限（`AgentStore` + `checkSelfPermission` + `AmbientRecorder.isRunning()` + `AgentService.isRunning()`） |
+| 七节说明 | 为什么被守护 / 会上报什么 / 不会做什么 / 家长能做什么不能做什么 / 你能做什么 / 谁能看到 / 想解除守护怎么办 | `capability/GuardianNotice.java`（纯 Java） |
+
+**三条刻意的做法**：
+
+1. **文案只有一个来源**：正文全部写在 `GuardianNotice` 里，Activity 只渲染。
+   于是「JVM 断言的文本」与「孩子看到的文本」必然是同一份 —— 否则测试全绿而页面在说别的话。
+2. **「不许说谎」是机械执行的，不靠自觉**：`GuardianNotice.topics()` 把
+   「哪类数据 + 对应哪个系统权限 + 采不采集」写成数据，`scripts/crosstest/run.sh` 的
+   **第 7 步**拿它与 `AndroidManifest.xml` 逐条对照：
+
+   - 清单里有这个权限 → 说明页必须承认会上报；
+   - 清单里没有 → 说明页不许声称会上报；
+   - 反向：清单里任何一项敏感权限都不许在说明页里只字不提（新增采集能力而忘了更新说明 = 直接红）。
+
+   **已反证过它真的会红**：把「相机」故意改成 `collected = false`，第 6 步仍然 128/0 全绿，
+   第 7 步立刻报 `✗ 相机：清单声明了 android.permission.CAMERA，说明页却写着「不采集」`
+   并以exit 1 结束。这条机制存在的意义就是「以后加功能时不会悄悄变成假话」。
+3. **有边界就说边界**：承认「通话记录与**短信正文**会上报」「周期截屏可能拍到聊天界面」，
+   同一页也写明「不读聊天记录、不读通讯录、不读相册已有照片、没有通话录音、不记录键盘输入与剪贴板」，
+   以及「运维后台只看设置与数量，看不到照片 / 位置轨迹 / 录音 / 短信内容」。
+
+**两个容易写错的细节**：
+
+- **通话记录与短信是两个独立权限**，半授权（只给了一个）是常态。合成一句「已授权 / 未授权」
+  会在半授权时说假话，所以 `describePhoneData(calls, sms)` 分开算、分开说。
+- **「不会做什么」里允许出现已采集项的名字**：例如「不录通话内容：通话记录只有号码、时间和时长，
+  没有通话录音」是在交代边界，不是否认采集。所以断言拦的是**否认句式**（`不采集/不读/不记录/不录/不上报/不看/不查` + 名字），
+  而不是名字本身 —— 这条一开始写错过（把「通话记录」判成了假话）。
+
+**怎么测的（JVM 级 17 项 + 第 7 步对照）**：`PureLogicCheck.checkGuardianNotice()` 断言
+13 类数据（收 8 / 不收 5）逐条都有明确结论、已采集项没被否认、半授权分开说、
+顶部状态行按开关生成、位置未授权时明说「本页不会假装有数据」、紧急呼叫永远放行、
+不读聊天记录但承认截屏可能拍到聊天界面、解除守护的办法写清楚了（不是「请联系管理员」）、
+每一节都有标题与至少两行实质内容。`./gradlew :app:compileDebugJavaWithJavac` 通过。
+
+> ⚠️ **设备级验证未做**（`adb devices` 为空）：真机上打开这一页、顶部状态与真实开关是否一致
+> （例如家长开了周期截屏后，这一页是否真的显示「已开启（约每 30 秒一张）」）没跑过。
+> **家长侧的同意留痕也没做** —— 规划原文里那半条属 §5.3（R4 的合规留痕）；
+> 这一页也只做告知，不假装孩子能协商（管控是家长单方生效的）。
+
 ---
+
+### 5.13 网址拦截补强：把「被拦域名的地址」变成隧道路由（规划 §4.1）
+
+之前只拦 DNS，孩子有三条明显的绕法：解析过的 IP 还在应用缓存里、直接从 IP 连、
+或者换一条加密 DNS 通道（DoT/DoH）。**R3 的 §4.1 把地址层补上了。**
+
+| 孩子怎么绕 | 现在会怎样 | 说不了时怎么办 |
+| --- | --- | --- |
+| 用「已缓存 / 直接写死」的 IP 连被拦域名 | 家长名单里每个域名每 5 分钟用受保护 UDP 直查上游，拿到的 A 记录加进 `BlockedAddresses` 并 `addRoute` 进隧道 → 包进 tun 被丢，**TCP 回 RST**（立刻失败，不转圈） | 域名解析不出地址（被上游拒答）时这一层对它是空的，界面上照旧只承诺 DNS 层 |
+| 直接填 IP / IP 段（`1.2.3.4`、`1.2.3.0/24`） | 服务端归一化后落盘，设备端直接变成路由 | 不是合法域名 / IP / 网段的一律 400，不静默吞 |
+| 走 853 的加密 DNS（DoT / DoQ） | 被拦域名的地址在 853 上同样进 tun；对**已知的加密解析器**（1.1.1.1 / 8.8.8.8 / 223.5.5.5 …）走 853 / 784 / 8853 的包单独计数，家长端单独说明 | 换一个不在清单里的解析器仍然能问到 IP —— 只有把那个解析器也加进名单才拦得住 |
+| 已经建立的连接 | **不会被打断**（这是设计，不是缺陷）。要等它断开重连才拦得到 | 界面上一直写着这一条，不假装「开启了就立刻生效」 |
+
+**为什么不全量接管流量**：`addRoute("0.0.0.0", 0)` 要求对所有 TCP/UDP 做用户态转发，
+本实现没有那个栈 —— 结果会是「网站照样能开、整个网络又慢又断」。所以只把**已知该拦的 /32**
+引进隧道，其余流量碰都不碰。新增路由必须重建 tun（`rebuildTunnel()`，用 `generation` 计数
+让读包循环不串）。
+
+**三层代码**：`capability/IpPackets.java`（IPv4/TCP 头解析、构造合法 RST、IP/TCP 校验和）、
+`capability/BlockedAddresses.java`（字面量与 CIDR 匹配、路由键、解析器清单）、
+`service/DnsFilterVpnService.java`（地址学习、路由下发、丢包计数与 `web_blocked` 动态）。
+`DomainBlocker` 新增 `splitEntries()`：**只给隧道路由用**（保留 IP/网段），而 `parseList()`
+照旧丢掉 IP —— 它是域名后缀匹配表，混进 IP 只会误伤。
+
+**怎么测的（JVM 级，41 项）**：地址规则 17 项、从 DNS 应答学地址 10 项、TCP RST 14 项全部在
+`PureLogicCheck` 里逐字段钉死；服务端归一化在 `server:smoke` 里 5 项（域名归一化 / IP / 网段 / 非法输入 400）。
+
+**⚠️ 设备级验证未做**：真机上「拦下一条直连」「拦下 853 的连接」都没跑过。
+想验的话至少要在真机（设备所有者 + 永久 VPN）上：加一个名单域名 → 用它的 IP 直接
+`curl`（应立刻 connection reset）→ 再看家长端动态里是否出现「已阻断直连：<ip>」。
+
+---
+
+### 5.14 学习模式专用桌面：把默认桌面换掉（规划 §4.4）
+
+以前学习模式只是「白名单之外的应用一打开就被盖回说明页」—— 桌面还是原来那个桌面，
+孩子照样能看见全部图标、翻应用抽屉、去设置里翻漏洞。§4.4 的做法是**把默认桌面换掉**。
+
+| 孩子在问 | 怎么答 | 说不了时怎么办 |
+| --- | --- | --- |
+| 我的桌面怎么变成这样了 | 顶部一句话：现在是学习模式，桌面上只保留家长允许的应用，另加打电话这类必需功能（共 N 个） | 一个应用都没有时明说「家长还没有允许任何应用，可以找家长添加」，不说「暂无可用的应用」 |
+| 我能点开哪个 | 只列 `ModeConfig.studyApps` ∩ 已安装可启动 + `GuardRules.alwaysAllowedPackages()` 里的安全底线（拨号等） | 应用刚被卸载/停用时，点一下会说「打不开」并给出原因，不是默默无反应 |
+| 怎么出去 | 出不去 —— 这正是功能本身；出口只有家长结束学习模式 | 页面底部写明「想退出学习模式，请让家长在家长端切换」 |
+
+**怎么做的**：`StudyHomeActivity` 在 manifest 里声明 HOME 意图；学习模式开着且本应用是设备所有者时，
+`LockWatchdogService.syncStudyHome()` 调 `DevicePolicyManager.addPersistentPreferredActivity`
+把 HOME 钉到它（见 `capability/StudyHomeController.java`），结束学习模式或家长端解绑时
+`clearPackagePersistentPreferredActivities` 还回去。只在**状态翻转**时动 DPM，不是每个无障碍事件都改默认桌面。
+
+**两个容易写错的细节**：
+
+1. `addPersistentPreferredActivity` 要的是 **`IntentFilter`**（MAIN + HOME + DEFAULT 三条都要有），
+   不是 `Intent` —— 传 `Intent` 直接编译不过；
+2. 接管后**返回键必须被吃掉**：不然孩子按一下返回就回到了那个能翻抽屉的桌面，等于没接管。
+
+**怎么测的（JVM 级，14 项）**：`PureLogicCheck.checkStudyLauncher()` 逐条钉死接管条件、
+白名单过滤、安全底线应用可见、排序、空配置 / 未安装 / 重复包名 / 空包名 / null 清单、两句文案；
+编译级证据是 `./gradlew :app:compileDebugJavaWithJavac` 通过。
+
+**⚠️ 设备级验证未做**（`adb devices` 为空）：「HOME 真的被钉住」「孩子按 home 出不去」
+「拨号还能打通」都只能上机验。另外接管发生在**下一次前台变化**（服务是事件驱动的，没有轮询），
+不是整点那一秒。
+
+### 5.15 孩子端的「今日任务」：孩子唯一能改的一个布尔值（规划 §5.2）
+
+家长在家长端给孩子布置「今天的任务」，孩子在自己手机上看得见、勾得掉。这一节讲的是
+**孩子端那一半**：为什么它这么小，以及哪些地方最容易做错。
+
+| 孩子在问 | 怎么答 | 说不了时怎么办 |
+| --- | --- | --- |
+| 今天要做什么 | 家长布置的清单，标题写「「小明」今天的任务」（档案没名字时退回「今天的任务」） | 一条都没有时**整块不显示** —— 「家长还没有布置任务」这种话留给家长端说，孩子端只显示真的要做事 |
+| 做完了几条 | 「已完成 1/3」；全做完换成「今天的任务都做完了，真棒」 | 进度只数服务端下发的清单，不在本机推算 |
+| 我勾了，家长知道吗 | 勾上先本地显示，同时写「正在告诉家长…」，服务端回执到了才落定 | 发不出去就把勾**退回去**，并说「没能告诉家长，稍后再试一次」——勾了没生效、还看不出来，是最糟的失败方式 |
+| 我能自己加任务吗 | 不能。加/删/改标题都只在家长端 | 这不是待办 App，是家长的工具 |
+
+**怎么做的**：`GET /api/agent/child-home` 除家长称呼外多返回 `childName` 与 `tasks`（今天的清单）；
+勾选走 `POST /api/agent/tasks/:taskId`（body 只有一个 `done`）。文案与取舍全在纯 Java 的
+`capability/ChildTasks.java` 里（`headerText` / `progressText` / `pendingText` / `failureText`），
+`AgentApi` 只负责 JSON（缺 id 或缺标题的行直接丢掉 —— 一条点不动的任务比少一条更让人困惑），
+界面在 `ChildHomeActivity.renderTasks()/onTaskToggled()`。
+
+**三个容易写错的细节**：
+
+1. **不能每秒重建任务行**：这一页每秒重画一次剩余时间（`ticker`），若连同勾选框一起重建，
+   孩子的手正按在屏幕上时控件会被换掉，那一下就不算数。所以只在数据真的变了时才重建
+   （`tasksDirty` 标志）；
+2. **先设 `setChecked` 再挂监听**：顺序反了，程序化的勾选会立刻回调一次，看起来像孩子点了一下 ——
+   那就等于每次刷新都替孩子勾一遍；
+3. **同一条任务在回执前不能再点**：用 `taskBusy` 记在途 id，回执到了才解锁，避免连点出两个不同的状态。
+
+**怎么测的（JVM 级，15 项）**：`PureLogicCheck.checkChildTasks()` 逐条钉死「没任务不显示」、
+标题带不带名字、已完成数（混进 `null` 也不跑偏）、进度三种说法（4/3 不写成 4/3）、
+勾上/取消与失败各有两句不同的话。编译级证据是 `./gradlew :app:compileDebugJavaWithJavac` 通过。
+
+**⚠️ 设备级验证未做**（`adb devices` 为空）：真机上「勾一下 → 家长手机真的弹出通知」
+这条最有说服力的链路一次都没跑过。服务端那一半（通知内容、`dedupeKey` 只发一次、
+没挂档案的设备来勾 → 404）由 `npm run server:e2e:children` 的 74 项钉死。
 
 ## 6. 目录结构
 
@@ -1389,6 +1703,8 @@ android/
    │  │  ├─ ProjectionConsentActivity.java
    │  │  ├─ AudioRecorder.java          # MediaRecorder 录音
    │  │  ├─ LocationReader.java         # 定位 + 逆地理编码
+   │  │  ├─ HealthReporter.java         # 健康快照：缺口清单 / 开关 / 权限 / 加固审计（§5.8）
+   │  │  ├─ TrustedClock.java           # 服务端时间偏移（孩子改系统时间时看得见，§5.8）
    │  │  └─ AgentAdminReceiver.java     # 设备管理器接收器
    │  ├─ service/
    │  │  ├─ AgentService.java           # 前台服务 + 网络主循环 + 1 秒锁屏 ticker

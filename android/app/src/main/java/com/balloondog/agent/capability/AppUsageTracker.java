@@ -95,7 +95,8 @@ public final class AppUsageTracker {
             return out;
         }
 
-        long now = System.currentTimeMillis();
+        // 记账窗口同样走可信时钟：否则改设备时间就能让「今天」落在系统用量库的空区间里
+        long now = TrustedClock.now();
         long startOfDay = startOfToday();
         java.util.List<UsageStats> stats;
         try {
@@ -122,6 +123,7 @@ public final class AppUsageTracker {
     /** 今日 0 点（本地时区）。UsageStats 的日桶边界与本地零点一致，这里保持同一口径。 */
     public static long startOfToday() {
         Calendar calendar = Calendar.getInstance();
+        calendar.setTimeInMillis(TrustedClock.now());
         calendar.set(Calendar.HOUR_OF_DAY, 0);
         calendar.set(Calendar.MINUTE, 0);
         calendar.set(Calendar.SECOND, 0);

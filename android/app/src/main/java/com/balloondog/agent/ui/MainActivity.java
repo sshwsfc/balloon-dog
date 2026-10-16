@@ -59,6 +59,7 @@ import com.balloondog.agent.service.AgentService;
 import com.balloondog.agent.service.DnsFilterVpnService;
 import com.balloondog.agent.service.LockWatchdogService;
 import com.balloondog.agent.service.LongevityGuard;
+import com.balloondog.agent.capability.TrustedClock;
 import com.google.android.material.button.MaterialButton;
 
 import java.util.ArrayList;
@@ -348,7 +349,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
                 running ? R.color.wechat_green : R.color.text_tertiary));
         binding.buttonToggleService.setText(running ? R.string.action_stop : R.string.action_start);
 
-        LockState lockState = LockState.compute(LockEnforcer.buildInputs(store, System.currentTimeMillis()));
+        LockState lockState = LockState.compute(LockEnforcer.buildInputs(store, TrustedClock.now()));
         binding.textDetail.setText(buildStatusDetail(bound, lockState));
 
         renderBindingCard(bound);
@@ -846,7 +847,7 @@ public class MainActivity extends AppCompatActivity implements EventLog.Listener
         if (lockState.nextLockAt > 0) {
             strength.append('\n').append("下次锁定：")
                     .append(com.balloondog.agent.capability.ScheduleEngine
-                            .describeBoundary(lockState.nextLockAt, System.currentTimeMillis()));
+                            .describeBoundary(lockState.nextLockAt, TrustedClock.now()));
         }
         strength.append('\n').append("Kiosk：").append(KioskController.describeState(this));
         binding.textStrengthDetail.setText(strength.toString());

@@ -17,6 +17,8 @@ public final class Constants {
 
     public static final String PATH_REGISTER = "/agent/register";
     public static final String PATH_HEARTBEAT = "/agent/heartbeat";
+    /** 设备健康快照（覆盖式）：把「哪些开关被关了」一次性报上去。 */
+    public static final String PATH_HEALTH = "/agent/health";
     public static final String PATH_CONFIG = "/agent/config";
     public static final String PATH_COMMANDS_NEXT = "/agent/commands/next";
     public static final String PATH_LOCATIONS = "/agent/locations";
@@ -40,6 +42,25 @@ public final class Constants {
     /** 应用审核：查一条申请的状态（pending|approved|rejected） */
     public static String pathAuditRequest(String id) {
         return "/agent/audit-requests/" + id;
+    }
+
+    /** 孩子的申请：加时 / 延后锁屏（规划 §3.1）。幂等键 = (设备, 类型, pending) */
+    public static final String PATH_AGENT_TIME_REQUESTS = "/agent/time-requests";
+
+    /** 孩子端主页：这台设备是谁在守护（规划 §3.2） */
+    public static final String PATH_AGENT_CHILD_HOME = "/agent/child-home";
+
+    /** 孩子端的求助（规划 §3.2）：写动态 + 发 danger 级通知给家长 */
+    public static final String PATH_AGENT_SOS = "/agent/sos";
+
+    /** 孩子端勾 / 取消「今日任务」（规划 §5.2）：/agent/tasks/{id} */
+    public static String pathChildTask(String taskId) {
+        return "/agent/tasks/" + taskId;
+    }
+
+    /** 孩子的申请：查一条的状态与家长实际批的分钟数 */
+    public static String pathTimeRequest(String id) {
+        return "/agent/time-requests/" + id;
     }
 
     /** 今日逐应用用量上报（全量替换当日） */
@@ -91,6 +112,14 @@ public final class Constants {
     public static final String CMD_REMOTE_ACTION = "remote_action";
     /** 让设备立刻上报通话记录与短信（家长点「刷新」）。 */
     public static final String CMD_SYNC_CALLS_SMS = "sync_calls_sms";
+    /**
+     * 家长点「重新检测」：立刻跑一次自愈巡检并把新的健康快照报上去。
+     *
+     * <p>⚠️ 新增指令类型必须**同时**在这里、服务端 {@code COMMAND_TYPES} 与
+     * {@link com.balloondog.agent.capability.CommandExecutor} 的 switch 三处都加，
+     * 漏掉设备端这一处就是「家长端显示已下发、设备毫无反应」的静默失败。
+     */
+    public static final String CMD_SELF_CHECK = "self_check";
 
     // ---------------- 节奏参数 ----------------
 
@@ -102,6 +131,16 @@ public final class Constants {
 
     /** 位置自动上报间隔。 */
     public static final long LOCATION_REPORT_INTERVAL_MS = 5 * 60_000L;
+
+    /**
+     * 健康快照的兜底上报间隔。
+     *
+     * <p>健康状态变化（孩子关掉无障碍、撤销授权）也会让家长端看到旧绿灯，
+     * 但没必要每秒巡检：{@link com.balloondog.agent.service.LongevityGuard} 每 5 分钟
+     * 本来就会自愈一次，这里 3 分钟对齐一次，保证「自愈完之后家长端很快能看到结果」。
+     * 家长主动点「重新检测」时走 {@code self_check} 指令，立即上报，不受这个间隔限制。
+     */
+    public static final long HEALTH_REPORT_INTERVAL_MS = 3 * 60_000L;
 
     /** 本地逐应用用量统计的刷新间隔（查 UsageStatsManager 有成本，且它本身按天聚合）。 */
     public static final long APP_USAGE_REFRESH_INTERVAL_MS = 60_000L;
@@ -262,6 +301,10 @@ public final class Constants {
     public static final String KEY_SCHEDULE_JSON = "schedule_json";
     /** 家长下发「解锁」后的放行截止时间（到下一个时间表边界为止） */
     public static final String KEY_MANUAL_UNLOCK_UNTIL = "manual_unlock_until";
+    /** 孩子最近一次加时申请（锁屏页重建后仍要记得自己申请过，见 §3.1） */
+    public static final String KEY_PENDING_TIME_REQUEST_ID = "pending_time_request_id";
+    public static final String KEY_PENDING_TIME_REQUEST_KIND = "pending_time_request_kind";
+    public static final String KEY_PENDING_TIME_REQUEST_MINUTES = "pending_time_request_minutes";
     /** 最高强度档：本机应急解锁密码的哈希（只存本机，绝不上传） */
     public static final String KEY_EMERGENCY_PASSWORD_HASH = "emergency_password_hash";
     /** 最高强度档：用于 resetPasswordWithToken 的令牌 */

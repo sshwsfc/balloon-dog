@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { ah } from '../../shared/asyncHandler';
 import { authenticate, authenticateDevice } from '../../middleware/auth';
-import { currentUserId, resolveDevice } from '../../shared/deviceScope';
+import { currentUserId, resolveDevice, resolveWritableDevice } from '../../shared/deviceScope';
 import { config } from '../../config';
 import { BadRequestError, NotFoundError } from '../../errors';
 import { devicesRepo } from '../devices/devices.repository';
@@ -110,7 +110,7 @@ export async function getInsight(req: Request, res: Response) {
 
 export async function reanalyzeInsight(req: Request, res: Response) {
   const { insightId } = insightIdSchema.parse(req.params);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json(await insightsService.reanalyze(device, insightId));
 }
 
@@ -122,12 +122,12 @@ export async function listAlerts(req: Request, res: Response) {
 
 export async function markAlertRead(req: Request, res: Response) {
   const { alertId } = alertIdSchema.parse(req.params);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json(await insightsService.markAlertRead(device, alertId));
 }
 
 export async function markAllAlertsRead(req: Request, res: Response) {
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json(await insightsService.markAllAlertsRead(device));
 }
 
@@ -138,7 +138,7 @@ export async function getScreenConfig(req: Request, res: Response) {
 
 export async function updateScreenConfig(req: Request, res: Response) {
   const patch = updateScreenConfigSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   // 记录是谁改的，便于审计（截屏开关是敏感设置）
   const userId = currentUserId(req);
   res.json({ success: true, userId, config: await insightsService.updateScreenConfig(device, patch) });
@@ -151,13 +151,13 @@ export async function listBudgets(req: Request, res: Response) {
 
 export async function upsertBudget(req: Request, res: Response) {
   const input = upsertBudgetSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json(await insightsService.upsertBudget(device, input));
 }
 
 export async function removeBudget(req: Request, res: Response) {
   const { budgetId } = budgetIdSchema.parse(req.params);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json(await insightsService.removeBudget(device, budgetId));
 }
 

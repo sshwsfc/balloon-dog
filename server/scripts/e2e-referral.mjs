@@ -595,7 +595,13 @@ async function main() {
       tiers: [{ minInvitees: 0, maxInvitees: 3, ratePercent: 45 }, { minInvitees: 4, maxInvitees: 9, ratePercent: 40 }, { minInvitees: 10, maxInvitees: null, ratePercent: 20 }],
       couponRules: rules.couponRules,
       shortPeriodMinRatePercent: rules.shortPeriodMinRatePercent,
-      longPeriodCapCents: rules.longPeriodCapCents,
+      /*
+        这里把长周期单笔上限临时抬高：受邀注册的买家价格是常规价的 2 倍，
+        年卡实付 ￥215.20 打个 45% 就是 ￥96.84，直接撞上默认的 75 元上限 ——
+        上限一压，阶梯比例就看不出效果了，而这一段要验的正是阶梯。
+        封顶行为本身由上面的 gina/henry 一段（capApplied === true）单独覆盖。
+      */
+      longPeriodCapCents: 100000,
       renewalRatePercent: rules.renewalRatePercent,
       renewalCapCents: rules.renewalCapCents,
     }
@@ -612,7 +618,7 @@ async function main() {
     const jackReward = ivyRewards.items.find((x) => x.kind === 'first_purchase')
     check(jackReward?.ratePercent === 45, `后台把首档改成 45% 后，新产生的返现立刻按 45% 算（${jackReward?.ratePercent}%）`)
     check(jackReward?.amountCents === Math.floor(jackQuote * 0.45), '金额随之重算', yuan(jackReward?.amountCents))
-    check(jackReward?.capApplied === false, '年卡这一单没到 75 元上限，验的是阶梯本身')
+    check(jackReward?.capApplied === false, '上限调高后这一单没到顶，验的是阶梯本身', yuan(jackReward?.amountCents))
     check(ivyOverview.tiers[0].ratePercent === 45, '家长端读到的阶梯也跟着后台改')
     const aliceHistory = await must('GET', '/referral/rewards', { token: alice.token })
     const oldFirst = aliceHistory.items.find((x) => x.baseAmountCents === bobQuote)

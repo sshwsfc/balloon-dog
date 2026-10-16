@@ -26,6 +26,7 @@ export const TIP_IDS = [
   'media',
   'quiz',
   'devices',
+  'deviceHealth',
 ] as const
 
 export type TipId = (typeof TIP_IDS)[number]

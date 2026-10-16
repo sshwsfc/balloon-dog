@@ -65,7 +65,7 @@ public class ProjectionConsentActivity extends Activity {
         try {
             AgentStore store = new AgentStore(context.getApplicationContext());
             LockState state = LockState.compute(
-                    LockEnforcer.buildInputs(store, System.currentTimeMillis()));
+                    LockEnforcer.buildInputs(store, TrustedClock.now()));
             if (state.locked) {
                 throw new LockedException("设备当前处于锁定状态，不申请截图授权");
             }

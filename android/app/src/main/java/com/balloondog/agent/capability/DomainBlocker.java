@@ -48,15 +48,67 @@ public final class DomainBlocker {
     }
 
     /**
+     * 把服务端下发的串切成条目，<b>保留 IP 字面量与 IP 网段</b>。
+     *
+     * <p>与 {@link #parseList} 只差一件事：那个函数会把 IP 丢掉 —— 它服务于「域名后缀匹配」，
+     * IP 混在域名表里只会让人以为拦住了。但 IP / 网段是另一条链路要用的（隧道路由，
+     * 规划 §4.1），所以单独留一个不做类型过滤的入口，两条链路各取所需。
+     */
+    public static List<String> splitEntries(@Nullable String joined) {
+        if (joined == null || joined.trim().isEmpty()) return Collections.emptyList();
+        List<String> result = new ArrayList<>();
+        for (String raw : joined.split("[,，\\s]+")) {
+            String entry = stripEntry(raw);
+            if (entry != null && !result.contains(entry)) result.add(entry);
+        }
+        return result;
+    }
+
+    /**
      * 归一化一条黑名单条目。
      *
      * @return 主机名（小写、无 scheme/路径/端口/尾点）；无法作为域名使用时返回 null
      */
     @Nullable
     public static String normalize(@Nullable String entry) {
+        String value = stripEntry(entry);
+        if (value == null) return null;
+        if (isIpLiteral(value)) return null;
+        // 必须像个域名：至少一个点，且不含空格
+        if (!value.contains(".") || value.contains(" ")) return null;
+        // 只保留合法字符，避免把奇奇怪怪的东西塞进匹配表
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                    || c == '.' || c == '-' || c == '_';
+            if (!ok) return null;
+        }
+        return value;
+    }
+
+    /**
+     * 去掉 scheme / userinfo / 路径 / 查询 / 片段 / 端口 / 通配前缀 / 首尾点。
+     *
+     * <p><b>IP 字面量与 IP/前缀网段原样返回</b>：网段里的斜杠是前缀分隔符，不是 URL 路径，
+     * 砍掉就变成了另一个地址（{@code 10.0.0.0/8} → {@code 10.0.0.0}，意思完全不同）。
+     */
+    @Nullable
+    private static String stripEntry(@Nullable String entry) {
         if (entry == null) return null;
         String value = entry.trim().toLowerCase(Locale.US);
         if (value.isEmpty()) return null;
+
+        // 注意：这里必须用「严格」的判断。isIpLiteral 是给域名过滤用的宽松版
+        // （含冒号就当 IPv6），拿它在这里会把 "https://example.com/" 整个当成 IPv6 原样返回 ——
+        // 归一化就静默失效了。所以 IP 字面量走四段十进制，IPv6 走纯十六进制+冒号。
+        if (isIpv4(value)) return value;
+        int cidrSlash = value.indexOf('/');
+        if (cidrSlash > 0
+                && isIpv4(value.substring(0, cidrSlash))
+                && value.substring(cidrSlash + 1).matches("\\d{1,2}")) {
+            return value;
+        }
+        if (value.indexOf(':') > 0 && value.matches("[0-9a-f:]+")) return value;
 
         // 去掉 scheme
         int scheme = value.indexOf("://");
@@ -79,19 +131,7 @@ public final class DomainBlocker {
 
         // 通配写法 "*.example.com" → example.com（后缀匹配本来就覆盖子域）
         if (value.startsWith("*.")) value = value.substring(2);
-        if (value.isEmpty()) return null;
-
-        if (isIpLiteral(value)) return null;
-        // 必须像个域名：至少一个点，且不含空格
-        if (!value.contains(".") || value.contains(" ")) return null;
-        // 只保留合法字符，避免把奇奇怪怪的东西塞进匹配表
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            boolean ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-                    || c == '.' || c == '-' || c == '_';
-            if (!ok) return null;
-        }
-        return value;
+        return value.isEmpty() ? null : value;
     }
 
     /** 该主机名是否命中黑名单里任意一条（后缀匹配）。 */
@@ -118,6 +158,21 @@ public final class DomainBlocker {
         String value = host.trim().toLowerCase(Locale.US);
         while (value.endsWith(".")) value = value.substring(0, value.length() - 1);
         return value.isEmpty() ? null : value;
+    }
+
+    /** 严格版：四段十进制、每段 0-255（`1.2.3.4`）。 */
+    private static boolean isIpv4(String value) {
+        if (value.contains(":")) return false;
+        String[] parts = value.split("\\.", -1);
+        if (parts.length != 4) return false;
+        for (String part : parts) {
+            if (part.isEmpty() || part.length() > 3) return false;
+            for (int i = 0; i < part.length(); i++) {
+                if (part.charAt(i) < '0' || part.charAt(i) > '9') return false;
+            }
+            if (Integer.parseInt(part) > 255) return false;
+        }
+        return true;
     }
 
     private static boolean isIpLiteral(String value) {

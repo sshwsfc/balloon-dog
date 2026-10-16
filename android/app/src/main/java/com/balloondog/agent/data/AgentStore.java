@@ -11,6 +11,8 @@ import java.util.Date;
 import java.util.Locale;
 import java.util.UUID;
 
+import com.balloondog.agent.capability.TrustedClock;
+
 /**
  * 设备身份与本地策略状态的持久化。
  *
@@ -275,7 +277,9 @@ public class AgentStore {
     public boolean isEffectivelyLocked() {
         if (!isLocked()) return false;
         long until = getTempUnlockUntil();
-        return until <= 0 || until <= System.currentTimeMillis();
+        // 放行截止时间一律用可信时钟比较（规划 §1.6）：写与读必须在同一时基上，
+        // 否则孩子把时间往前调就能把「还剩 10 分钟」变成「还剩 1 天」
+        return until <= 0 || until <= TrustedClock.now();
     }
 
     public void setLockState(boolean locked, long tempUnlockUntilMillis) {
@@ -287,7 +291,7 @@ public class AgentStore {
 
     /** 答题奖励 / 临时解锁：在原有到期时间上叠加，与服务端 quiz.service.ts 的语义一致。 */
     public void extendTempUnlock(long extraMillis, boolean unlockNow) {
-        long base = Math.max(System.currentTimeMillis(), getTempUnlockUntil());
+        long base = Math.max(TrustedClock.now(), getTempUnlockUntil());
         long until = base + extraMillis;
         prefs.edit()
                 .putLong(Constants.KEY_TEMP_UNLOCK_UNTIL, until)
@@ -420,7 +424,15 @@ public class AgentStore {
                 .remove(Constants.KEY_APP_USAGE_JSON)
                 .remove(Constants.KEY_INSTALL_APPROVAL_UNTIL)
                 .remove(Constants.KEY_CALLS_SMS_REPORTED_AT)
+                // 换绑后旧设备的申请 id 已经查不到了，留着只会让孩子一直看到「等待回应」
+                .remove(Constants.KEY_PENDING_TIME_REQUEST_ID)
+                .remove(Constants.KEY_PENDING_TIME_REQUEST_KIND)
+                .remove(Constants.KEY_PENDING_TIME_REQUEST_MINUTES)
                 .apply();
+
+        // 换绑后旧设备的学习模式配置已经作废：如果默认桌面还被钉在我们的学习桌面上，
+        // 孩子会永远停在一个空桌面（家长端已经没有这台设备了）。这里一并还回去。
+        com.balloondog.agent.capability.StudyHomeController.release(appContext);
         return true;
     }
 
@@ -516,6 +528,46 @@ public class AgentStore {
      */
     public long anyGrantUntil() {
         return Math.max(getTempUnlockUntil(), getManualUnlockUntil());
+    }
+
+    // ---------------- 孩子的加时申请（规划 §3.1） ----------------
+
+    /**
+     * 记住孩子最近一次「加时 / 延后锁屏」申请。
+     *
+     * <p>必须落盘：锁定页会被系统重建（灭屏再亮、内存回收），
+     * 重建后如果忘了自己申请过，孩子会重复发申请，
+     * 而且看不到家长的回复 —— 那正是这个功能唯一要解决的问题。
+     */
+    public void setPendingTimeRequest(String id, String kind, int minutes) {
+        prefs.edit()
+                .putString(Constants.KEY_PENDING_TIME_REQUEST_ID, id)
+                .putString(Constants.KEY_PENDING_TIME_REQUEST_KIND, kind)
+                .putInt(Constants.KEY_PENDING_TIME_REQUEST_MINUTES, minutes)
+                .apply();
+    }
+
+    /** 最近一次申请的 id；null 表示没有未了结的申请。 */
+    @Nullable
+    public String getPendingTimeRequestId() {
+        String id = prefs.getString(Constants.KEY_PENDING_TIME_REQUEST_ID, null);
+        return id == null || id.isEmpty() ? null : id;
+    }
+
+    public String getPendingTimeRequestKind() {
+        return prefs.getString(Constants.KEY_PENDING_TIME_REQUEST_KIND, "extend_time");
+    }
+
+    public int getPendingTimeRequestMinutes() {
+        return prefs.getInt(Constants.KEY_PENDING_TIME_REQUEST_MINUTES, 0);
+    }
+
+    public void clearPendingTimeRequest() {
+        prefs.edit()
+                .remove(Constants.KEY_PENDING_TIME_REQUEST_ID)
+                .remove(Constants.KEY_PENDING_TIME_REQUEST_KIND)
+                .remove(Constants.KEY_PENDING_TIME_REQUEST_MINUTES)
+                .apply();
     }
 
     // ---------------- 最高强度档（随机改系统锁屏密码） ----------------

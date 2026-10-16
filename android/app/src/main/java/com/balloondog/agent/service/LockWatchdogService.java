@@ -2,6 +2,7 @@ package com.balloondog.agent.service;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.content.ComponentName;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
@@ -16,12 +17,16 @@ import androidx.annotation.Nullable;
 import com.balloondog.agent.capability.AccessibilityScreenCapture;
 import com.balloondog.agent.capability.LockEnforcer;
 import com.balloondog.agent.capability.SensitiveScreens;
+import com.balloondog.agent.capability.StudyHomeController;
+import com.balloondog.agent.capability.StudyLauncher;
 import com.balloondog.agent.capability.StudyModeEngine;
 import com.balloondog.agent.capability.LockState;
 import com.balloondog.agent.data.AgentStore;
 import com.balloondog.agent.data.Constants;
 import com.balloondog.agent.data.EventLog;
 import com.balloondog.agent.ui.LockOverlayWindow;
+import com.balloondog.agent.ui.StudyHomeActivity;
+import com.balloondog.agent.capability.TrustedClock;
 
 import java.util.Arrays;
 import java.util.HashMap;
@@ -434,7 +439,7 @@ public class LockWatchdogService extends AccessibilityService {
 
         // 以下是锁定态的复核，只在策略要求锁定时才做
         LockState state = LockState.compute(
-                LockEnforcer.buildInputs(store, System.currentTimeMillis()));
+                LockEnforcer.buildInputs(store, TrustedClock.now()));
         if (!state.locked) return;
         // 放行：紧急呼叫与来电 —— 安全底线，无条件。
         // 不仅要放行，还要主动把锁定界面撤掉，否则它会盖在拨号/接听界面上，
@@ -638,7 +643,7 @@ public class LockWatchdogService extends AccessibilityService {
      */
     private boolean updateSensitiveExcursion(Context context, String previousForeground) {
         long until = SensitiveScreens.allowUntil(context);
-        if (System.currentTimeMillis() >= until) {
+        if (TrustedClock.now() >= until) {
             sensitiveExcursion = false;
             return false;
         }
@@ -696,9 +701,54 @@ public class LockWatchdogService extends AccessibilityService {
      *
      * @return true 表示已经拦下并处理（调用方应当直接返回，不要再走锁定复核）
      */
+    /**
+     * 学习模式专用桌面（规划 §4.4）：上一次同步后的状态。null 表示还没同步过。
+     *
+     * <p>只在**状态翻转**时动 DPM（钉住 / 还回去），不是每个无障碍事件都去改默认桌面。
+     */
+    private Boolean studyHomeApplied = null;
+
+    /**
+     * 把「默认桌面该不该是学习桌面」同步到系统。
+     *
+     * <p>为什么放在无障碍事件里：这个服务是事件驱动的（没有轮询循环），而学习模式的变化
+     * 总要等孩子动一下手机（按 home、切应用）才谈得上「他要看到桌面」。代价是接管
+     * 发生的时刻是「下一次前台变化」，不是整点那一秒 —— 这一点在文档里如实写明。
+     *
+     * <p>没有设备所有者时 {@link StudyHomeController#hold} 会返回 false，动态里会留下
+     * 「桌面接管失败」，而不是让孩子对着一个假的桌面以为管控生效了。
+     */
+    private void syncStudyHome(Context context) {
+        boolean study = StudyModeEngine.isStudy(store.getModeConfig(), TrustedClock.now());
+        boolean owner = StudyHomeController.isDeviceOwner(context);
+        boolean want = StudyLauncher.canHoldHome(study, owner);
+
+        if (studyHomeApplied == null) studyHomeApplied = StudyHomeController.isHeld(context);
+        if (want == studyHomeApplied) return;
+
+        if (want) {
+            boolean ok = StudyHomeController.hold(context,
+                    new ComponentName(context, StudyHomeActivity.class));
+            studyHomeApplied = ok;
+            if (ok) {
+                EventLog.info("学习模式：已接管桌面（只显示家长允许的应用）");
+            } else {
+                EventLog.warn("学习模式：桌面接管失败（本机不是设备所有者，系统不允许改默认桌面）");
+            }
+        } else {
+            StudyHomeController.release(context);
+            studyHomeApplied = false;
+            EventLog.info("学习模式结束：已把默认桌面还回去");
+        }
+    }
+
     private boolean guard(Context context, AccessibilityEvent event, String pkg, String windowText) {
         if (inventory == null) inventory = new com.balloondog.agent.capability.AppInventory();
         inventory.ensureScanned(context);
+
+        // 桌面接管与「拦不拦这个应用」无关，但它必须跟着学习模式一起翻转，
+        // 所以放在这里（每个无障碍事件都会经过，状态没变时是一行比较的开销）。
+        syncStudyHome(context);
 
         // 只有「孩子正在看的那一屏」才谈得上拦。
         //
@@ -713,7 +763,7 @@ public class LockWatchdogService extends AccessibilityService {
         // 学习模式开着、却没拦下来时，把判定依据摊开说清楚。
         // 「设了学习模式但不管用」是最难查的一类反馈：可能是白名单写错了，
         // 也可能是这个包被当成了系统组件，光看「没有拦截日志」什么都推不出来。
-        if (StudyModeEngine.isStudy(store.getModeConfig(), System.currentTimeMillis())) {
+        if (StudyModeEngine.isStudy(store.getModeConfig(), TrustedClock.now())) {
             long diagNow = SystemClock.elapsedRealtime();
             if (diagNow - lastStudyDiagAt > 5_000L) {
                 lastStudyDiagAt = diagNow;
@@ -726,7 +776,7 @@ public class LockWatchdogService extends AccessibilityService {
 
         com.balloondog.agent.capability.GuardRules.GuardDecision decision =
                 com.balloondog.agent.capability.AccessibilityGuard.check(
-                        store, inventory, context, pkg, windowText, System.currentTimeMillis());
+                        store, inventory, context, pkg, windowText, TrustedClock.now());
         if (decision == null || decision.reason == null) return false;
 
         long now = SystemClock.elapsedRealtime();

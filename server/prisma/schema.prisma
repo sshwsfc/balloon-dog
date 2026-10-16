@@ -66,14 +66,29 @@ model User {
   idCardTail          String?
   verifiedAt          DateTime?
 
+  // ---- 合规：注销冷静期（见 features/privacy，规划 §5.3）----
+  /// 注销申请的生效时间。非 null = 账号已进入宽限期：监控立即停止（设备当场解绑），
+  /// 宽限期内可撤销，到点由定时任务真的删库。
+  /// 不另存 status 枚举：状态是「现在几点 / 这个字段是不是空」推出来的，
+  /// 两处都存必然对不上（membership / referral 都吃过这个亏）。
+  deletionScheduledAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  devices          ChildDevice[]
-  quizRecords      QuizRecord[]
-  commands         DeviceCommand[]   @relation("CommandRequester")
-  media            MediaAsset[]
-  membershipOrders MembershipOrder[]
+  devices           ChildDevice[]
+  deviceMemberships DeviceMember[] // 作为「家庭成员」可访问的设备（规划 §5.1）
+  children          Child[] // 孩子档案（规划 §5.2）
+  consents          ConsentRecord[] // 同意留痕（规划 §5.3）
+  privacyRequests   PrivacyRequest[] // 导出/注销流水（规划 §5.3）
+  notifications     Notification[]
+  notificationPrefs NotificationPreference[]
+  supportTickets    SupportTicket[] // 客服工单（规划 §5.5）
+  quizRecords       QuizRecord[]
+  commands          DeviceCommand[]          @relation("CommandRequester")
+  media             MediaAsset[]
+  membershipOrders  MembershipOrder[]
+  invoices          InvoiceRequest[]
 
   referralRewards     ReferralReward[]     @relation("RewardInviter")
   rewardsFromReferral ReferralReward[]     @relation("RewardInvitee")
@@ -85,6 +100,8 @@ model User {
   @@index([status])
   @@index([membershipTier, membershipExpiresAt])
   @@index([referredById])
+  /// 注销清扫按这个字段扫（绝大多数行是 NULL，索引很小）
+  @@index([deletionScheduledAt])
 }
 
 // ============================================================
@@ -97,6 +114,10 @@ model ChildDevice {
   // mock 版没有归属概念，任何未登录请求都能读写「全局那一台设备」，这里从模型层面就堵死。
   userId               Int?
   user                 User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// 这台设备属于哪个孩子（规划 §5.2）。可空：家长可能只绑了设备，还没建孩子档案。
+  /// 一个孩子可以有多台设备，一台设备只属于一个孩子 —— 所以外键在这里而不是反向。
+  childId              String?
+  child                Child?    @relation(fields: [childId], references: [id], onDelete: SetNull)
   name                 String // 家长起的名字，如「小明的小米手机」
   model                String    @default("Unknown")
   os                   String    @default("Unknown") // Android | iOS | HarmonyOS
@@ -130,6 +151,7 @@ model ChildDevice {
   timePlan       TimePlan?
   appLimits      AppLimit[]
   appAudits      AppAuditRequest[]
+  timeRequests   TimeRequest[]
   blockedUrls    BlockedUrl[]
   locations      LocationRecord[]
   safeZones      SafeZone[]
@@ -155,9 +177,59 @@ model ChildDevice {
   events         DeviceEvent[]
   callLogs       CallLogEntry[]
   smsMessages    SmsMessage[]
+  health         DeviceHealth?
+  notifications  Notification[]
+  members        DeviceMember[] // 家庭成员（规划 §5.1）；所有者不在这里，见 model DeviceMember
+  supportTickets SupportTicket[] // 客服工单里引用的设备（规划 §5.5）
 
   @@index([userId])
   @@index([userId, status])
+  @@index([childId])
+}
+
+/// 设备健康快照（规划 §1.1）。
+///
+/// <b>为什么值得单独一张表</b>：孩子端 20 多项管控能力全都压在两三个开关上
+/// （无障碍看门狗、设备所有者、特权授权、电池白名单、VPN 授权）。任何一个被系统
+/// 或孩子关掉，对应的那一整片功能就静默失效，而家长端此前只看得到「在线/电量」。
+/// 设备端本来就知道这些（`LongevityGuard.problems()` 每 5 分钟算一次），缺的只是
+/// 一条把它送上来的通道 —— 这张表就是那条通道。
+///
+/// 语义是<b>整份覆盖</b>（每次上报 upsert 同一行）：健康快照是「此刻的状态」而不是
+/// 流水，留历史只会让「现在到底哪几项是坏的」变得要猜。
+model DeviceHealth {
+  id       String      @id @default(cuid())
+  deviceId String      @unique
+  device   ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// ok | warn | danger —— 设备端按问题的严重程度自己下结论，服务端不重新判一遍。
+  /// 两边各判一次迟早会不一致（设备端认为「电池白名单没加」只是 warn，
+  /// 服务端若自己算成 danger，家长就会看到互相矛盾的两处结论）。
+  level    String @default("warn")
+  /// 缺口清单：[{ id, label, detail, importance, fixability, fixHint }]，
+  /// <b>原样保存设备端下发的结构</b>，家长端不再翻译一遍 —— 设备端最清楚自己
+  /// 是哪个 ROM、哪一项必须让家长点系统框。服务端只负责存和展示。
+  gaps     Json   @default("[]")
+  /// gaps.length 的冗余值，供列表页排序/筛选，避免为了排序把 JSON 全捞出来。
+  openGaps Int    @default(0)
+
+  /// 布尔开关快照：{ deviceOwner, adminActive, overlay, accessibility,
+  /// batteryWhitelist, vpnConsent, vpnAlwaysOn, usageAccess, protectedPackage }
+  checks       Json @default("{}")
+  /// 运行时权限快照：{ location: 'granted'|'denied', camera, mic, callLog, sms, notification }
+  permissions  Json @default("{}")
+  /// 加固项：OwnerHardening.audit() 的 [{ id, label, supported, applied }]
+  restrictions Json @default("[]")
+
+  serviceRunning   Boolean   @default(false)
+  /// 设备墙钟与服务端时间的偏差（秒，规划 §1.6）。绝对值过大 = 设备时间被改过，
+  /// 会直接影响定时锁屏与护眼计时的判定。
+  clockSkewSeconds Int       @default(0)
+  healCount        Int       @default(0)
+  lastHealAt       DateTime?
+  /// 设备端这次上报的时刻（设备墙钟），用于分辨「刚测的」和「三天前测的」。
+  reportedAt       DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 }
 
 // ============================================================
@@ -230,6 +302,36 @@ model AppAuditRequest {
   createdAt   DateTime    @default(now())
 
   @@index([deviceId, status])
+}
+
+/// 孩子的「申请」（规划 §3.1）：孩子端锁屏页 / 主界面发起的加时、延后锁屏请求。
+///
+/// 为什么单独开一张表而不是复用 AppAuditRequest：应用审核问的是「能不能装这个包」，
+/// 它有 packageName 这个天然幂等键；申请加时问的是「能不能多玩一会儿」，
+/// 幂等键是 (device, kind)，落地动作也不同（批准 = 走 temp_unlock 指令）。
+/// 硬塞进一张表要靠一堆可空字段区分两种语义，家长端的两个列表也会互相污染。
+///
+/// 批准不删除记录：请假条式的历史要留痕（与 AppAuditRequest 一致）。
+model TimeRequest {
+  id             String      @id @default(cuid())
+  deviceId       String
+  device         ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  /// extend_time 申请加时 | delay_lock 申请延后锁屏
+  kind           String      @default("extend_time")
+  /// 孩子申请的分钟数（批准时家长可以改小，见 reviewTimeRequest）
+  minutes        Int         @default(0)
+  /// 孩子自己写的理由（可空，纯文本，仅供家长参考）
+  reason         String      @default("")
+  status         String      @default("pending") // pending 待审批 | approved 已批准 | rejected 已拒绝
+  /// 家长批注 / 拒绝理由
+  reviewNote     String      @default("")
+  /// 批准后实际放行的分钟数（可能与申请值不同，留痕用）
+  grantedMinutes Int?
+  reviewedAt     DateTime?
+  createdAt      DateTime    @default(now())
+
+  @@index([deviceId, status])
+  @@index([status, createdAt])
 }
 
 model BlockedUrl {
@@ -712,6 +814,10 @@ model Admin {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
+  alertAcks   AlertAck[]      @relation("AlertAckAdmin") // 告警确认（规划 §5.5）
+  tickets     SupportTicket[] @relation("TicketAssignee") // 工单分派（规划 §5.5）
+  flagUpdates RuntimeFlag[]   @relation("FlagUpdatedBy") // 灰度开关的最近改动人
+
   @@index([status])
 }
 
@@ -1085,9 +1191,10 @@ model MembershipOrder {
   referralSurchargeCents Int     @default(0)
 
   payChannel    String // alipay | wechat
-  /// pending 待支付 | paid 已支付 | failed 支付失败 | cancelled 已取消 | refunded 已退款
+  /// pending 待支付 | paid 已支付 | failed 支付失败 | cancelled 已取消 |
+  /// refunding 退款中 | refunded 已退款
   status        String    @default("pending")
-  /// 支付渠道流水号（mock 支付页生成）。
+  /// 支付渠道流水号（微信 transaction_id / 支付宝 trade_no；模拟支付时是本地生成）
   transactionId String?
   paidAt        DateTime?
   /// 本单带来的会员生效区间（支付成功时写入）。
@@ -1096,12 +1203,80 @@ model MembershipOrder {
   /// 是否开通了连续包月（决定到期后是否自动续费）。
   autoRenew     Boolean   @default(false)
 
+  // ---- 真实渠道（规划 §5.4）----
+  /// 渠道侧的预支付单号（微信 prepay_id / 支付宝预下单返回的 trade_no 之前的那一步）
+  prepayId        String?
+  /// 预支付载荷（二维码链接 / JSAPI 参数），JSON 字符串。只用于展示，不作为付款凭证
+  prepayPayload   String    @default("")
+  /// 渠道回调里带回来的商户订单号（微信 out_trade_no / 支付宝 out_trade_no），
+  /// 与本地 orderNo 应该一致；不一致说明有人在拿别的单号试探。
+  notifiedOrderNo String?
+  /// 退款单号（渠道侧）与退款金额。**退款不改 orderNo**，同一单可查完整链路。
+  refundNo        String?
+  refundCents     Int       @default(0)
+  refundReason    String    @default("")
+  refundedAt      DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([userId, status])
   @@index([status, createdAt])
   @@index([tier, createdAt])
+  @@index([prepayId])
+  @@index([transactionId])
+}
+
+/// 支付渠道的每一次交互留痕（回调、退款回调、主动查询）。
+///
+/// 为什么不只依赖订单上的字段：渠道回调是**外部输入**，重复、乱序、伪造都会发生。
+/// 出问题时最需要回答的是「当时到底收到了什么、验签过了没有、我们怎么处理的」，
+/// 而这些信息只能逐条记。**不存原始报文体**（可能含用户标识），只存摘要字段。
+model PaymentEvent {
+  id          String   @id @default(cuid())
+  orderNo     String   @default("")
+  provider    String
+  /// create 下单 | notify 支付回调 | refund_notify 退款回调 | refund 主动退款申请 | query 主动查询
+  kind        String
+  /// 验签是否通过。伪造/坏签的回调会落一条 signatureOk=false，且绝不改订单状态。
+  signatureOk Boolean  @default(false)
+  /// ok | duplicate | bad_signature | unknown_order | amount_mismatch | error
+  result      String   @default("")
+  detail      String   @default("")
+  createdAt   DateTime @default(now())
+
+  @@index([orderNo])
+  @@index([provider, createdAt])
+  @@index([result, createdAt])
+}
+
+/// 发票申请（家长端提交，管理后台处理）。
+///
+/// 先落申请、再人工开具：绝大多数小体量业务没法自动开票，与其做一个假按钮，
+/// 不如把「谁、哪天、为哪一单、开了什么票」留下来。
+model InvoiceRequest {
+  id          String    @id @default(cuid())
+  userId      Int
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orderNo     String
+  amountCents Int
+  /// 抬头（个人姓名或公司名）
+  title       String
+  /// 税号，个人抬头可以留空
+  taxNo       String    @default("")
+  email       String    @default("")
+  /// pending 待处理 | issued 已开具 | rejected 已驳回
+  status      String    @default("pending")
+  /// 开票方给出的发票号码，由后台填写；家长端在申请记录里能看到它
+  invoiceNo   String    @default("")
+  note        String    @default("")
+  issuedAt    DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+  @@index([orderNo])
 }
 
 // ============================================================
@@ -1297,4 +1472,335 @@ model ReferralCoupon {
   @@unique([userId, sourceRef])
   @@index([userId, status])
   @@index([status, expiresAt])
+}
+
+// ============================================================
+// 家长端站内通知（规划 §2.1，第一档）
+// ============================================================
+
+/// 家长要**知道并处理**的事。
+///
+/// 为什么不复用 `DeviceEvent`：那张表是**设备视角的运行日志**（孩子端的动作、拦截、
+/// 进出安全区），既没有「已读」，也没有「这条给哪个家长」。家长要的是「我需要知道
+/// 的事」，两者的读者与生命周期都不同 —— 混在一起的结果是家长端要么被一堆自己
+/// 不需要的日志淹没，要么不敢标已读（怕把证据标掉）。
+///
+/// 这一类通知**只能由服务端产生**：设备端的 `AgentEventLog` 是另一条链路
+/// （进程内日志环，用于设备诊断），不是给家长看的。
+model Notification {
+  id       String       @id @default(cuid())
+  userId   Int
+  user     User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// 设备相关的事件带上它，家长点通知可直达那台设备；账号级事件（会员到期）为 null。
+  /// 设备解绑后通知一起删（Cascade）——  指向一台已经不存在的设备的通知没有意义。
+  deviceId String?
+  device   ChildDevice? @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// 事件类型，白名单见 features/notifications/notifications.constants.ts
+  type        String
+  /// info | warn | danger —— 只影响家长端的颜色与「是否需要处理」的排序
+  level       String @default("info")
+  title       String
+  body        String @default("")
+  /// 标题/正文里的插值参数。这个项目「中文即 i18n key」，固定句子加一条 en 词典即可，
+  /// 但带变量的句子（"小明的小米手机 已失联"）整体不可能是一个 key —— 所以库里存
+  /// **模板**（"{{v0}} 已失联"，它本身就是 key），变量值放这里，前端 t(title, titleParams)。
+  titleParams Json?
+  bodyParams  Json?
+  /// 点击后跳转的家长端路径（如 /device-health）
+  linkPath    String @default("")
+
+  /// 幂等键：同一个人同一条事只出现一次。
+  /// 设备会重复上报（每 3 分钟一次心跳级的上报），没有它家长端会被同一条事刷屏。
+  /// 与 userId 组合唯一，重复写入是 no-op 而不是报错。
+  dedupeKey String
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  /// 「再发一条到家长手机」的投递记录（见 NotificationDelivery）
+  deliveries NotificationDelivery[]
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+  @@index([deviceId])
+}
+
+/// 站内通知之外的「再投递一次」记录（规划 §2.1 第二档：微信服务号模板消息）。
+///
+/// 为什么单独一张表而不是给 Notification 加几个字段：
+///  - 站内消息是「消息中心里的一条」，投递是「有没有真的送到家长手机上」。家长问
+///    「为什么没收到」时必须有据可查，而失败原因（模板 ID 不对、令牌过期、没关注公众号）
+///    只属于投递，不属于那条消息本身；
+///  - 将来加厂商推送/FCM 时是一行新 channel，不动 Notification 的形状。
+///
+/// 刻意**不做队列**：这个项目不引入调度器，投递在家长打开消息中心（未读角标接口）时
+/// 惰性派发，和「会员到期懒检查」同一个取舍。代价是家长不来就不发 —— 但对一个
+/// 「提醒你去看消息中心」的通道来说，家长本来就在看的那一刻也够用了。
+model NotificationDelivery {
+  id             String       @id @default(cuid())
+  notificationId String
+  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  /// 当前只有 wechat；将来加 push（厂商推送）时是一行新值
+  channel   String
+  /// pending | sent | failed —— failed 且 attempts 未到上限时还会重试
+  status    String    @default("pending")
+  attempts  Int       @default(0)
+  /// 最后一次失败的原因（微信的 errcode/errmsg 原文，便于家长端/日志排查）
+  lastError String    @default("")
+  sentAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  /// 同一条消息同一个通道只投一次
+  @@unique([notificationId, channel])
+  @@index([status, createdAt])
+}
+
+/// 通知偏好（规划 §2.1 配套的「真正的通知偏好页」）。
+///
+/// 一行 = 一个家长对一类事件的选择；没有行 = 用默认值（站内开、其它关）。
+/// **故意不预建行**：新用户不该被写一堆默认行为的记录，默认值写在常量里，
+/// 只有家长真的改过才落盘 —— 这样以后调整默认值，没改过的用户会跟着变。
+model NotificationPreference {
+  id        String   @id @default(cuid())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  inApp     Boolean  @default(true)
+  /// 微信服务号模板消息 / 厂商推送：**通道尚未接入**。
+  /// 字段先存着，界面如实标注「未配置」——存了不做才是真骗人，所以它不参与发送。
+  wechat    Boolean  @default(false)
+  push      Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, type])
+}
+
+/// 家庭成员（规划 §5.1）：一台设备可以有不止一个家长账号，且角色要分开。
+///
+/// 刻意<b>不</b>把设备所有者写进这张表：所有者是 `ChildDevice.userId`，隐式拥有
+/// `admin` 权限。写进来就会出现「所有者那一行被误删」或「行丢了但设备还在」这种
+/// 自相矛盾的状态，而这两种状态在权限判断里最难解释清楚。
+model DeviceMember {
+  id        String      @id @default(cuid())
+  deviceId  String
+  device    ChildDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  /// 被邀请的家长账号
+  userId    Int
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// admin = 和所有者一样能改设置/控制设备；viewer = 只能看，写操作一律 403
+  role      String      @default("viewer")
+  /// 设备主人给这位成员起的称呼（「妈妈」），列表里显示用；空串表示没起
+  nickname  String      @default("")
+  /// 邀请人（所有者或已有 admin 成员）；只用于留痕
+  invitedBy Int?
+  createdAt DateTime    @default(now())
+
+  @@unique([deviceId, userId])
+  @@index([userId])
+}
+
+/// 孩子档案（规划 §5.2）：周报、年龄适配、「多台设备属于同一个孩子」都需要一个
+/// 独立于设备的「孩子」实体。此前只有设备，于是双胞胎的两台手机在系统里毫无关联。
+///
+/// 归属是**家长账号**（`userId`）而不是设备：孩子是家长的孩子，设备只是入口。
+/// 设备通过 `ChildDevice.childId` 指过来（多对一），删孩子时设备只解绑不删除 ——
+/// 「删掉档案」不等于「解绑设备」，把家长的设备一起带走是灾难性的。
+model Child {
+  id        String   @id @default(cuid())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// 家长填的称呼，如「小明」。必填：一个没有名字的档案在列表里无法辨认
+  name      String
+  /// 出生**年份**而不是年龄。年龄每年都要改，存下去必然过期；
+  /// 年份不变，展示时现算，永远不会出现「8 岁的孩子过了三年还是 8 岁」。
+  birthYear Int?
+  school    String   @default("")
+  avatar    String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  devices ChildDevice[]
+  tasks   ChildTask[]
+
+  @@index([userId])
+}
+
+/// 「今日任务」（规划 §3.2 未做完的那一小块 / §5.2）：家长布置，孩子在自己设备上看到并勾掉。
+///
+/// 任务挂在**孩子**身上，不挂在设备上：双胞胎的两台手机应当看到同一份任务清单。
+/// 设备端读的时候由「这台设备 → 它的 childId → 今天的任务」这条链推出来。
+model ChildTask {
+  id        String    @id @default(cuid())
+  childId   String
+  child     Child     @relation(fields: [childId], references: [id], onDelete: Cascade)
+  /// 任务内容，家长填的一句话（「练琴 30 分钟」）
+  title     String
+  /// 归属日期 `YYYY-MM-DD`（服务器本地日）。存字符串而不是 DateTime：
+  /// 「今天」是个人历法概念，存时刻就会被时区/夏令时拖进「昨晚的任务算今天」这类争论。
+  date      String
+  doneAt    DateTime?
+  /// 布置人（家长 userId），用于留痕：家庭成员里 admin 也能布置任务
+  createdBy Int
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([childId, date])
+  @@index([date])
+}
+
+// ============================================================
+// 合规：同意留痕 / 注销（规划 §5.3）
+// ============================================================
+
+/// 家长对本平台合规文本的同意记录。**只追加，不原地改**：
+/// 撤回同意写 `revokedAt`，重新同意写新行 —— 「我当时同意的是哪一版」必须留在库里。
+///
+/// 版本号是这份表存在的主要理由：文本改一句话，旧版的同意就不能算数了，
+/// 所以同意时必须带上客户端看到的版本，服务端再和当前版本核对（不匹配 = 409）。
+model ConsentRecord {
+  id         String    @id @default(cuid())
+  userId     Int
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// guardian_agreement 家长监护授权与隐私说明 | minor_data_notice 未成年人个人信息处理告知
+  docType    String
+  docVersion String
+  acceptedAt DateTime  @default(now())
+  revokedAt  DateTime?
+  /// 留痕用，不做风控：IP 与 UA 只是「当时是谁点的」这一句证据的补充
+  ip         String    @default("")
+  userAgent  String    @default("")
+
+  @@index([userId, docType])
+}
+
+/// 数据导出 / 注销的流水（合规留痕）。
+///
+/// 导出也记一行：个保法要的不是「我们有导出功能」，而是「能说清谁在什么时候取走了什么」。
+/// 注销用它承载冷静期状态：status = scheduled / cancelled / done。
+model PrivacyRequest {
+  id           String    @id @default(cuid())
+  userId       Int
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// export 数据导出 | deletion 账号注销
+  kind         String
+  /// done 已完成 | scheduled 已排期（等冷静期）| cancelled 已撤销
+  status       String
+  /// 注销的生效时间（kind = deletion 时才有）
+  scheduledFor DateTime?
+  /// 人看得懂的一句话（「导出 213 条记录」「已解绑 2 台设备」）
+  note         String    @default("")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([userId, kind])
+}
+
+// ============================================================
+// 后台运营能力（规划 §5.5）：告警大盘 · 灰度开关 · 客服工单
+// ============================================================
+//
+// 三者共同的取舍：**只存「人的决定」，不存「算出来的事实」**。
+// 告警的指标每次读时现算（不留快照，就永远不会有过期的大盘），落库的只有
+// 「阈值改成了多少」与「这条我看过了」；灰度开关落库的是「谁在什么时候把它调成了什么」。
+
+/// 告警规则：后台可改阈值/窗口/严重度，默认五行见 alerts.constants.ts 的 DEFAULT_RULES。
+model AlertRule {
+  /// device_offline | control_gap | command_failure | payment_anomaly | notify_failure
+  key           String   @id
+  label         String
+  enabled       Boolean  @default(true)
+  /// info | warn | danger
+  severity      String   @default("warn")
+  /// 阈值。单位随 key 固定（% 或 条），见 alerts.constants.ts 的 RULE_META
+  threshold     Int
+  /// 统计窗口（分钟）。率类里没有窗口概念的规则用 0 = 不适用
+  windowMinutes Int      @default(0)
+  note          String   @default("")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+/// 告警确认（「这条我看过了」）。没有它，大盘永远是红的，等于没有告警。
+model AlertAck {
+  id      String @id @default(cuid())
+  /// 规则 key
+  key     String
+  /// 具体对象：设备 id / 订单号；空串 = 这条规则整体确认
+  subject String @default("")
+
+  adminId  Int?
+  admin    Admin? @relation("AlertAckAdmin", fields: [adminId], references: [id], onDelete: SetNull)
+  note     String @default("")
+  /// 确认那一刻的指标快照 —— 「当时是 42%，不是我瞎点的」
+  snapshot Json   @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// 同一条告警只能有一个有效确认；撤销 = 删除这一行
+  @@unique([key, subject])
+  @@index([createdAt])
+}
+
+/// 客服工单。家长提交、后台分派与回复。
+model SupportTicket {
+  id       String @id @default(cuid())
+  /// 家长看到的单号，形如 T20261020-3F9A21（T + 日期 + 6 位十六进制）
+  ticketNo String @unique
+
+  /// 账号删除时工单一并删除：正文是家长写的，留着就是「删了账号还留着用户内容」。
+  /// 与订单/同意记录一致 —— 删除账号是一次真实的数据删除，不是标记。
+  userId   Int?
+  user     User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// 可选：这条工单是针对哪台设备提的
+  deviceId String?
+  device   ChildDevice? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  /// 家长留的联系方式（默认填账号手机号，家长可改）
+  contact  String @default("")
+  /// 固定枚举（support.constants.TICKET_CATEGORIES）：设备/管控/支付退款发票/账号与登录/功能建议/其他
+  category String @default("other")
+  subject  String
+  body     String
+
+  /// open 待处理 | processing 处理中 | waiting 等家长回复 | closed 已关闭
+  status   String @default("open")
+  /// low | normal | high
+  priority String @default("normal")
+
+  assigneeId Int?
+  assignee   Admin? @relation("TicketAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  /// 后台回复：[{ adminId, adminName, at, body }]。家长端只回 body 与 at
+  replies Json @default("[]")
+
+  closedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@index([category, createdAt])
+}
+
+/// 灰度开关：按账号/设备百分比放量，出问题一键关掉。
+/// 求值规则见 flags.service.ts 的 flagEnabled() —— 白名单优先，对象不明时保守关闭。
+model RuntimeFlag {
+  key            String  @id
+  label          String
+  description    String  @default("")
+  enabled        Boolean @default(true)
+  /// 0-100。稳定散列取模，保证同一对象每次结果一致
+  rolloutPercent Int     @default(100)
+  /// 白名单（userId 或 deviceId，按代码定义的 bucket 解释）
+  allowIds       Json    @default("[]")
+
+  updatedBy      Int?
+  updatedByAdmin Admin? @relation("FlagUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

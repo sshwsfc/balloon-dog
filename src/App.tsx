@@ -17,9 +17,16 @@ import { ModePage } from './pages/ModePage'
 import { ModeSchedulePage } from './pages/ModeSchedulePage'
 import { ModeAppsPage } from './pages/ModeAppsPage'
 import { EyeCarePage } from './pages/EyeCarePage'
+import { DeviceHealthPage } from './pages/DeviceHealthPage'
+import { NotificationsPage } from './pages/NotificationsPage'
+import { TimeRequestsPage } from './pages/TimeRequestsPage'
+import { NotificationSettingsPage } from './pages/NotificationSettingsPage'
 import { AppPluginsPage } from './pages/AppPluginsPage'
 import { AppPluginDetailPage } from './pages/AppPluginDetailPage'
 import { AppAuditPage } from './pages/AppAuditPage'
+import { ChildrenPage } from './pages/ChildrenPage'
+import { PrivacyPage } from './pages/PrivacyPage'
+import { SupportPage } from './pages/SupportPage'
 import { CallSmsPage } from './pages/CallSmsPage'
 import { RemoteHelpPage } from './pages/RemoteHelpPage'
 import { BottomNav, SIDEBAR_WIDTH_CLASS } from './components/BottomNav'
@@ -228,6 +235,90 @@ function AppShell() {
               <RequireDevice>
                 <ModeAppsPage />
             </RequireDevice>
+            </ProtectedRoute>
+          }
+        />
+        {/* 设备健康：家长端一眼看见孩子端有哪些开关被关掉，并就地发起体检 */}
+        <Route
+          path="/device-health"
+          element={
+            <ProtectedRoute>
+              <RequireDevice>
+                <DeviceHealthPage />
+              </RequireDevice>
+            </ProtectedRoute>
+          }
+        />
+        {/*
+          消息中心：设备失联 / 管控失效 / 进出安全区 / 装应用申请都落到这里。
+          刻意**不**包 RequireDevice —— 通知是账号级的，孩子手机掉了、解绑了，
+          家长更需要看到之前那条「设备已失联」，而不是被弹回「先绑定设备」。
+          通知设置同理。
+        */}
+        <Route
+          path="/notifications"
+          element={
+            <ProtectedRoute>
+              <NotificationsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/notifications/settings"
+          element={
+            <ProtectedRoute>
+              <NotificationSettingsPage />
+            </ProtectedRoute>
+          }
+        />
+        {/*
+          孩子档案（§5.2）：档案属于账号，不属于设备 —— 一个还没绑设备的家长也要能先
+          把孩子建起来，所以不包 RequireDevice。
+        */}
+        <Route
+          path="/children"
+          element={
+            <ProtectedRoute>
+              <ChildrenPage />
+            </ProtectedRoute>
+          }
+        />
+        {/*
+          合规与隐私（§5.3）：同意的主体是家长账号，导出与注销删的也是账号，
+          与「当前设备」无关 —— 同样只包 ProtectedRoute。
+        */}
+        <Route
+          path="/privacy"
+          element={
+            <ProtectedRoute>
+              <PrivacyPage />
+            </ProtectedRoute>
+          }
+        />
+        {/*
+          帮助与反馈（§5.5）：工单属于账号，不属于设备 —— 没绑设备的家长也能提问，
+          所以同样只包 ProtectedRoute。
+        */}
+        <Route
+          path="/support"
+          element={
+            <ProtectedRoute>
+              <SupportPage />
+            </ProtectedRoute>
+          }
+        />
+        {/*
+          孩子的申请（§3.1）：批准 = 给当前设备下发一段使用时间。
+          因此这一页**要**包 RequireDevice —— 没有设备就没有「给谁放行」这回事，
+          与账号级的消息中心正相反。
+        */}
+        <Route
+          path="/time-requests"
+          element={
+            <ProtectedRoute>
+              <RequireDevice>
+                <TimeRequestsPage />
+              </RequireDevice>
             </ProtectedRoute>
           }
         />

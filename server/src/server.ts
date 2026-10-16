@@ -8,6 +8,10 @@ import { ensureMediaDir } from './features/media/media.storage';
 import { insightsService } from './features/insights/insights.service';
 import { membershipService } from './features/membership/membership.service';
 import { referralService } from './features/referral/referral.service';
+import { privacyService } from './features/privacy/privacy.service';
+import { paymentsService } from './features/payments/payments.service';
+import { ensureFlagDefaults } from './features/flags/flags.service';
+import { ensureAlertRuleDefaults } from './features/opsalert/alerts.service';
 
 const app = createApp();
 
@@ -25,6 +29,15 @@ async function bootstrap() {
   // backfillInviteCodes 是惰性的（只补没有码的账号），重复启动不会重复写。
   const referralSeeded = await referralService.ensureDefaults();
   logger.info({ msg: 'referral defaults ready', ...referralSeeded });
+
+  // 灰度开关的代码默认值必须先在库里落地一份：后台看到的是「当前生效值」，
+  // 库里缺行时求值虽然也会回落到默认值，但后台就分不清「从没配过」和「配成默认」。
+  const flagsSeeded = await ensureFlagDefaults();
+  logger.info({ msg: 'feature flag defaults ready', created: flagsSeeded });
+
+  // 告警规则的默认口径同理：迁移里 seed 过一份，这里补上被删掉或被新版本新增的行。
+  const alertRulesSeeded = await ensureAlertRuleDefaults();
+  logger.info({ msg: 'alert rule defaults ready', created: alertRulesSeeded });
 
   const server = app.listen(config.PORT, () => {
     logger.info({ msg: 'Server started', port: config.PORT, env: config.NODE_ENV });
@@ -104,12 +117,52 @@ async function bootstrap() {
     6 * 60 * 60 * 1000, // 每 6 小时一次
   );
 
+  // 注销冷静期到期：**真的删账号**（先删磁盘文件再删库）。
+  //
+  // 这件事不能只写在文档里：合规承诺「7 天后删除」就必须有一个东西去做它。
+  // 频率取 1 小时：删除不是秒级业务，但也不该让人多等一天。
+  const privacyTimer = setInterval(
+    () => {
+      void (async () => {
+        try {
+          const swept = await privacyService.sweepExpiredDeletions();
+          if (swept.users > 0) {
+            logger.info({ msg: 'privacy deletion sweep', ...swept });
+          }
+        } catch (err) {
+          logger.error({ msg: 'privacy deletion sweep failed', error: (err as Error).message });
+        }
+      })();
+    },
+    60 * 60 * 1000, // 每小时一次
+  );
+
+  // 退款对账（规划 §5.4）：卡在「退款中」的订单要么是渠道超时、要么是进程在那一步挂了。
+  // 用同一个退款单号重试，渠道侧幂等；金额与单号都已经落库，所以重试不会变成退两次。
+  const paymentTimer = setInterval(
+    () => {
+      void (async () => {
+        try {
+          const swept = await paymentsService.sweep();
+          if (swept.retried > 0) {
+            logger.info({ msg: 'payment refund sweep', ...swept });
+          }
+        } catch (err) {
+          logger.error({ msg: 'payment refund sweep failed', error: (err as Error).message });
+        }
+      })();
+    },
+    60 * 60 * 1000, // 每小时一次
+  );
+
   async function shutdown(signal: string) {
     logger.info({ msg: 'Shutting down', signal });
     clearInterval(sweepTimer);
     clearInterval(retentionTimer);
     clearInterval(membershipTimer);
     clearInterval(referralTimer);
+    clearInterval(privacyTimer);
+    clearInterval(paymentTimer);
     server.close();
     await prisma.$disconnect();
     process.exit(0);

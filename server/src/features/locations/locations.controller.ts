@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ah } from '../../shared/asyncHandler';
 import { authenticate } from '../../middleware/auth';
-import { resolveDevice } from '../../shared/deviceScope';
+import { resolveDevice, resolveWritableDevice } from '../../shared/deviceScope';
 import { locationsService } from './locations.service';
 import {
   createSafeZoneSchema,
@@ -42,7 +42,7 @@ export async function listSafeZones(req: Request, res: Response) {
 /** POST /api/safe-zones */
 export async function createSafeZone(req: Request, res: Response) {
   const input = createSafeZoneSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.status(201).json({ success: true, safeZone: await locationsService.createZone(device, input) });
 }
 
@@ -50,14 +50,14 @@ export async function createSafeZone(req: Request, res: Response) {
 export async function updateSafeZone(req: Request, res: Response) {
   const { safeZoneId } = safeZoneIdSchema.parse(req.params);
   const patch = updateSafeZoneSchema.parse(req.body);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json({ success: true, safeZone: await locationsService.updateZone(device, safeZoneId, patch) });
 }
 
 /** DELETE /api/safe-zones/:safeZoneId */
 export async function removeSafeZone(req: Request, res: Response) {
   const { safeZoneId } = safeZoneIdSchema.parse(req.params);
-  const device = await resolveDevice(req);
+  const device = await resolveWritableDevice(req);
   res.json(await locationsService.removeZone(device, safeZoneId));
 }
 

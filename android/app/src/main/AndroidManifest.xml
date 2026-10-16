@@ -137,6 +137,57 @@
             android:label="@string/title_quiz"
             android:windowSoftInputMode="adjustResize" />
 
+        <!--
+          孩子端主页（规划 §3.2）：今天还剩多少 / 答题赚时长 / 求助家长。
+
+          入口是常驻通知上的「查看剩余时间」——桌面图标可能被家长隐藏、
+          桌面也可能在 §4.4 被学习模式接管，而通知栏始终在，是唯一靠得住的入口。
+        -->
+        <activity
+            android:name=".ui.ChildHomeActivity"
+            android:exported="false"
+            android:label="@string/title_child_home"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!--
+          知情说明页（规划 §3.4）：孩子随时能查「这台设备在做什么、谁在看、怎么解除」。
+
+          exported=false：只有本应用（孩子端主页）能拉起它。
+          不联网、不依赖绑定状态 —— 断网时也必须读得到，否则「知情」就成了一句空话。
+        -->
+        <activity
+            android:name=".ui.GuardianInfoActivity"
+            android:exported="false"
+            android:label="@string/title_guardian_info"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!--
+          学习模式专用桌面（规划 §4.4）：学习模式开着且本应用是设备所有者时，
+          家长端会把 HOME 意图钉到这一页（StudyHomeController）。
+
+          必须在这里声明 HOME 意图，系统才允许它被钉成默认桌面；没被钉住时
+          系统仍然用原来的桌面（默认值不会因为我们声明了就变），
+          少数设备可能因此弹过一次「选择桌面」——选系统桌面即可。
+
+          launchMode=singleTask + excludeFromRecents：它是桌面，不该出现在最近任务里，
+          也不该被叠出第二个实例。返回键在页面里被吃掉（见 StudyHomeActivity）。
+        -->
+        <activity
+            android:name=".ui.StudyHomeActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/title_study_home"
+            android:launchMode="singleTask"
+            android:stateNotNeeded="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <!-- 锁定遮罩：独立任务栈 + 不进最近任务，避免孩子通过多任务切走 -->
         <!--
           锁定页。lockTaskMode="if_whitelisted"：本应用被设为设备所有者并加入

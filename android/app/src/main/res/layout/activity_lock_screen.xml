@@ -39,6 +39,17 @@
             android:textSize="14sp"
             tools:text="作息：晚上睡觉" />
 
+        <!-- 还剩多久：能算准才给具体时间，算不准就如实说「由家长决定」 -->
+        <TextView
+            android:id="@+id/textUnlockAt"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:textColor="#FF9A9A9A"
+            android:textSize="13sp"
+            tools:text="预计 2小时10分钟后自动解锁" />
+
         <TextView
             android:id="@+id/textCountdown"
             android:layout_width="match_parent"
@@ -70,6 +81,31 @@
             android:text="@string/lock_hint"
             android:textColor="#FF8A8A8A"
             android:textSize="13sp" />
+
+        <!--
+          申请使用时间：孩子唯一的「开口」入口（规划 §3.1）。
+          刻意放在答题解锁**上面**：向家长开口比答题更像正常的亲子沟通，
+          而在此之前孩子除了等什么也做不了 —— 那正是冲突的来源。
+        -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonRequestTime"
+            style="@style/ButtonPrimary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="26dp"
+            android:text="@string/action_request_time" />
+
+        <TextView
+            android:id="@+id/textRequestStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="center"
+            android:lineSpacingExtra="3dp"
+            android:textColor="#FFB8B8B8"
+            android:textSize="13sp"
+            android:visibility="gone"
+            tools:text="已发给家长，等待回应…（30 分钟）" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonQuizUnlock"

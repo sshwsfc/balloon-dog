@@ -1,17 +1,23 @@
 import { Request, Response } from 'express';
 import {
   agentAppUsageSchema,
+  agentSosSchema,
   agentAuditRequestSchema,
   agentCallLogSchema,
   agentCommandResultSchema,
+  agentHealthSchema,
   agentHeartbeatSchema,
   agentLocationSchema,
   agentPollQuerySchema,
   agentRegisterSchema,
   agentSmsSchema,
+  agentTimeRequestSchema,
   auditRequestIdSchema,
+  timeRequestIdSchema,
 } from './devices.dto';
 import { devicesService } from './devices.service';
+import { agentTaskDoneSchema, taskIdSchema } from '../children/children.dto';
+import { childrenService } from '../children/children.service';
 import { commandsService } from './commands.service';
 import { devicesRepo } from './devices.repository';
 import { prisma } from '../../prisma';
@@ -59,6 +65,21 @@ export async function heartbeat(req: Request, res: Response) {
  * 一起唤醒去 claimNext —— 指令被写进空气，永久卡在 dispatched。
  * 详见 devices.notifier.ts 顶部注释。
  */
+/**
+ * POST /api/agent/health —— 设备端上报健康快照（规划 §1.1）。
+ *
+ * 挂在这里而不是 agentGaps 子路由：心跳与健康快照是同一个「设备活着并且状态如何」
+ * 的话题，放一起以后加字段时不容易漏掉另一半。
+ */
+export async function reportHealth(req: Request, res: Response) {
+  const input = agentHealthSchema.parse(req.body ?? {});
+  // 设备 token 里只有设备 id，通知要写到「哪一位家长」上，所以查一次归属。
+  // 未认领的设备（userId 为空）没有家长可通知，userId 传 0 让服务端跳过。
+  const device = await devicesRepo.findById(currentDeviceId(req));
+  const result = await devicesService.reportHealth(currentDeviceId(req), device?.userId ?? 0, input);
+  res.json(result);
+}
+
 export async function nextCommand(req: Request, res: Response) {
   const { wait } = agentPollQuerySchema.parse(req.query);
   const deviceId = currentDeviceId(req);
@@ -118,7 +139,12 @@ export async function reportLocation(req: Request, res: Response) {
  */
 export async function createAuditRequest(req: Request, res: Response) {
   const input = agentAuditRequestSchema.parse(req.body);
-  const result = await devicesService.createAuditRequest(currentDeviceId(req), input);
+  const auditDevice = await devicesRepo.findById(currentDeviceId(req));
+  const result = await devicesService.createAuditRequest(
+    currentDeviceId(req),
+    auditDevice?.userId ?? 0,
+    input,
+  );
   res.status(result.created ? 201 : 200).json({ id: result.id, status: result.status });
 }
 
@@ -126,6 +152,66 @@ export async function createAuditRequest(req: Request, res: Response) {
 export async function getAuditRequest(req: Request, res: Response) {
   const { id } = auditRequestIdSchema.parse(req.params);
   res.json(await devicesService.getAuditRequestStatus(currentDeviceId(req), id));
+}
+
+/**
+ * POST /api/agent/time-requests —— 孩子发起「申请加时 / 申请延后锁屏」（§3.1）。
+ *
+ * 幂等：同一台设备 + 同一个 kind 在去重窗口内已有 pending 时返回既有那条（200），
+ * 新申请返回 201。孩子端锁屏页可以放心重试。
+ */
+export async function createTimeRequest(req: Request, res: Response) {
+  const input = agentTimeRequestSchema.parse(req.body);
+  const requestDevice = await devicesRepo.findById(currentDeviceId(req));
+  const result = await devicesService.createTimeRequest(
+    currentDeviceId(req),
+    requestDevice?.userId ?? 0,
+    input,
+  );
+  res.status(result.created ? 201 : 200).json(result);
+}
+
+/**
+ * GET /api/agent/child-home —— 孩子端主页要的两件事（规划 §3.2）。
+ *
+ * 只回「这台设备是谁在守护」：绑定状态、设备名、家长称呼与手机号。
+ * 手机号是**家长自己的号码**，给这台设备是为了让孩子能打过去 ——
+ * 设备令牌本身就已经代表这台被绑定的设备，不存在越权读取别人的号码。
+ */
+export async function getChildHome(req: Request, res: Response) {
+  res.json(await devicesService.getChildHome(currentDeviceId(req)));
+}
+
+/**
+ * POST /api/agent/tasks/:taskId —— 孩子在自己的设备上勾掉（或取消）今日任务（规划 §5.2）。
+ *
+ * 任务必须属于**这台设备挂着的那个孩子**（childrenService 里校验）：
+ * 设备令牌不能拿着一个任务 id 去勾别人家孩子的清单。
+ */
+export async function setTaskDone(req: Request, res: Response) {
+  const { taskId } = taskIdSchema.parse(req.params);
+  const input = agentTaskDoneSchema.parse(req.body ?? {});
+  const device = await devicesRepo.findById(currentDeviceId(req));
+  if (!device) throw new NotFoundError('设备', currentDeviceId(req));
+  const task = await childrenService.setTaskDone(device, taskId, input.done);
+  res.json({ success: true, task });
+}
+
+/**
+ * POST /api/agent/sos —— 孩子点的求助（规划 §3.2）。
+ *
+ * 服务端做两件事：写一条设备事件（家长在动态里能看到「孩子发起了求助」），
+ * 发一条 danger 级站内通知。顺带把家长手机号回给设备，让孩子能立刻拨出去。
+ */
+export async function submitSos(req: Request, res: Response) {
+  const input = agentSosSchema.parse(req.body ?? {});
+  res.json(await devicesService.sos(currentDeviceId(req), input.message));
+}
+
+/** GET /api/agent/time-requests/:id —— 设备端轮询审批结果（含实际拿到的分钟数）。 */
+export async function getTimeRequest(req: Request, res: Response) {
+  const { id } = timeRequestIdSchema.parse(req.params);
+  res.json(await devicesService.getTimeRequestStatus(currentDeviceId(req), id));
 }
 
 /**

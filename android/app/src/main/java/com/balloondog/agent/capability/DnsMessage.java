@@ -3,6 +3,8 @@ package com.balloondog.agent.capability;
 import androidx.annotation.Nullable;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * DNS 报文的读与「伪造拒绝应答」（契约 §5）。
@@ -124,6 +126,97 @@ public final class DnsMessage {
         return response;
     }
 
+    /**
+     * 构造一条 A 记录查询（规划 §4.1 的直连阻断要用它自己解析黑名单域名）。
+     *
+     * <p>标准查询：{@code RD=1}、一条问题（QTYPE=A、QCLASS=IN），不带 EDNS。
+     * 域名按 DNS 的标签格式编成长度前缀，最后补一个 0 长度标签（根）。
+     *
+     * @return 查询报文字节；域名非法（空、超长、含空标签）时返回 null
+     */
+    @Nullable
+    public static byte[] buildQuery(@Nullable String host, int transactionId) {
+        if (host == null) return null;
+        String name = host.trim().toLowerCase(java.util.Locale.US);
+        while (name.endsWith(".")) name = name.substring(0, name.length() - 1);
+        if (name.isEmpty() || name.length() > 253) return null;
+        String[] labels = name.split("\\.", -1);
+        int length = HEADER_LENGTH + 1 + 4;
+        for (String label : labels) {
+            if (label.isEmpty() || label.length() > 63) return null;
+            length += 1 + label.length();
+        }
+        byte[] query = new byte[length];
+        query[0] = (byte) ((transactionId >> 8) & 0xFF);
+        query[1] = (byte) (transactionId & 0xFF);
+        query[2] = 0x01;                      // RD=1，要求递归
+        query[5] = 0x01;                      // QDCOUNT = 1
+        int offset = HEADER_LENGTH;
+        for (String label : labels) {
+            query[offset] = (byte) label.length();
+            offset++;
+            for (int i = 0; i < label.length(); i++) {
+                query[offset + i] = (byte) label.charAt(i);
+            }
+            offset += label.length();
+        }
+        query[offset] = 0;                    // 根标签
+        offset++;
+        query[offset + 1] = 0x01;             // QTYPE = A
+        query[offset + 3] = 0x01;             // QCLASS = IN
+        return query;
+    }
+
+    /**
+     * 从一条 DNS <b>应答</b>里取出所有 A 记录（IPv4 地址）。
+     *
+     * <p>用途：把「家长拦的那个域名」解析出来的地址加进隧道路由（规划 §4.1）——
+     * 孩子手里可能早就缓存了这个 IP，光靠 DNS 层回 NXDOMAIN 拦不住它。
+     *
+     * <p>只认 {@code TYPE=A(1)} 且 {@code CLASS=IN(1)} 且 {@code RDLENGTH=4} 的记录，
+     * 其余（AAAA / CNAME / OPT…）整条跳过。名字压缩指针按标准 2 字节处理。
+     *
+     * <p>报文不完整时<b>返回已经拿到的那些</b>，不抛异常：少拦一个 IP 比让整条链路
+     * 因为一个畸形包而停摆要好。
+     *
+     * @return A 记录地址列表（可能为空，永不为 null）
+     */
+    public static List<String> parseIpv4Answers(@Nullable byte[] message) {
+        List<String> addresses = new ArrayList<>();
+        if (message == null || message.length < HEADER_LENGTH) return addresses;
+        int questionCount = ((message[4] & 0xFF) << 8) | (message[5] & 0xFF);
+        int answerCount = ((message[6] & 0xFF) << 8) | (message[7] & 0xFF);
+        if (questionCount < 0 || questionCount > 8) return addresses;
+        if (answerCount <= 0 || answerCount > 64) return addresses;
+
+        int offset = HEADER_LENGTH;
+        for (int i = 0; i < questionCount; i++) {
+            offset = skipNameForAnswer(message, offset);
+            if (offset < 0) return addresses;
+            offset += 4; // QTYPE + QCLASS
+            if (offset > message.length) return addresses;
+        }
+
+        for (int i = 0; i < answerCount; i++) {
+            offset = skipNameForAnswer(message, offset);
+            if (offset < 0) return addresses;
+            if (offset + 10 > message.length) return addresses;
+            int type = ((message[offset] & 0xFF) << 8) | (message[offset + 1] & 0xFF);
+            int klass = ((message[offset + 2] & 0xFF) << 8) | (message[offset + 3] & 0xFF);
+            int rdLength = ((message[offset + 8] & 0xFF) << 8) | (message[offset + 9] & 0xFF);
+            offset += 10;
+            if (offset + rdLength > message.length) return addresses;
+            if (type == 1 && klass == 1 && rdLength == 4) {
+                addresses.add((message[offset] & 0xFF) + "."
+                        + (message[offset + 1] & 0xFF) + "."
+                        + (message[offset + 2] & 0xFF) + "."
+                        + (message[offset + 3] & 0xFF));
+            }
+            offset += rdLength;
+        }
+        return addresses;
+    }
+
     /** 跳过一个域名，返回它之后的偏移；非法返回 -1。 */
     private static int skipName(byte[] message, int offset) {
         while (offset < message.length) {
@@ -137,5 +230,13 @@ public final class DnsMessage {
             offset += 1 + length;
         }
         return -1;
+    }
+
+    /**
+     * 应答段里的名字跳过：与 {@link #skipName} 同口径，单独留一份是因为应答段的
+     * 名字<b>经常</b>用压缩指针（问题段基本不用），语义上分开更容易读。
+     */
+    private static int skipNameForAnswer(byte[] message, int offset) {
+        return skipName(message, offset);
     }
 }

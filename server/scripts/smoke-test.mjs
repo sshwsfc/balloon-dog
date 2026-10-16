@@ -190,6 +190,41 @@ async function main() {
   check('features.webBlock.blockedUrls 是数组', Array.isArray(features.body?.webBlock?.blockedUrls));
   check('features.quizUnlock 存在', Boolean(features.body?.quizUnlock));
 
+  // 网址拦截的条目可以是域名，也可以是 IP / IP 段（规划 §4.1：设备端会把它们
+  // 变成隧道路由，连「孩子手里已经有缓存 IP」那条路一起堵）。这里钉死归一化与拒绝口径：
+  // 域名归一化成主机名，IP/CIDR 原样留着，不是这两种形状的一律 400。
+  const blockDomain = await req('POST', '/features/web-block', {
+    token: parentToken,
+    body: { url: 'https://Gambling.com/lobby?x=1' },
+  });
+  check('加域名规则：归一化成主机名（去掉协议/路径/大小写）',
+    blockDomain.status === 200 && blockDomain.body?.url === 'gambling.com',
+    `实际 ${blockDomain.status} ${blockDomain.body?.url}`);
+  const blockIp = await req('POST', '/features/web-block', {
+    token: parentToken,
+    body: { url: '1.2.3.4' },
+  });
+  check('加 IP 规则：被接受（设备端据此加 /32 路由）',
+    blockIp.status === 200 && blockIp.body?.url === '1.2.3.4',
+    `实际 ${blockIp.status} ${blockIp.body?.url}`);
+  const blockCidr = await req('POST', '/features/web-block', {
+    token: parentToken,
+    body: { url: '10.0.0.0/8' },
+  });
+  check('加网段规则：被接受', blockCidr.status === 200 && blockCidr.body?.url === '10.0.0.0/8',
+    `实际 ${blockCidr.status} ${blockCidr.body?.url}`);
+  const blockBad = await req('POST', '/features/web-block', {
+    token: parentToken,
+    body: { url: '不是域名也不是 IP' },
+  });
+  check('既不是域名也不是 IP → 400', blockBad.status === 400, `实际 ${blockBad.status}`);
+  const cleanupDomain = await req('DELETE', '/features/web-block/gambling.com', { token: parentToken });
+  const cleanupIp = await req('DELETE', '/features/web-block/1.2.3.4', { token: parentToken });
+  const cleanupCidr = await req('DELETE', '/features/web-block/10.0.0.0%2F8', { token: parentToken });
+  check('清掉刚加的三条规则', cleanupDomain.status === 200 && cleanupIp.status === 200
+    && cleanupCidr.status === 200,
+    `实际 ${cleanupDomain.status} ${cleanupIp.status} ${cleanupCidr.status}`);
+
   const badFeature = await req('PUT', '/features', {
     token: parentToken,
     body: { feature: 'notARealFeature', enabled: true },

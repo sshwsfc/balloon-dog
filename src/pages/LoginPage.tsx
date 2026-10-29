@@ -64,14 +64,24 @@ export function LoginPage() {
   useEffect(() => stopPolling, [stopPolling])
 
   /**
-   * 处理微信回调重定向带回来的结果。
-   * 微信整页授权回来后，后端会把 token 拼在 /login?wx_token=... 上；
-   * 这里消费一次并立刻清掉 query，避免 token 留在地址栏与浏览器历史里。
+   * 处理微信回调带回来的结果。
+   *
+   * token 现在放在 **fragment**（`/login#wx_token=…`）：fragment 不会被发到服务端，
+   * 也就不会留在 Nginx 访问日志和 Referer 里。为了兼容旧链接，query 上的 `wx_token`
+   * 仍然认。消费后立刻把 fragment / query 都清掉，别把令牌留在地址栏与历史里。
    */
   useEffect(() => {
-    const wxToken = searchParams.get('wx_token')
-    const wxError = searchParams.get('wx_error')
+    const fromHash = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+    const wxToken = searchParams.get('wx_token') ?? fromHash.get('wx_token')
+    const wxError = searchParams.get('wx_error') ?? fromHash.get('wx_error')
     if (!wxToken && !wxError) return
+
+    const clearAddress = () => {
+      if (window.location.hash) {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search)
+      }
+      setSearchParams({}, { replace: true })
+    }
 
     const consume = async () => {
       if (wxToken) {
@@ -79,7 +89,7 @@ export function LoginPage() {
         try {
           await userApi.getProfile()
           toast.success(t('微信登录成功'))
-          setSearchParams({}, { replace: true })
+          clearAddress()
           navigate('/', { replace: true })
           return
         } catch {
@@ -88,7 +98,7 @@ export function LoginPage() {
       } else if (wxError) {
         toast.error(decodeURIComponent(wxError))
       }
-      setSearchParams({}, { replace: true })
+      clearAddress()
     }
     void consume()
   }, [searchParams, setSearchParams, navigate, t])
@@ -328,17 +338,20 @@ export function LoginPage() {
                   {t('联调模式：验证码')} <span className="font-mono font-medium">{devCodeHint}</span>{t('已自动填入（未配置短信通道时才会显示）')}</p>
               )}
 
-              {/* 密码 */}
-              <div className="flex items-center border border-gray-200 rounded-lg px-3 focus-within:border-[#07c160]">
-                <Lock className="w-4 h-4 text-gray-400" />
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder={mode === 'register' ? t('密码（至少 6 位）') : t('密码')}
-                  className="flex-1 px-2 py-3 text-sm outline-none bg-transparent"
-                />
-              </div>
+              {/* 密码：验证码登录这一档不显示 —— 那一档只认手机号 + 验证码，
+                  多一个空密码框只会让人以为还要填，提交时还会被当作填错。 */}
+              {mode !== 'sms' && (
+                <div className="flex items-center border border-gray-200 rounded-lg px-3 focus-within:border-[#07c160]">
+                  <Lock className="w-4 h-4 text-gray-400" />
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={mode === 'register' ? t('密码（至少 6 位）') : t('密码')}
+                    className="flex-1 px-2 py-3 text-sm outline-none bg-transparent"
+                  />
+                </div>
+              )}
 
               {mode === 'register' && (
                 <div className="flex items-center border border-gray-200 rounded-lg px-3 focus-within:border-[#07c160]">

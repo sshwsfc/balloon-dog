@@ -1,0 +1,9 @@
+# 构建上下文只需要源码与清单；这些东西进镜像有害无益
+node_modules
+dist
+uploads
+.env
+.env.*
+!.env.example
+*.log
+scripts/dev-only-*

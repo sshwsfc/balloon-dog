@@ -383,7 +383,10 @@ async function main() {
       check(refundAfterIssue.status === 409, '已开具发票的订单自助退款同样 → 409');
 
       const stats = await must('GET', '/admin/payments/stats', { token: adminToken });
-      check(stats.paidOrders >= 2, `收款统计里有已支付订单（${stats.paidOrders} 笔）`);
+      // 只断言「至少 1 笔」：这是本次跑出来确实已支付的那一单（step 10 的 order3）。
+      // 写成 >=2 就把「干净库上跑」当成了契约 —— 前两单在这个脚本里已经被退掉了，
+      // 干净库上永远只有 1 笔，那条断言会假红。
+      check(stats.paidOrders >= 1, `收款统计里有已支付订单（${stats.paidOrders} 笔）`);
       check(stats.refundedOrders >= 2, `退款统计里有已退款订单（${stats.refundedOrders} 笔）`);
       check(
         stats.byChannel.some((c) => c.channel === 'fake' && c.count >= 1),
@@ -406,7 +409,39 @@ async function main() {
     }
 
     // ----------------------------------------------------------
-    step('11. 清理');
+    step('11. 主动查单：回调丢了也能把钱找回来');
+
+    const syncOrder = await createOrder(parent.token, plan.code, 'fake');
+    const syncNo = syncOrder.order.orderNo;
+    const syncAmount = syncOrder.order.amountCents;
+    await must('POST', `/payments/orders/${syncNo}/pay`, { token: parent.token, body: {} });
+
+    // 渠道还没收到钱：查单要如实说「没付」，绝不能顺手开通
+    const notYet = await must('POST', `/payments/orders/${syncNo}/sync`, { token: parent.token, body: {} });
+    check(notYet.order.status === 'pending', '渠道未支付时查单不会开通会员', notYet.order.status);
+    check(notYet.changed === false, '没付钱时 changed=false（界面据此不弹成功）');
+    check(notYet.tradeState === 'NOTPAY', '查单结果原样带出渠道状态', notYet.tradeState);
+
+    // 模拟「用户已经在渠道付完钱，但异步通知根本没到」
+    await must('POST', '/payments/dev/fake-trade-paid', { token: parent.token, body: { orderNo: syncNo } });
+    const rescued = await must('POST', `/payments/orders/${syncNo}/sync`, { token: parent.token, body: {} });
+    check(rescued.order.status === 'paid', '回调丢失时，主动查单把钱找回来并结算', rescued.order.status);
+    check(rescued.changed === true, '救回来这一次 changed=true');
+    check(rescued.order.transactionId != null, '渠道流水号已落库（对账要用）');
+
+    const syncAgain = await must('POST', `/payments/orders/${syncNo}/sync`, { token: parent.token, body: {} });
+    check(syncAgain.changed === false, '重复查单是幂等的，不会重复加时');
+
+    const syncDetail = await must('GET', `/payments/orders/${syncNo}`, { token: parent.token });
+    check(syncDetail.events.some((e) => e.kind === 'query' && e.result === 'unpaid'), '查单留下了 unpaid 流水');
+    check(syncDetail.events.some((e) => e.kind === 'query' && e.result === 'paid'), '查单留下了 paid 流水');
+
+    // 越权：别人的订单查不了
+    const otherSync = await api('POST', `/payments/orders/${syncNo}/sync`, { token: stranger.token, body: {} });
+    check(otherSync.status === 404, '别人的订单查单 → 404（不告诉它存不存在）', `实际 ${otherSync.status}`);
+
+    // ----------------------------------------------------------
+    step('12. 清理');
 
     const adminLogin = await api('POST', '/admin/login', { body: { username: ADMIN_USER, password: ADMIN_PASSWORD } });
     if (adminLogin.ok) {

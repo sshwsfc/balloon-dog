@@ -192,20 +192,29 @@ export const authService = {
   /** 真实回调：code → openid → 登录，返回 token 供前端落地。 */
   async wechatCallback(rawState: string, code: string): Promise<{ token: string; redirectAfter: string }> {
     const { state, redirectAfter } = wechat.splitState(rawState);
-    const { openid } = await wechat.exchangeCodeForOpenid(code);
-    const token = await this.loginByWechatOpenid(state, openid);
+    const { openid, accessToken } = await wechat.exchangeCodeForOpenid(code);
+    // 微信内置浏览器是 snsapi_userinfo 授权，能拿到昵称/头像；PC 扫码拿不到。
+    // 拉资料失败不影响登录（fetchUserInfo 自己吞异常）。
+    const profile = accessToken ? await wechat.fetchUserInfo(accessToken, openid) : {};
+    const token = await this.loginByWechatOpenid(state, openid, profile);
     return { token, redirectAfter };
   },
 
   /** 按 openid 查/建用户并签发令牌，同时写回扫码会话。 */
-  async loginByWechatOpenid(state: string, openid: string): Promise<string> {
+  async loginByWechatOpenid(
+    state: string,
+    openid: string,
+    profile: { nickname?: string; headimgurl?: string } = {},
+  ): Promise<string> {
     let user = await authRepo.findByWechatOpenid(openid);
     if (!user) {
       user = await authRepo.create({
         wechatOpenid: openid,
         passwordHash: await randomPasswordHash(),
-        nickname: `微信用户${crypto.randomInt(0, 10_000).toString().padStart(4, '0')}`,
-        avatar: defaultAvatar(openid),
+        nickname:
+          profile.nickname?.trim() ||
+          `微信用户${crypto.randomInt(0, 10_000).toString().padStart(4, '0')}`,
+        avatar: profile.headimgurl?.trim() || defaultAvatar(openid),
       });
       logger.info({ msg: 'user registered via wechat', userId: user.id });
     }

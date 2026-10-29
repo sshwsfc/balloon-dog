@@ -15,6 +15,7 @@ import {
   FileText,
   Info,
   QrCode,
+  ReceiptText,
   RotateCcw,
   Sparkles,
   X,
@@ -34,6 +35,40 @@ import type {
   PurchasableTier,
   ReferralCoupon,
 } from '@/types'
+
+/**
+ * 在微信内置浏览器里调起 JSAPI 支付。
+ *
+ * 微信的 JSAPI 只能在微信客户端里用：页面上没有 `WeixinJSBridge` 就说明不在微信里
+ * （或者用户是用 PC 浏览器打开的），这时必须老实降级成扫码，而不是假装「正在调起」。
+ * 参数（appId / timeStamp / nonceStr / package / signType / paySign）全部由后端用
+ * 商户私钥签好，前端只负责递给微信 —— 私钥永远不下发到浏览器。
+ */
+type WeixinBridge = {
+  invoke: (api: string, params: Record<string, unknown>, done: (res: { err_msg?: string }) => void) => void
+}
+
+function invokeWechatJsapi(
+  payload: Record<string, unknown>,
+): Promise<'ok' | 'cancel' | 'fail' | 'no-bridge'> {
+  return new Promise((resolve) => {
+    const bridge = (window as unknown as { WeixinJSBridge?: WeixinBridge }).WeixinJSBridge
+    if (!bridge) {
+      resolve('no-bridge')
+      return
+    }
+    try {
+      bridge.invoke('getBrandWCPayRequest', payload, (res) => {
+        const msg = res?.err_msg ?? ''
+        if (msg === 'get_brand_wcpay_request:ok') resolve('ok')
+        else if (msg === 'get_brand_wcpay_request:cancel') resolve('cancel')
+        else resolve('fail')
+      })
+    } catch {
+      resolve('fail')
+    }
+  })
+}
 
 /**
  * 会员中心（`/membership`）。
@@ -107,6 +142,7 @@ export function MembershipPage() {
   const [refundReason, setRefundReason] = useState('')
   const [invoiceTarget, setInvoiceTarget] = useState<PaymentOrderView | null>(null)
   const [invoiceForm, setInvoiceForm] = useState({ title: '', taxNo: '', email: '' })
+  const [historyOpen, setHistoryOpen] = useState(false)
 
   // 邀请返现发的抵扣券。只在支付弹层打开时拉一次 —— 平时没必要带着这份数据。
   const [coupons, setCoupons] = useState<ReferralCoupon[]>([])
@@ -208,6 +244,16 @@ export function MembershipPage() {
     toast.success(t('支付成功，已开通{{v0}}', { v0: paid.order.periodLabel }))
   }
 
+  /** 支付确实成功后统一的收尾：刷新会员态与订单，收掉收银台。 */
+  const finishPaid = useCallback(async () => {
+    await refreshMembership()
+    await loadOrders({ silent: true })
+    setIntent(null)
+    setPayingPlan(null)
+    setCouponId(null)
+    toast.success(t('支付成功，会员已开通'))
+  }, [loadOrders, t])
+
   const handlePay = async () => {
     if (!payingPlan || !activeChannel || submitting) return
     setSubmitting(true)
@@ -231,9 +277,39 @@ export function MembershipPage() {
         await mockPayOrder(orderNo)
         return
       }
-      // 真渠道：把渠道返回的预支付信息显示出来（二维码 / 跳转参数）。
+
+      // 支付宝是 H5 收银台跳转：订单已经建好，直接整页带去支付宝。
+      // 回跳地址是 /membership（不能带自定义 query，支付宝网关会把 & 当重复参数），
+      // 回来之后按订单号轮询查单即可。
+      if (result.payment.mode === 'redirect') {
+        const redirectUrl = String(
+          (result.payment.payload as { redirectUrl?: string })?.redirectUrl ?? result.payment.codeUrl,
+        )
+        if (redirectUrl) {
+          await loadOrders({ silent: true })
+          window.location.href = redirectUrl
+          return
+        }
+      }
+
       setIntent({ orderNo, payment: result.payment })
       await loadOrders({ silent: true })
+
+      // 微信 JSAPI：参数已由后端签好，这里在微信里直接调起收银台。
+      // 不在微信里（电脑浏览器 / 普通手机浏览器）就退回二维码 ——
+      // 二维码是同一个订单的扫码链接，家长换手机扫一样能付。
+      if (result.payment.mode === 'jsapi') {
+        const outcome = await invokeWechatJsapi(result.payment.payload)
+        if (outcome === 'ok') {
+          await finishPaid()
+          return
+        }
+        if (outcome === 'no-bridge') {
+          toast.message(t('当前不在微信里，请用微信扫码支付'))
+        } else if (outcome === 'fail') {
+          toast.error(t('微信支付没有调起成功，请用微信扫码支付'))
+        }
+      }
     } catch (err: unknown) {
       toast.error(toUserMessage(err, t('支付失败，请稍后重试')))
       console.error('会员支付失败：', err)
@@ -243,24 +319,26 @@ export function MembershipPage() {
   }
 
   /**
-   * 「我已完成支付」：**只重新拉订单状态**，绝不自己把订单置为已支付 ——
-   * 钱到没到由渠道回调（`POST /api/payments/notify/:channel`）决定。
+   * 「核对支付结果」：**主动去渠道查单**，绝不自己把订单置为已支付。
+   *
+   * 与只读本地订单状态相比，这一步的价值是「回调丢了也能救」：渠道侧一旦是
+   * SUCCESS，后端就走与回调相同的 `applyPaidOrder()` 把钱认下来。
+   * 是不是真的付了钱，永远由渠道回答。
    */
   const handleCheckPaid = async () => {
     if (!intent || submitting) return
     setSubmitting(true)
     try {
-      const { order } = await paymentsApi.orderDetail(intent.orderNo)
-      if (order.status === 'paid') {
-        await refreshMembership()
-        await loadOrders({ silent: true })
-        setIntent(null)
-        setPayingPlan(null)
-        setCouponId(null)
-        toast.success(t('支付成功，会员已开通'))
+      const result = await paymentsApi.syncPayment(intent.orderNo)
+      if (result.order.status === 'paid') {
+        await finishPaid()
       } else {
         await loadOrders({ silent: true })
-        toast.message(t('还没有收到渠道的支付结果，稍等一会儿再试'))
+        toast.message(
+          result.tradeState
+            ? t('渠道还没有收到这笔钱（状态：{{v0}}），付完稍等一会儿再试', { v0: result.tradeState })
+            : t('还没有收到渠道的支付结果，稍等一会儿再试'),
+        )
       }
     } catch (err: unknown) {
       toast.error(toUserMessage(err, t('查询失败，请稍后重试')))
@@ -268,6 +346,41 @@ export function MembershipPage() {
       setSubmitting(false)
     }
   }
+
+  /**
+   * 收银台弹出来后自动对账（每 3 秒一次，最多 2 分钟）。
+   *
+   * 家长付完钱不会主动点按钮 —— 他们会等。这里替他们去渠道查：一旦渠道说 SUCCESS
+   * 就自动开通，省掉「付了钱、页面还让我点核对」的困惑。2 分钟后停止（不是取消订单），
+   * 之后仍可手动点「核对支付结果」。
+   */
+  useEffect(() => {
+    if (!intent) return
+    let cancelled = false
+    let tries = 0
+    const timer = window.setInterval(() => {
+      if (cancelled) return
+      tries += 1
+      void (async () => {
+        try {
+          const result = await paymentsApi.syncPayment(intent.orderNo)
+          if (cancelled) return
+          if (result.order.status === 'paid') {
+            window.clearInterval(timer)
+            await finishPaid()
+          } else if (tries >= 40) {
+            window.clearInterval(timer)
+          }
+        } catch {
+          // 渠道抖动 / 网络抖动：静默重试，不打扰正在付款的家长
+        }
+      })()
+    }, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [intent, finishPaid])
 
   const handleCancel = async (orderNo: string) => {
     if (submitting) return
@@ -354,6 +467,14 @@ export function MembershipPage() {
         <ArrowLeft className="w-5 h-5" />
       </Button>
       <h1 className="text-xl font-medium text-gray-900 flex-1">{t('会员中心')}</h1>
+      <button
+        type="button"
+        onClick={() => setHistoryOpen(true)}
+        className="mr-1 flex items-center rounded-lg px-2 py-1 text-xs text-gray-600 active:bg-gray-100"
+      >
+        <ReceiptText className="mr-1 h-4 w-4" />
+        {t('充值记录')}
+      </button>
       <HeaderRefreshButton
         onRefresh={async () => {
           await refreshMembership()
@@ -361,6 +482,116 @@ export function MembershipPage() {
         }}
       />
     </div>
+  )
+
+  /** 充值记录的列表体：正文不再占位，右上角按钮点开弹窗看。 */
+  const ordersList = (
+    <>
+      <p className="border-b border-gray-100 px-4 py-2.5 text-[11px] leading-relaxed text-gray-500">
+        {t('支付后 {{v0}} 天内可以自助退款；已经申请发票的订单要先冲红，请联系客服。', {
+          v0: catalog?.refundWindowDays ?? 7,
+        })}
+      </p>
+      {ordersLoading && orders.length === 0 ? (
+        <p className="px-4 py-6 text-center text-xs text-gray-400">{t('加载中...')}</p>
+      ) : orders.length === 0 ? (
+        <p className="px-4 py-6 text-center text-xs text-gray-400">{t('还没有充值记录')}</p>
+      ) : (
+        <div className="divide-y divide-gray-100">
+          {orders.map((order) => (
+            <div key={order.orderNo} className="px-4 py-3">
+              <div className="flex items-center">
+                <div className="flex-1 pr-3">
+                  <p className="text-sm text-gray-900">
+                    {t(order.tier === 'super' ? '超级会员' : '会员')} · {t(order.periodLabel)}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-gray-400">
+                    {formatDateTime(order.createdAt)} · {t(order.payChannelLabel)}
+                  </p>
+                  <p className="mt-0.5 font-mono text-[10px] text-gray-300">{order.orderNo}</p>
+                  {order.refundNo && (
+                    <p className="mt-0.5 font-mono text-[10px] text-gray-300">
+                      {t('退款单号')} {order.refundNo}
+                    </p>
+                  )}
+                </div>
+                <div className="text-right">
+                  <p className="text-sm text-gray-900">￥{trimYuan(order.amountCents)}</p>
+                  {/* 状态文案由服务端给（订单状态机只有一处定义），这里只上色 */}
+                  <p
+                    className={cn(
+                      'mt-0.5 text-[11px]',
+                      order.status === 'paid'
+                        ? 'text-[#07c160]'
+                        : order.status === 'pending' || order.status === 'refunding'
+                          ? 'text-amber-600'
+                          : 'text-gray-400',
+                    )}
+                  >
+                    {t(order.statusLabel)}
+                  </p>
+                  {order.invoice && (
+                    <p className="mt-0.5 text-[10px] text-gray-400">
+                      {t('发票')} · {t(order.invoice.statusLabel)}
+                    </p>
+                  )}
+                </div>
+              </div>
+  
+              {/* 这一单能做什么由服务端算（canPay / canRefund / 发票状态），
+                  前端不按状态自己猜 —— 猜错就是「按钮在但点了报错」。 */}
+              <div className="mt-2 flex flex-wrap gap-2">
+                {order.canPay && (
+                  <button
+                    type="button"
+                    onClick={() => void handleCancel(order.orderNo)}
+                    className="rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 active:bg-gray-50"
+                  >
+                    {t('取消订单')}
+                  </button>
+                )}
+                {order.canRefund && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRefundTarget(order)
+                      setRefundReason('')
+                    }}
+                    className="flex items-center rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 active:bg-gray-50"
+                  >
+                    <RotateCcw className="mr-1 h-3 w-3" />
+                    {t('申请退款')}
+                  </button>
+                )}
+                {order.status === 'paid' && !order.invoice && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInvoiceTarget(order)
+                      setInvoiceForm({ title: '', taxNo: '', email: '' })
+                    }}
+                    className="flex items-center rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 active:bg-gray-50"
+                  >
+                    <FileText className="mr-1 h-3 w-3" />
+                    {t('申请开票')}
+                  </button>
+                )}
+                {order.status === 'refunding' && (
+                  <span className="text-[11px] text-amber-600">
+                    {t('退款处理中：渠道确认后到账（未收到会自动重试）')}
+                  </span>
+                )}
+                {order.status === 'paid' && order.invoice?.status === 'pending' && (
+                  <span className="text-[11px] text-amber-600">
+                    {t('发票处理中：这段时间不能自助退款')}
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   )
 
   if (loading && !status) {
@@ -657,123 +888,33 @@ export function MembershipPage() {
             })}
           </div>
         </Card>
-
-        {/* ── 充值记录 ───────────────────────────────────────── */}
-        <Card className="overflow-hidden">
-          <div className="border-b border-gray-100 px-4 py-3">
-            <p className="text-sm font-medium text-gray-900">{t('充值记录')}</p>
-            <p className="mt-0.5 text-xs text-gray-500">
-              {t('支付后 {{v0}} 天内可以自助退款；已经申请发票的订单要先冲红，请联系客服。', {
-                v0: catalog?.refundWindowDays ?? 7,
-              })}
-            </p>
-          </div>
-          {ordersLoading && orders.length === 0 ? (
-            <p className="px-4 py-6 text-center text-xs text-gray-400">{t('加载中...')}</p>
-          ) : orders.length === 0 ? (
-            <p className="px-4 py-6 text-center text-xs text-gray-400">{t('还没有充值记录')}</p>
-          ) : (
-            <div className="divide-y divide-gray-100">
-              {orders.map((order) => (
-                <div key={order.orderNo} className="px-4 py-3">
-                  <div className="flex items-center">
-                    <div className="flex-1 pr-3">
-                      <p className="text-sm text-gray-900">
-                        {t(order.tier === 'super' ? '超级会员' : '会员')} · {t(order.periodLabel)}
-                      </p>
-                      <p className="mt-0.5 text-[11px] text-gray-400">
-                        {formatDateTime(order.createdAt)} · {t(order.payChannelLabel)}
-                      </p>
-                      <p className="mt-0.5 font-mono text-[10px] text-gray-300">{order.orderNo}</p>
-                      {order.refundNo && (
-                        <p className="mt-0.5 font-mono text-[10px] text-gray-300">
-                          {t('退款单号')} {order.refundNo}
-                        </p>
-                      )}
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm text-gray-900">￥{trimYuan(order.amountCents)}</p>
-                      {/* 状态文案由服务端给（订单状态机只有一处定义），这里只上色 */}
-                      <p
-                        className={cn(
-                          'mt-0.5 text-[11px]',
-                          order.status === 'paid'
-                            ? 'text-[#07c160]'
-                            : order.status === 'pending' || order.status === 'refunding'
-                              ? 'text-amber-600'
-                              : 'text-gray-400',
-                        )}
-                      >
-                        {t(order.statusLabel)}
-                      </p>
-                      {order.invoice && (
-                        <p className="mt-0.5 text-[10px] text-gray-400">
-                          {t('发票')} · {t(order.invoice.statusLabel)}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* 这一单能做什么由服务端算（canPay / canRefund / 发票状态），
-                      前端不按状态自己猜 —— 猜错就是「按钮在但点了报错」。 */}
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {order.canPay && (
-                      <button
-                        type="button"
-                        onClick={() => void handleCancel(order.orderNo)}
-                        className="rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 active:bg-gray-50"
-                      >
-                        {t('取消订单')}
-                      </button>
-                    )}
-                    {order.canRefund && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setRefundTarget(order)
-                          setRefundReason('')
-                        }}
-                        className="flex items-center rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 active:bg-gray-50"
-                      >
-                        <RotateCcw className="mr-1 h-3 w-3" />
-                        {t('申请退款')}
-                      </button>
-                    )}
-                    {order.status === 'paid' && !order.invoice && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setInvoiceTarget(order)
-                          setInvoiceForm({ title: '', taxNo: '', email: '' })
-                        }}
-                        className="flex items-center rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 active:bg-gray-50"
-                      >
-                        <FileText className="mr-1 h-3 w-3" />
-                        {t('申请开票')}
-                      </button>
-                    )}
-                    {order.status === 'refunding' && (
-                      <span className="text-[11px] text-amber-600">
-                        {t('退款处理中：渠道确认后到账（未收到会自动重试）')}
-                      </span>
-                    )}
-                    {order.status === 'paid' && order.invoice?.status === 'pending' && (
-                      <span className="text-[11px] text-amber-600">
-                        {t('发票处理中：这段时间不能自助退款')}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
       </div>
+
+      {/* ── 充值记录（右上角按钮弹窗） ─────────────────────── */}
+      {historyOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setHistoryOpen(false)}
+        >
+          <div
+            className="flex max-h-[80vh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-white"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+              <p className="text-base font-medium text-gray-900">{t('充值记录')}</p>
+              <button type="button" onClick={() => setHistoryOpen(false)} className="p-1">
+                <X className="h-5 w-5 text-gray-400" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto pb-1">{ordersList}</div>
+          </div>
+        </div>
+      )}
 
       {/* ── 模拟收银台 ─────────────────────────────────────── */}
       {payingPlan && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center">
-          <div className="w-full max-w-md rounded-t-2xl bg-white p-4 sm:rounded-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white p-4">
             <div className="flex items-center justify-between">
               <p className="text-base font-medium text-gray-900">{t('确认支付')}</p>
               <button
@@ -791,7 +932,10 @@ export function MembershipPage() {
             <div className="mt-3 rounded-xl bg-gray-50 p-3">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-gray-600">
-                  {t(payingPlan.tier === 'super' ? '超级会员' : '会员')} · {t(payingPlan.name)}
+                  {/* 套餐名里常常已经带档位（「会员 · 按月」），再拼一次就成了「会员 · 会员 · 按月」 */}
+                  {t(payingPlan.tier === 'super' ? '超级会员' : '会员') === t(payingPlan.name).split(' · ')[0]
+                    ? t(payingPlan.name)
+                    : `${t(payingPlan.tier === 'super' ? '超级会员' : '会员')} · ${t(payingPlan.name)}`}
                 </span>
                 <span className="text-gray-900">￥{trimYuan(payingPlan.originalCents)}</span>
               </div>
@@ -913,20 +1057,36 @@ export function MembershipPage() {
                   <QrCode className="mr-1.5 h-4 w-4 text-[#07c160]" />
                   {t('用{{v0}}完成支付', { v0: t(intent.payment.channelLabel) })}
                 </p>
-                {intent.payment.codeUrl && (
-                  <div className="mt-2">
-                    <QrBlock value={intent.payment.codeUrl} caption="扫码支付" size={176} />
-                  </div>
+                {intent.payment.mode === 'jsapi' ? (
+                  /* JSAPI：微信里已经直接调起过收银台（见 handlePay），没调起来
+                     就说明不在微信里，这时二维码才是家长真正能用的东西。 */
+                  intent.payment.codeUrl ? (
+                    <div className="mt-2">
+                      <QrBlock value={intent.payment.codeUrl} caption="用微信扫码支付" size={176} />
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-[11px] leading-relaxed text-gray-500">
+                      {t('请回到微信里完成支付，付完这一页会自动刷新。')}
+                    </p>
+                  )
+                ) : (
+                  intent.payment.codeUrl && (
+                    <div className="mt-2">
+                      <QrBlock value={intent.payment.codeUrl} caption="扫码支付" size={176} />
+                    </div>
+                  )
                 )}
                 <p className="mt-2 text-[11px] leading-relaxed text-gray-500">
-                  {t('支付完成后点下面的按钮核对结果。订单状态以渠道回调为准，没收到回调时不会开通。')}
+                  {t(
+                    '付完不用手动点：页面每几秒会主动向渠道核对一次，确认到账就自动开通。渠道回调丢失时也会靠这一步把钱找回来。',
+                  )}
                 </p>
                 <Button
                   className="mt-3 h-10 w-full bg-[#07c160] text-white hover:bg-[#06ad56]"
                   disabled={submitting}
                   onClick={handleCheckPaid}
                 >
-                  {submitting ? t('查询中...') : t('我已完成支付')}
+                  {submitting ? t('查询中...') : t('核对支付结果')}
                 </Button>
               </div>
             ) : (
@@ -947,8 +1107,8 @@ export function MembershipPage() {
 
       {/* ── 申请退款 ───────────────────────────────────────── */}
       {refundTarget && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center">
-          <div className="w-full max-w-md rounded-t-2xl bg-white p-4 sm:rounded-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white p-4">
             <p className="text-base font-medium text-gray-900">{t('申请退款')}</p>
             <p className="mt-1 text-xs text-gray-500">
               {t('订单 {{v0}}，可退 ￥{{v1}}', {
@@ -993,8 +1153,8 @@ export function MembershipPage() {
 
       {/* ── 申请开票 ───────────────────────────────────────── */}
       {invoiceTarget && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center">
-          <div className="w-full max-w-md rounded-t-2xl bg-white p-4 sm:rounded-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white p-4">
             <p className="text-base font-medium text-gray-900">{t('申请开票')}</p>
             <p className="mt-1 text-xs text-gray-500">
               {t('订单 {{v0}}，开票金额 ￥{{v1}}', {

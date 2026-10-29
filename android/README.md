@@ -1033,6 +1033,26 @@ echo "sdk.dir=$HOME/Library/Android/sdk" > local.properties
 调试签名固定放在 `android/keystore/debug.keystore`（密码 `android`，别名 `androiddebugkey`），
 不依赖 `~/.android/debug.keystore`，因此任何机器 / CI 上都能直接构建。
 
+**发布包内置的后端地址**（这条最容易出错）：`assembleRelease` 会把仓库根 `.env` 里的
+`VITE_SERVER_URL` 烘焙成 `BuildConfig.DEFAULT_BASE_URL`（补上 `/api`），线上是
+`https://bdog.gtsiot.cn/api`；`assembleDebug` 则固定 `http://10.0.2.2:4000`，好让
+`android:e2e` 那几套永远打本机。临时改地址用 `-Pballoon.serverUrl=https://xxx` 或
+环境变量 `BALLOON_SERVER_URL`，别去改源码。
+
+**发布流程固定四步**（`npm run android:copy-apk` 把产物拷进前端的下载目录）：
+
+```bash
+npm run android:release        # 1. 构建（自动用 android/keystore/release.keystore 签名）
+npm run android:copy-apk       # 2. 拷到 public/download/balloon-dog-agent.apk
+npm run deploy                 # 3. 发前端，顺手校验线上 APK 的 sha256
+# 4. 家长端「绑定孩子设备」里的二维码就是这个地址，扫了就能装
+```
+
+当前发布版本：`versionCode 2` / `versionName 1.0.1`（初版 1.0.0 内置的是旧 demo 域名）。
+升级时**必须**同时把 `versionCode` 加一，已经装了旧版的手机才会把它当成升级；
+另外 `AgentStore` 会把家长在设置页填过的地址存进 `shared_prefs`，这类手机升级后仍沿用
+旧地址，需要在设置页把「后端地址」改回 `https://bdog.gtsiot.cn/api`（或清除应用数据）。
+
 ### 3.3 安装与首次配置
 
 ```bash

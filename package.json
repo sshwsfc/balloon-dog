@@ -57,7 +57,16 @@
     "android:e2e:mode": "node android/scripts/e2e-mode.mjs",
     "e2e:responsive": "node scripts/browser-e2e.mjs --only=responsive",
     "e2e:ux": "node scripts/browser-e2e.mjs --only=ux",
-    "android:copy-apk": "node -e \"require('fs').copyFileSync('android/app/build/outputs/apk/release/app-release.apk','public/download/balloon-dog-agent.apk')\""
+    "deploy": "node scripts/deploy.mjs",
+    "deploy:rollback": "node scripts/deploy.mjs --rollback",
+    "smoke:live": "node scripts/smoke-deployed.mjs",
+    "e2e:all": "node scripts/e2e-matrix.mjs",
+    "e2e:matrix": "node scripts/e2e-matrix.mjs",
+    "e2e:matrix:ci": "node scripts/e2e-matrix.mjs --only=static,contract,ui",
+    "e2e:matrix:list": "node scripts/e2e-matrix.mjs --list",
+    "e2e:device:matrix": "node scripts/e2e-matrix.mjs --only=matrix --boot",
+    "android:copy-apk": "node -e \"require('fs').copyFileSync('android/app/build/outputs/apk/release/app-release.apk','public/download/balloon-dog-agent.apk')\"",
+    "check:payment-keys": "npm --prefix server run check:payment-keys --"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
@@ -76,6 +85,7 @@
     "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {
+    "@kesi/deploy": "file:../deploy",
     "@eslint/js": "^9.39.1",
     "@tailwindcss/vite": "^4.1.18",
     "@types/node": "^24.10.1",

@@ -12,6 +12,12 @@ export interface PaymentProviderDef {
   label: string;
   /** 一套渠道要能收钱，这些配置必须全部非空。缺任何一个都不能上线收款。 */
   requiredEnv: string[];
+  /**
+   * 二选一的配置组：每组里**至少有一个**非空即可，缺的时候把整组名字报给运维。
+   * 典型用途是微信支付的验签方式 —— 老商户用平台证书，新商户用微信支付公钥
+   * （微信已不再给新商户下发平台证书，见 payments.provider.ts 的注释）。
+   */
+  requiredAnyOf?: string[][];
   /** 家长端/后台展示的补充说明（例如「需要企业资质」）。 */
   note: string;
 }
@@ -49,9 +55,10 @@ export const PROVIDERS: PaymentProviderDef[] = [
       'WECHAT_PAY_API_V3_KEY',
       'WECHAT_PAY_SERIAL_NO',
       'WECHAT_PAY_PRIVATE_KEY',
-      'WECHAT_PAY_PLATFORM_CERT',
       'WECHAT_PAY_NOTIFY_URL',
     ],
+    // 验签二选一：平台证书（老商户）或微信支付公钥（新商户，2024 年起默认）
+    requiredAnyOf: [['WECHAT_PAY_PLATFORM_CERT', 'WECHAT_PAY_PLATFORM_PUBLIC_KEY']],
     note: '需要企业资质的微信支付商户号；回调必须公网 https 可达',
   },
   {
@@ -74,10 +81,19 @@ export const PROVIDERS: PaymentProviderDef[] = [
 export function missingEnvOf(key: PaymentChannel): string[] {
   const def = PROVIDERS.find((p) => p.key === key);
   if (!def) return [];
-  return def.requiredEnv.filter((name) => {
+  const missing = def.requiredEnv.filter((name) => {
     const value = (config as unknown as Record<string, unknown>)[name];
     return !(typeof value === 'string' && value.trim().length > 0);
   });
+  // 二选一的组：一个都没配才报，报的时候用「A 或 B」把两种合法写法都说清楚
+  for (const group of def.requiredAnyOf ?? []) {
+    const satisfied = group.some((name) => {
+      const value = (config as unknown as Record<string, unknown>)[name];
+      return typeof value === 'string' && value.trim().length > 0;
+    });
+    if (!satisfied) missing.push(group.join(' 或 '));
+  }
+  return missing;
 }
 
 export function isChannelConfigured(key: PaymentChannel): boolean {

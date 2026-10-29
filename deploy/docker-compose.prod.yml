@@ -1,0 +1,100 @@
+# Balloon Dog 生产环境编排（3 个容器 + 现有边缘 nginx）
+#
+#   web  ──(:80/:443，已有容器)──┬─ /api/ → bdog-server:4000
+#                                └─ /     → bdog-web:80
+#
+# 为什么一个宿主端口都不发布：
+#   * 这台机器的 4000 已经是 kesi-server、5432 是 gtsiot-postgres、80/443 是 web，
+#     再抢端口只会把现有站点弄挂；
+#   * 三个容器都挂到已有的外部网络 app_backend 上，边缘 nginx 用**容器名**反代
+#     （现有 gtsiot / kesi 两个站点就是这个做法）。
+#
+# 部署位置：/opt/app/bdog/docker-compose.yml（由 scripts/deploy.mjs 上传）
+# 启动：    docker compose -p bdog up -d
+
+# 不写顶层 `name:` —— 服务器上的 docker-compose 是 v2.2.2，它不认识这个键（2.3.3+ 才支持），
+# 会直接报「Additional property name is not allowed」。项目名统一用 `-p bdog` 传。
+
+services:
+  bdog-postgres:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/postgres:16-alpine
+    container_name: bdog-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-balloon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必须设置}
+      POSTGRES_DB: ${POSTGRES_DB:-balloon_dog}
+      TZ: Asia/Shanghai
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /opt/app/bdog/pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+    # 不发布端口：只有同网络的 bdog-server 需要它
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-balloon} -d ${POSTGRES_DB:-balloon_dog}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: '2'
+
+  bdog-server:
+    image: bdog-server:${BDOG_SERVER_TAG:-latest}
+    container_name: bdog-server
+    restart: unless-stopped
+    depends_on:
+      bdog-postgres:
+        condition: service_healthy
+    env_file:
+      - /opt/app/bdog/.env.prod
+    environment:
+      NODE_ENV: production
+      PORT: '4000'
+      TZ: Asia/Shanghai
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      # 照片 / 录音 / 截屏。备份脚本也在这里做增量。
+      - /opt/app/bdog/uploads:/app/uploads
+    networks:
+      - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: '3'
+
+  bdog-web:
+    image: nginx:1.25.0
+    container_name: bdog-web
+    restart: unless-stopped
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      # 静态产物：挂**整个 releases 目录**，nginx 的 root 指向里面的 current 软链。
+      # 换版只换软链（回滚也是这样），容器不用重启；如果直接挂 current，
+      # Docker 会在启动时把软链解析成 inode，换链后仍看旧目录（删旧版就变成空目录 → 403）。
+      - /opt/app/bdog/releases:/usr/share/nginx/html:ro
+      - /opt/app/bdog/nginx/ballondog-web.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - backend
+    healthcheck:
+      # nginx:1.25.0 里没有 wget，只有 curl —— 用错工具会让容器一直卡在 health: starting
+      test: ['CMD-SHELL', 'curl -fsS -o /dev/null http://127.0.0.1/ || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: '2'
+
+networks:
+  backend:
+    external: true
+    name: app_backend

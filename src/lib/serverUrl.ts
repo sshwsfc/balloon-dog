@@ -2,7 +2,7 @@
  * 「对外访问基址」（serverUrl）的唯一出处。
  *
  * 家长端页面、后端 `/api`、孩子端安装包下载都挂在**同一个域名**下（由反向代理
- * 统一入口，例如 https://ballondog.hd.takin.cc），这个域名在构建期由
+ * 统一入口，线上是 https://bdog.gtsiot.cn），这个域名在构建期由
  * `VITE_SERVER_URL` 注入，配置写在仓库根目录的 `.env`（模板 `.env.example`）。
  *
  * 为什么不直接用 `window.location.origin`：
@@ -21,7 +21,7 @@
 const CONFIGURED_SERVER_URL = (import.meta.env.VITE_SERVER_URL ?? '').trim().replace(/\/+$/, '')
 
 /**
- * 对外基址，形如 `https://ballondog.hd.takin.cc`（**不带**末尾斜杠）。
+ * 对外基址，形如 `https://bdog.gtsiot.cn`（**不带**末尾斜杠）。
  *
  * 拼接时一律写成 `${serverUrl()}/path`。
  */

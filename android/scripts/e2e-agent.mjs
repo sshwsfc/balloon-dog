@@ -431,7 +431,18 @@ async function fetchMediaBytes(relativeUrl) {
   // 没配时是 /api/media/... 这样的相对路径 —— 两种都要能取。
   // 直接拼接会把 absolute 变成 http://localhost:4000https://... 整个套件当场中断。
   const origin = API_BASE.replace(/\/api$/, '')
-  const target = /^https?:\/\//i.test(relativeUrl) ? relativeUrl : origin + relativeUrl
+  let target = /^https?:\/\//i.test(relativeUrl) ? relativeUrl : origin + relativeUrl
+  // 服务端配了 PUBLIC_BASE_URL 时会签发对外的绝对地址（本机 server/.env 就配了
+  // https://ballondog.hd.takin.cc）。本地跑 e2e 时那个域名指向的是另一份部署，
+  // 刚上传的文件根本不在那儿 —— 取字节时改走 API 源站：签名只覆盖 mediaId + 过期
+  // 时间，与 host 无关，所以改源站不会放过「签名失效 / 文件丢失」，只避免因为
+  // DNS 指向别处而假红。改写过就在日志里说一声，别让人以为 URL 是本地绝对地址。
+  const targetUrl = new URL(target)
+  const apiUrl = new URL(origin)
+  if (targetUrl.origin !== apiUrl.origin) {
+    target = apiUrl.origin + targetUrl.pathname + targetUrl.search
+    console.log(`  \u001b[90m\u00b7 签名 URL 指向 ${targetUrl.origin}，本地取字节改走 ${apiUrl.origin}\u001b[0m`)
+  }
   const res = await fetch(target)
   const buffer = Buffer.from(await res.arrayBuffer())
   return { status: res.status, contentType: res.headers.get('content-type'), bytes: buffer }
@@ -1166,18 +1177,38 @@ async function main() {
     check(relockedForEmergency.ok, '重启后重新锁定，随机系统密码再次生效（应急解锁的前提）')
     await sleep(3000)
 
-    // 应急解锁：不需要网络，输入本机应急密码即可恢复
-    await tapByText('应急解锁')
-    await sleep(1500)
-    adbOrThrow('shell', 'input', 'text', '135790')
-    await sleep(500)
-    await tapByText('解锁')
-    const emergencyOk = await waitFor(async () => {
-      const log = agentLog()
-      return log.includes('已通过应急密码解除锁定') && '应急解锁成功'
+    // 应急解锁：不需要网络，输入本机应急密码即可恢复。
+    // 这一档会把系统锁屏密码改掉，系统 keyguard 可能盖在应用锁屏之上 —— 先把它收掉，
+    // 再确认「应急解锁」入口真的在屏幕上。之前这里盲点按钮，密码被打进系统键盘，
+    // 失败信息只有一句「没看到日志」，没人能判断到底是产品坏了还是点错了。
+    adb('shell', 'wm', 'dismiss-keyguard')
+    const emergencyEntry = await waitFor(async () => {
+      const ui = await dumpUi()
+      return ui.includes('应急解锁') && 'entry-visible'
     }, { timeoutMs: 60_000, intervalMs: 3000 })
-    check(emergencyOk.ok, '应急密码可离线解锁，并清除随机锁屏密码',
-      emergencyOk.ok ? '' : '未在日志中看到应急解锁成功')
+    const emergencyUi = emergencyEntry.ok ? '' : (await dumpUi()).replace(/\s+/g, ' ').slice(0, 240)
+    check(emergencyEntry.ok, '锁屏页上有「应急解锁」入口（强管控保险），离线可用',
+      emergencyEntry.ok ? '' : `当前屏幕没有这个入口；UI 摘要：${emergencyUi}`)
+
+    if (emergencyEntry.ok) {
+      await tapByText('应急解锁')
+      const emergencyDialog = await waitFor(async () => {
+        const ui = await dumpUi()
+        return ui.includes('请输入家长设置的应急密码') && 'dialog-open'
+      }, { timeoutMs: 15_000, intervalMs: 1500 })
+      check(emergencyDialog.ok, '应急解锁弹框打开，且有离线密码输入框')
+      if (emergencyDialog.ok) {
+        adbOrThrow('shell', 'input', 'text', '135790')
+        await sleep(500)
+        await tapByText('解锁')
+        const emergencyOk = await waitFor(async () => {
+          const log = agentLog()
+          return log.includes('已通过应急密码解除锁定') && '应急解锁成功'
+        }, { timeoutMs: 60_000, intervalMs: 3000 })
+        check(emergencyOk.ok, '应急密码可离线解锁，并清除随机锁屏密码',
+          emergencyOk.ok ? '' : '未在日志中看到应急解锁成功')
+      }
+    }
   } else {
     ok('跳过：需要设备所有者权限')
   }

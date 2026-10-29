@@ -112,6 +112,15 @@ const schema = z.object({
    * 「已支付」回调，所以宁可让回调 503，也不放过未验签的通知。
    */
   WECHAT_PAY_PLATFORM_CERT: z.string().default(''),
+  /**
+   * 微信支付公钥（PEM）。**公钥模式**商户（2024 年后新申请的基本都是这一种）用它验签，
+   * 微信已经不给这类商户下发平台证书了 —— `/v3/certificates` 会直接回
+   * `RESOURCE_NOT_EXISTS：无可用的平台证书，请在商户平台-API安全申请使用微信支付公钥`。
+   * 公钥文件在商户平台「API 安全 → 微信支付公钥」处下载（pub_key.pem），与公钥 ID 一起下发。
+   */
+  WECHAT_PAY_PLATFORM_PUBLIC_KEY: z.string().default(''),
+  /** 微信支付公钥 ID，形如 `PUB_KEY_ID_…`；回调头 `Wechatpay-Serial` 与它一致时用公钥验签 */
+  WECHAT_PAY_PLATFORM_PUBLIC_KEY_ID: z.string().default(''),
   /** 支付结果通知地址（必须 https 且公网可达） */
   WECHAT_PAY_NOTIFY_URL: z.string().default(''),
   /** 支付宝 appid */
@@ -122,6 +131,15 @@ const schema = z.object({
   ALIPAY_PUBLIC_KEY: z.string().default(''),
   ALIPAY_NOTIFY_URL: z.string().default(''),
   ALIPAY_GATEWAY: z.string().default('https://openapi.alipay.com/gateway.do'),
+  /**
+   * 服务商代调用令牌（第三方应用才有）：`app_auth_token`。
+   *
+   * 我们的 appid 若建在服务商账号下，直接调 `alipay.trade.*` 会被网关甩到
+   * `appAssign.htm`（商户授权页）—— 那不是签名错，是「这个应用还没被商户授权」。
+   * 商户扫码授权后拿到的就是这串 token，随每个请求一起带上即可。
+   * 自研应用不需要它，留空即可。
+   */
+  ALIPAY_APP_AUTH_TOKEN: z.string().default(''),
   /**
    * **仅用于自动化测试**的假支付渠道：不联网、不签名，把「预支付载荷」原样回给调用方，
    * 回调签名简单地取 md5。生产环境（NODE_ENV=production）下会被硬拒 ——

@@ -890,7 +890,7 @@ npm run server:e2e:health      # 健康快照 → 缺口透传 → 未知不猜 
 npm run server:e2e:device-members # 家庭成员与角色：邀请 / 升管理员 / 移除 / 上限 / 只读成员每个写入口 403，67 项
 npm run server:e2e:children    # 孩子档案与今日任务：档案 CRUD / 年龄现算 / 设备整组替换 / 任务勾选，74 项
 npm run server:e2e:privacy     # 合规留痕：同意版本与重签 / 撤回即停监控并删设备记录 / 注销冷静期与真删 / 导出，76 项
-npm run server:e2e:payments    # 支付管线：下单 → 回调验签与幂等 → 退款（自助/后台）→ 开票 → 后台统计，82 项（自带假渠道后端）
+npm run server:e2e:payments    # 支付管线：下单 → 回调验签与幂等 → 退款（自助/后台）→ 主动查单 → 开票 → 后台统计，92 项（自带假渠道后端）
 npm run server:e2e:flags       # 运行时灰度开关：代码默认值 / 稳定哈希放量 / 白名单 / 接进支付与退款路径 / reset / 留痕，45 项
 npm run server:e2e:alerts      # 后台告警大盘：五条规则 / 分母为 0 是 null / 三值一致 / 改阈值只影响触发 / 确认不放行，65 项
 npm run server:e2e:tickets     # 客服工单：提交 → 越权 404 → 分派与回复 → 关闭后不可回 → 入口开关，69 项
@@ -1162,6 +1162,7 @@ npm run seed                         # 重新灌入干净的演示数据
 | GET | `/api/payments/orders` | 自己的订单（含能否退款 / 发票状态，家长端不按状态猜） |
 | GET | `/api/payments/orders/:orderNo` | 单张订单（含 `events` 事件流） |
 | POST | `/api/payments/orders/:orderNo/pay` | 向渠道下单，返回 `prepayId` / `codeUrl` / `mode` |
+| POST | `/api/payments/orders/:orderNo/sync` | **主动查单对账**：回调丢了也能把钱找回来（`changed` 表示这次是否真的结算） |
 | POST | `/api/payments/refunds` | 自助退款（退款窗口内、未申请发票、非 `refunding`） |
 | GET | `/api/payments/refunds` | 自己的退款单 |
 | POST / GET | `/api/payments/invoices` | 申请开票 / 查自己的发票 |
@@ -1171,15 +1172,41 @@ npm run seed                         # 重新灌入干净的演示数据
 | POST | `/api/admin/payments/refunds` | 后台：人工退款（家长超窗口、或渠道回调丢失时） |
 | GET | `/api/admin/payments/refunds`、`/invoices`、`PATCH /invoices/:invoiceId` | 后台：退款单、发票审核（`issued` 必须填发票号） |
 
+**密钥形态要能读**：环境变量里的 PEM 常常被写成一行（`\n` 转义），而支付宝密钥工具导出的
+私钥/公钥**只有裸 base64**（没有 `-----BEGIN …-----` 头）。`payments.keys.ts` 的 `keyObject()`
+两种形态都接受（私钥试 PKCS#8 再试 PKCS#1，公钥试 SPKI 再试 PKCS#1）。不这么做的话，
+`crypto.sign()` 会抛 `DECODER routines::unsupported` —— 渠道目录却仍显示 `configured: true`，
+表现就是「家长点支付直接报错」。上线前用 `npm run check:payment-keys` 自检（`npm run deploy`
+的前置步骤里也会跑），它真的把密钥读一遍、签一次、验回来。
+
+**渠道侧没签约要在家长端说人话**：支付宝的「应用没签约手机网站支付 / 没拿到接口授权」
+不会在签名阶段暴露，网关收下请求后才吐 `insufficient-isv-permissions` 白页或把用户甩到
+`appAssign.htm` 授权页。`AlipayProvider.cashierProblem()` 在下单那一刻用收银台 URL
+自己探一次，只认已知的错误特征。签约是**按产品分别签**的，所以按「手机网站支付
+（`wap.pay`）→ 电脑网站支付（`page.pay`）」两个产品各造一张链接依次探：哪张能进收银台
+就用哪张（`page.pay` 是 saas 项目一直在用的那个产品）；两张都进不去才回一句中文 `503`，
+并把两个产品各自的真实拒绝原因附在括号里。探测本身超时或网络异常一律放行，绝不因为
+探测失败而挡住真实支付。
+
+**第三方应用要带 `app_auth_token`**：如果 appid 建在服务商账号下（网关把你甩到
+`appAssign.htm` 就是这种情况），每个 `alipay.trade.*` 请求都必须带商户扫码授权后拿到的
+`ALIPAY_APP_AUTH_TOKEN`，否则永远停在授权页 —— 这时签名、密钥、时间戳全对也没用。
+自研应用留空即可。
+
 **渠道没配就不装成功**。`payments.constants.ts` 的 `missingEnvOf()` / `isChannelConfigured()` 是唯一的判据（`payments.provider.ts` 里另有 `providerReady` / `providerMissing` / `requireProvider` 做同一件事的服务端封装）：缺凭据时
 `createPayment` 返回 `mode: 'mock'`（仅在 `MEMBERSHIP_MOCK_PAY` 打开且非生产时）或
 `503` 并**列出缺哪几个环境变量**；`catalog.notice` 同一句话也写给家长端看。测试渠道
 （`PAY_CHANNEL_FAKE`，仅测试环境、要求 `PAYMENT_FAKE_PROVIDER=true`）走完整的
 下单 / 回调 / 退款管线但不联网：它就是 `server:e2e:payments` 的被测对象。
 
-**回调是唯一的真相来源**：`POST /api/payments/notify/:channel` 校验签名（微信 HMAC、
-支付宝 RSA 占位）→ 找到订单 → 核对渠道与金额 → `membership.service.applyPaidOrder()` 置为
-已支付。签名错、金额不符、订单不存在、渠道没配都会记一条 `PaymentEvent`（`bad_signature`
+**回调不是唯一的进账路径**：`POST /api/payments/orders/:orderNo/sync` 主动向渠道查单，
+渠道侧已 `SUCCESS` 就走**与回调完全同一条** `applyPaidOrder()` 结算（支付宝的同步回跳、
+网络抖动丢掉的异步通知都靠它把订单救回来）。家长端收银台打开后每 3 秒自动对账一次。
+
+**回调是结算的起点**：`POST /api/payments/notify/:channel` 校验签名（微信 APIv3
+`WECHATPAY2-SHA256-RSA2048`，验签材料优先用「微信支付公钥」、回退平台证书；支付宝
+RSA2 同步/异步通知两种签名串规则都接受）→ 找到订单 → 核对渠道与金额 →
+`membership.service.applyPaidOrder()` 置为已支付。签名错、金额不符、订单不存在、渠道没配都会记一条 `PaymentEvent`（`bad_signature`
 / `amount_mismatch` / `unknown_order` / …）并**不改变订单状态**，方便事后对账。同一个
 `transactionId` 重复回调是幂等的：不会重复开会员，也不会把 `expiresAt` 再往后推。
 
@@ -1193,12 +1220,14 @@ npm run seed                         # 重新灌入干净的演示数据
 **必须**带 `invoiceNo`（zod refine）。`pending` 与 `issued` 都拦住自助退款，文案提示
 「先冲红」——发票已开而钱退了是财务上的漏洞。
 
-**验证**：`npm run server:e2e:payments`（82 项，自带 :4102 后端 + 假渠道，不需要
+**验证**：`npm run server:e2e:payments`（92 项，自带 :4102 后端 + 假渠道，不需要
 `server:dev`，测完自行删掉订单）。覆盖：目录实况与「未配置」话术、未配置渠道下单 503 与
 缺失变量名、假渠道全流程下单 → 坏签名 401 → 金额不符 400 → 渠道不符 400 → 正确回调开通
 → 重复回调幂等、别人的订单一律 404、自助退款与会员收回、超窗口 403 与后台人工退款、
-发票 `pending` 挡退款 / `issued` 必须填号、后台统计与事件流。**不测**真实微信/支付宝网络
-调用（没有凭据），`alipay` 适配层是对接位而非可用实现，已在下面「已知边界」写明。
+发票 `pending` 挡退款 / `issued` 必须填号、后台统计与事件流。**不测**真实微信/支付宝的网络
+调用（本机没有可用凭据）：两个渠道的适配层都是完整实现，但它们能不能真的收到钱取决于
+商户平台侧的签约与授权 —— 这一层只能靠 `npm run check:payment-keys -- --network` 和线上
+真实支付来验证。
 
 ## 后台运营：告警大盘 / 灰度开关 / 客服工单（规划 §5.5）
 

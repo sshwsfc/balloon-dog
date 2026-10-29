@@ -43,7 +43,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   children: 74, child profiles + daily tasks, age computed from the birth year, cross-account reads 404;
   privacy: 76, consent versioning + export + deletion, and the rule that withdrawing consent or deleting
   the account **deletes the device rows** (plus the files on disk) rather than nulling `userId`, because
-  device-owned data is archived by `deviceId`; payments: 82, the order → notify → refund → invoice
+  device-owned data is archived by `deviceId`; payments: 92, the order → notify → sync → refund → invoice
   pipeline driven through a fake provider on its own :4102 backend, because the real WeChat/Alipay
   channels have no merchant credentials here and are reported as `未配置`; flags: 45, the runtime
   roll-out switches driven on their own :4103 backend — a missing row means the **code default** rather
@@ -69,7 +69,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   params so the English UI never shows an interpolated Chinese sentence. WeChat service-account template
   messages are the one real out-of-app channel (env-gated, delivery table with a 3-attempt retry cap);
   vendor push is reported as **not applicable** rather than offered as a dead switch.
-- `npm run e2e` - Browser end-to-end test for both SPAs (200 checks: parent app 120 + admin 80) via CDP-driven headless Chrome;
+- `npm run e2e` - Browser end-to-end test for both SPAs (200 checks: parent app 120 + admin 80; the parent count is data-dependent — 109 with no bound device, 120 with one, so never treat it as a hard baseline) via CDP-driven headless Chrome;
   targets `http://localhost:2727` by default, so have `npm run preview:all` running (override with
   `APP_URL=http://localhost:5173` to run against the dev server instead).
   `--only=parent|admin|responsive|ux` runs one suite;
@@ -79,7 +79,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   UI and session robustness. Running
   `e2e:responsive` requires a raised `RATE_LIMIT_MAX` (see `server/.env.example`) — it peaks at
   300+ requests/minute and a 429 otherwise shows up as a bogus "logged out" failure.
+- `npm run e2e:matrix` - 分层执行器（`scripts/e2e-matrix.mjs`，机型矩阵 `scripts/device-matrix.json`）：
+  L0 静态 / L1 契约 / L2 界面 / L3 设备逐层串行跑，产物 `artifacts/e2e/<runId>/`。
+  `npm run e2e:matrix:ci` 只跑不需要手机的三层，`npm run e2e:device:matrix` 逐个起停模拟器跑全矩阵。
+  用例清单与执行契约见 [`docs/PLAN-e2e-automation.md`](docs/PLAN-e2e-automation.md)。
 - No frontend unit-test framework is configured.
+
+### Deployment
+
+线上 **https://bdog.gtsiot.cn**（`43.137.2.132`，docker compose）。完整手册：
+[`docs/PLAN-deploy.md`](docs/PLAN-deploy.md)。
+
+- `npm run deploy` - 构建前端 → 服务器上构建后端镜像 → rsync 到 `/opt/app/bdog/releases/<tag>` →
+  原子换 `current` 软链 → `docker-compose -p bdog up -d` → 健康检查 → 冒烟 → 清理（各留 3 份）。
+  `--dry-run` / `--skip-web` / `--skip-image` / `--build-apk` / `BUILD_ON=local` 见 PLAN-deploy.md。
+- `npm run check:payment-keys [-- --network]` - 支付密钥自检：把微信/支付宝私钥真的读一遍、签一次
+  （支付宝工具导出的**裸 base64** 与 PEM 两种形态都接受），`--network` 额外打一次真网关；
+  `npm run deploy` 前置步骤会自动跑。
+- `npm run deploy:rollback` - release 软链与镜像 tag 一起回滚。
+- `npm run smoke:live` - 无头 Chrome 线上冒烟（渲染 / 控制台 / `/api` 反代 / APK 魔数）；
+  `SMOKE_PHONE` + `SMOKE_PASSWORD` 可带登录，`SMOKE_SHOT` 存截图。
+- 服务器上 **不要新增宿主端口**：三容器走外部网络 `app_backend`，边缘 nginx 按容器名反代。
+- 生产不跑 `db:seed`，超管用 `server/scripts/bootstrap-admin.mjs`。
+- 基础镜像用 bullseye：宿主 Docker 19.03 的 seccomp 与 bookworm 里的 node 冲突（会 abort），
+  `db.debian.org` 也不通，所以运行时镜像不跑 `apt-get`。
 
 ## Internationalization
 
@@ -184,6 +207,7 @@ These encode fixes for bugs the original mock server had — do not reintroduce 
 - `/` - [HomePage](src/pages/HomePage.tsx) - device overview, feature toggles, command history, media
 - `/location` - [LocationPage](src/pages/LocationPage.tsx) - location trail and safe zones
 - `/profile` - [ProfilePage](src/pages/ProfilePage.tsx) - account and device list
+- `/profile/edit` - [ProfileEditPage](src/pages/ProfileEditPage.tsx) - 个人信息：昵称 / 邮箱（空串表示清空）、手机号（未绑定时内联绑定，验证码用途 `bind`）、修改密码（原密码 + 新密码 ×2）。**改密码接口用错原密码返回 401**，`api.changePassword` 带 `skipUnauthorizedHandler`，否则会被全局 401 逻辑当成令牌失效踢回登录页
 - `/devices` - [DeviceManagePage](src/pages/DeviceManagePage.tsx) - bind/select/unbind devices
 - `/quiz-unlock` - [QuizUnlockPage](src/pages/QuizUnlockPage.tsx) - quiz config, stats, records
 - `/membership` - [MembershipPage](src/pages/MembershipPage.tsx) - 会员档位、动态报价、收银台；**支付渠道实况完全来自 `GET /api/payments/catalog`**（未配置就如实显示缺哪个环境变量，不画扫不出来的二维码），已支付订单可自助退款（窗口内）与申请开票

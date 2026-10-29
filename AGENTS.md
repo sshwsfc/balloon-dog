@@ -137,7 +137,7 @@ architecture, full API reference, and the admin/auth design.
   coupon redemption on membership orders, and the admin stats/rules/config/risk endpoints. It
   **rewrites the activity config and the reward tiers to the platform defaults at both the start and
   the end**, because an aborted run used to leave a paused activity behind and poison the next run.
-- `npm run server:e2e:payments` - Real-payment-pipeline end-to-end test (82 assertions): spawns its own
+- `npm run server:e2e:payments` - Real-payment-pipeline end-to-end test (92 assertions): spawns its own
   backend on :4102 plus `PAYMENT_FAKE_PROVIDER=true`, so the whole order → notify → refund → invoice
   pipeline runs without a merchant account. Covers signature verification (a bad signature → 401 and the
   order **untouched**, with no `notify/ok` event on that order), unknown order 404, amount mismatch 400,
@@ -175,7 +175,7 @@ architecture, full API reference, and the admin/auth design.
   a parent reply sends it back to the support queue, both sides are refused once the ticket is closed
   (closing one frees the cap for a new one), turning the intake flag off blocks new tickets **but keeps
   history readable**, and every admin action is audited. It deletes its throwaway parent and tickets.
-- `npm run e2e` - Browser end-to-end test (parent app + admin console, 200 checks: parent app 120 + admin console 80) driving headless
+- `npm run e2e` - Browser end-to-end test (parent app + admin console, 200 checks: parent app 120 + admin console 80 — 家长端项数随数据变化：没有已绑定设备时是 109 项，别把它当硬基线) driving headless
   Chrome over CDP with no npm dependencies. Targets `http://localhost:2727` by default, so it needs
   `npm run preview:all` running; set `APP_URL=http://localhost:5173` to point it at the dev server
   instead. Override the
@@ -187,7 +187,45 @@ architecture, full API reference, and the admin/auth design.
   English UI and session robustness. **`e2e:responsive` needs a raised
   `RATE_LIMIT_MAX`**: it does 90 full page reloads, peaking at 300+ requests/minute, and being
   rate-limited makes the app look logged-out (`/login`) so failures masquerade as missing text.
+- `npm run e2e:matrix` - 分层端到端执行器（`scripts/e2e-matrix.mjs` + `scripts/device-matrix.json`）：
+  按 L0 静态 / L1 契约（19 个 `server:e2e:*`）/ L2 界面（四套浏览器套件）/ L3 设备（adb 驱动）逐层跑，
+  串行——浏览器套件不互抢 CDP、设备套件不互抢 adb；产物写 `artifacts/e2e/<runId>/`（`report.json`
+  + 每个套件的完整日志）。`npm run e2e:matrix:ci`（`--only=static,contract,ui`）是不需要手机的档；
+  `npm run e2e:device:matrix`（`--only=matrix --boot`）把 7 档模拟器逐个起停跑一遍。用例清单、机型矩阵
+  与执行契约见 [`docs/PLAN-e2e-automation.md`](docs/PLAN-e2e-automation.md)。
 - No frontend unit-test framework is configured yet.
+
+### Deployment
+
+线上：**https://bdog.gtsiot.cn**（服务器 `43.137.2.132`，docker compose；细节见
+[`docs/PLAN-deploy.md`](docs/PLAN-deploy.md)）。
+
+- `npm run deploy` - 一条命令发版：校验 `.env` 的 `VITE_SERVER_URL` == `DEPLOY_DOMAIN` → 构建前端 →
+  服务器上 `docker build` 后端镜像 → rsync `dist/` 到 `/opt/app/bdog/releases/<tag>` → 原子换
+  `current` 软链 → `docker-compose -p bdog up -d` → 等健康 → 冒烟（`/health`、`/`、`/admin/login`、
+  `/api` 未登录必须 401、APK sha256 与本地一致）→ 清理旧版本（release 与镜像各留 3 份）。
+  开关：`--dry-run` / `--skip-web`（只发后端）/ `--skip-image`（只发前端）/ `--build-apk` /
+  `BUILD_ON=local`（本机构建再 save/load）。
+- `npm run check:payment-keys [-- --network]` - 支付密钥自检：把 `WECHAT_PAY_PRIVATE_KEY` /
+  `ALIPAY_PRIVATE_KEY` / `ALIPAY_PUBLIC_KEY` 真的读一遍、签一次、验回来（支付宝密钥工具导出的
+  **裸 base64** 与带 PEM 头的两种形态都接受）。`--network` 额外用 `alipay.trade.query` 打一次
+  真网关。`npm run deploy` 的前置步骤里会自动跑一遍（离线模式）。
+- `npm run deploy:rollback` - 回滚：读服务器 `.deploy-state.json`，`current` 软链与镜像 tag **一起**
+  回，所以不会出现「新前端 + 旧后端」。
+- `npm run smoke:live` - 线上冒烟，用无头 Chrome 真开一遍（页面渲染 + 控制台报错 + `/api` 同源反代 +
+  APK 是 `PK` 魔数）；`SMOKE_PHONE`/`SMOKE_PASSWORD` 带真登录，`SMOKE_SHOT=<path>` 存截图。
+  只读、不造数据，可以直接对生产跑。
+- **不要在这台机器上新增宿主端口**：80/443 是边缘 nginx，4000 是 kesi-server，5432 是 gtsiot-postgres。
+  我们的三个容器（`bdog-web` / `bdog-server` / `bdog-postgres`）都接入外部网络 `app_backend`，
+  由边缘 nginx 按**容器名**反代（`/api/` → `bdog-server:4000`、`/` → `bdog-web:80`）。
+- 生产**不跑** `db:seed`（它会灌演示家长和演示设备）；超管用 `server/scripts/bootstrap-admin.mjs` 建
+  （幂等，已存在不改密码，要改加 `--reset-password`）。
+- 密钥只在服务器的 `/opt/app/bdog/.env.prod`（chmod 600，**不入库**）；模板是
+  `deploy/.env.prod.example`。`.env.deploy` / `.env.prod` / `android/keystore/release.keystore` +
+  `keystore.properties` 都在 `.gitignore` 里 —— 别把它们提交上去。
+- 基础镜像必须用 **bullseye**（`docker.m.daocloud.io/library/node:22-bullseye-slim`）：宿主机
+  Docker 19.03 的默认 seccomp 比 glibc 2.36 旧，bookworm 里的 node 在容器会直接 abort
+  （`uv_thread_create`）。服务器也不通 `deb.debian.org`，运行时镜像里不要 `apt-get`。
 
 ## Internationalization
 

@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import { HomePage } from './pages/HomePage'
 import { LocationPage } from './pages/LocationPage'
 import { ProfilePage } from './pages/ProfilePage'
+import { ProfileEditPage } from './pages/ProfileEditPage'
 import { QuizUnlockPage } from './pages/QuizUnlockPage'
 import { SchedulePage } from './pages/SchedulePage'
 import { LoginPage } from './pages/LoginPage'
@@ -113,6 +114,15 @@ function AppShell() {
           element={
             <ProtectedRoute>
               <ProfilePage />
+            </ProtectedRoute>
+          }
+        />
+        {/* 个人信息编辑：资料属于账号，不属于某一台设备，所以不包 RequireDevice */}
+        <Route
+          path="/profile/edit"
+          element={
+            <ProtectedRoute>
+              <ProfileEditPage />
             </ProtectedRoute>
           }
         />

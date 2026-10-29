@@ -43,3 +43,19 @@ android/app/build/
 
 # 孩子端安装包：构建产物，不进仓库（用 npm run android:copy-apk 刷新）
 public/download/*.apk
+
+# 端到端执行器的产物（report.json / 每个套件的日志 / 失败截图）——
+# 它们是每次运行都会重新生成的，跟踪进来只会让 diff 里全是日志。
+artifacts/
+
+# 正式签名：keystore 本身与密码都不进仓库。
+# 丢了它 = 已装机的孩子端无法覆盖升级（只能卸载重装，数据全丢），
+# 所以务必在服务器 /opt/app/bdog/ssl/ 与自己手上各留一份备份。
+android/keystore/release.keystore
+android/keystore/keystore.properties
+
+# 部署配置（服务器地址 / 私钥路径），模板见 .env.deploy.example
+.env.deploy
+
+# 生产环境变量（含密钥）
+deploy/.env.prod

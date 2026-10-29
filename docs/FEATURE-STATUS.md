@@ -252,7 +252,7 @@ FrameBatchUploader POST /api/agent/screen-batches
 | 家长端 | [`/membership`](../src/pages/MembershipPage.tsx) 会员中心（状态卡、三周期报价、规则明细、收银台、充值记录、连续包月开关）；**能不能真付钱只信 `GET /api/payments/catalog`** —— 未配置的渠道如实显示「缺哪个环境变量」，绝不画扫不出来的二维码；已支付订单可自助退款（窗口内）、可申请开票（抬头/税号/邮箱），退款单号与发票状态都从服务端读；`MembershipGate` / `MemberOnlyPage` 负责锁住的功能；「我的」页有入口 |
 | 后台 | `/admin/membership` 五页：统计 / 套餐 / 定价规则（含试算）/ 受邀用户定价（含试算）/ 订单；`/admin/payments` 四页：收款统计（含逐渠道配置体检与坏签名计数）/ 订单（查看流水、人工退款）/ 退款 / 发票（开具必须填发票号） |
 
-**验证**：`npm run server:e2e:membership`（180 项，真实库、真算金额）+ `npm run server:e2e:payments`（82 项，
+**验证**：`npm run server:e2e:membership`（180 项，真实库、真算金额）+ `npm run server:e2e:payments`（92 项，
 假渠道走通「下单 → 扫码 → 回调验签 → 幂等 → 退款 → 开票」全链，见 §3L）+ 浏览器探针（家长端 120 项、
 管理后台 80 项，含会员中心五页、支付管线第 5f 节与后台支付四页）。**诚实边界**：真实商户号没有，网络里跑的是
 `PAYMENT_FAKE_PROVIDER`（生产硬拒）；未配置的渠道在界面上如实显示「缺哪个环境变量」，不假装能付。
@@ -733,11 +733,11 @@ FrameBatchUploader POST /api/agent/screen-batches
 
 | 层 | 验证等级 | 证据 |
 | --- | --- | --- |
-| 渠道目录与配置位 | **✅ 服务端 82 项** | `server/src/features/payments/payments.constants.ts` 的 `PROVIDERS` 逐渠道列出必需配置项（微信 7 个：`WECHAT_PAY_MCH_ID` / `WECHAT_PAY_APP_ID` / `WECHAT_PAY_API_V3_KEY` / `WECHAT_PAY_SERIAL_NO` / `WECHAT_PAY_PRIVATE_KEY` / `WECHAT_PAY_PLATFORM_CERT` / `WECHAT_PAY_NOTIFY_URL`；支付宝 4 个：`ALIPAY_APP_ID` / `ALIPAY_PRIVATE_KEY` / `ALIPAY_PUBLIC_KEY` / `ALIPAY_NOTIFY_URL`）。**按渠道各自判断，不做「支付总开关」**——现实里常见「支付宝配好了、微信还在等审核」，一刀切会让能收的钱也收不了。`GET /api/payments/catalog` 原样下发「哪个渠道可用、缺哪个变量、退款窗口几天、提示文案」，前端一个字符串都不自己编 |
-| 下单与支付 | **✅ 服务端 82 项** | `payments.provider.ts` 是注册表：配置齐全才拿得到 provider，缺配置抛 `ServiceUnavailableError`（`503`，`message` 点名缺哪个变量）；微信有 `wechatOpenid` 走 JSAPI、否则 Native 扫码，支付宝走 `alipay.trade.wap.pay` 跳转 |
-| 回调验签与幂等 | **✅ 服务端 82 项** | `POST /api/payments/notify/:channel` 在 `express.json()` **之前**挂 `express.raw({ type: '*/*', limit: '256kb' })`（验签必须拿到原始报文）。坏签 → `401`，**订单一动不动、且该订单上不产生任何 `kind:'notify' && result:'ok'` 的流水**（只写一条 `bad_signature`，`orderNo` 留空 —— 单号取自未验签的报文、不可信，只把「回调自述单号」记进 `detail`）；未知单 `404`、金额不符 `400`、渠道不符 `400`、未配置渠道 `503`、未知渠道 `404`。成功回调把会员写实（`tier` + `transactionId` + `refundDeadline`），**重投同一笔是幂等的**（`200` 且 `expiresAt` 不变、流水记 `duplicate`） |
-| 退款 | **✅ 服务端 82 项** | 自助退款 `POST /api/payments/refunds`：窗口内（`PAYMENT_REFUND_WINDOW_DAYS`，默认 7 天）→ 订单 `refunded` + 会员**按档位收回**（免费档在会员体系里叫 `ordinary`，不是 `free`）+ `refundNo`（`RF<orderNo>`，退款失败后重试复用同一个号，不会重复退款；`REFUND_RETRY_AFTER_MS = 10 分钟` 内不接受重复申请）；二次退款 `409`、超窗口 `403`、**已申请或已开具发票的订单不能自助退款**（先冲红，`409`「这张订单已经申请过发票，退款需要先冲红，请联系客服处理」）；后台人工退款 `POST /api/admin/payments/refunds` 走同一条 `settleRefund`，退失败只记流水、不改状态 |
-| 发票 | **✅ 服务端 82 项** | `POST /api/payments/invoices`：未支付 `409`、公司抬头缺税号 `400`、重复申请 `409`、有退款申请/已退款 `409`、超过 `INVOICE_LIMIT_PER_USER = 20` 条 `409`；后台 `PATCH /api/admin/payments/invoices/:invoiceId` 标 `issued` 必须填发票号（否则 `422`），家长端能看到状态与发票号 |
+| 渠道目录与配置位 | **✅ 服务端 92 项** | `server/src/features/payments/payments.constants.ts` 的 `PROVIDERS` 逐渠道列出必需配置项（微信 7 个：`WECHAT_PAY_MCH_ID` / `WECHAT_PAY_APP_ID` / `WECHAT_PAY_API_V3_KEY` / `WECHAT_PAY_SERIAL_NO` / `WECHAT_PAY_PRIVATE_KEY` / `WECHAT_PAY_PLATFORM_CERT` / `WECHAT_PAY_NOTIFY_URL`；支付宝 4 个：`ALIPAY_APP_ID` / `ALIPAY_PRIVATE_KEY` / `ALIPAY_PUBLIC_KEY` / `ALIPAY_NOTIFY_URL`）。**按渠道各自判断，不做「支付总开关」**——现实里常见「支付宝配好了、微信还在等审核」，一刀切会让能收的钱也收不了。`GET /api/payments/catalog` 原样下发「哪个渠道可用、缺哪个变量、退款窗口几天、提示文案」，前端一个字符串都不自己编 |
+| 下单与支付 | **✅ 服务端 92 项** | `payments.provider.ts` 是注册表：配置齐全才拿得到 provider，缺配置抛 `ServiceUnavailableError`（`503`，`message` 点名缺哪个变量）；微信有 `wechatOpenid` 走 JSAPI、否则 Native 扫码，支付宝走 `alipay.trade.wap.pay` 跳转；**回调之外还有主动查单**（`POST /api/payments/orders/:orderNo/sync`，支付宝的同步回跳与「回调丢了」全靠它），家长端收银台打开后每 3 秒自动对账、到账即开通 |
+| 回调验签与幂等 | **✅ 服务端 92 项** | `POST /api/payments/notify/:channel` 在 `express.json()` **之前**挂 `express.raw({ type: '*/*', limit: '256kb' })`（验签必须拿到原始报文）。坏签 → `401`，**订单一动不动、且该订单上不产生任何 `kind:'notify' && result:'ok'` 的流水**（只写一条 `bad_signature`，`orderNo` 留空 —— 单号取自未验签的报文、不可信，只把「回调自述单号」记进 `detail`）；未知单 `404`、金额不符 `400`、渠道不符 `400`、未配置渠道 `503`、未知渠道 `404`。成功回调把会员写实（`tier` + `transactionId` + `refundDeadline`），**重投同一笔是幂等的**（`200` 且 `expiresAt` 不变、流水记 `duplicate`） |
+| 退款 | **✅ 服务端 92 项** | 自助退款 `POST /api/payments/refunds`：窗口内（`PAYMENT_REFUND_WINDOW_DAYS`，默认 7 天）→ 订单 `refunded` + 会员**按档位收回**（免费档在会员体系里叫 `ordinary`，不是 `free`）+ `refundNo`（`RF<orderNo>`，退款失败后重试复用同一个号，不会重复退款；`REFUND_RETRY_AFTER_MS = 10 分钟` 内不接受重复申请）；二次退款 `409`、超窗口 `403`、**已申请或已开具发票的订单不能自助退款**（先冲红，`409`「这张订单已经申请过发票，退款需要先冲红，请联系客服处理」）；后台人工退款 `POST /api/admin/payments/refunds` 走同一条 `settleRefund`，退失败只记流水、不改状态 |
+| 发票 | **✅ 服务端 92 项** | `POST /api/payments/invoices`：未支付 `409`、公司抬头缺税号 `400`、重复申请 `409`、有退款申请/已退款 `409`、超过 `INVOICE_LIMIT_PER_USER = 20` 条 `409`；后台 `PATCH /api/admin/payments/invoices/:invoiceId` 标 `issued` 必须填发票号（否则 `422`），家长端能看到状态与发票号 |
 | 后台 | **✅ 浏览器 80 项** | `/admin/payments` 四页（收款统计 / 订单 / 退款 / 发票）：统计页的渠道配置卡与家长端目录**同一个来源**；订单页「查看流水」把坏签名标红、`amount_mismatch`/`channel_mismatch`/`duplicate` 给中文释义；发票页空号码时前端拦下不发请求 |
 | 家长端界面 | **✅ 浏览器 120 项（其中支付 5f 节 11 项）** | `家长端 5f. 会员中心与支付管线`：目录接口给出渠道实况与退款窗口、未配置的渠道如实列出缺哪个环境变量、测试渠道只在测试环境出现且写明「不联网、不扣款」、页面把服务端那句实况**原样**显示、充值记录区块在位、收银台给出支付方式与应付金额、只点开收银台不会凭空多出订单、订单接口未登录 `401` |
 | 设备级 | **➖ 不适用** | 纯服务端 + 家长端 + 后台能力 |
@@ -1009,7 +1009,7 @@ grep -rn "audioRecord\|remoteHelp\|callSms" --include=*.ts --include=*.tsx --inc
 | `server:e2e:device-members`（67 项） | 角色分离（owner/admin/viewer）、每个写接口重校验、上限与打码、解绑与成员管理仅主人 | 本轮 67/67 |
 | `server:e2e:children`（74 项） | 孩子档案 CRUD / 年龄现算 / 设备整组替换与事务 / 今日任务 / 孩子端勾完成→通知 | 本轮 74/74 |
 | `server:e2e:privacy`（76 项） | 同意版本与重签、撤回即停监控并删设备记录（含磁盘文件）、注销冷静期与到期真删、导出元数据与截断 | 本轮 76/76 |
-| `server:e2e:payments`（82 项） | 假渠道（仅非生产）走通下单 → 扫码 → 回调验签 → 幂等 → 退款 → 开票：坏签 401 且订单一动不动、未知单 404、金额/渠道不符 400、未配置渠道 503、越权读退 404、退款收回会员且二次 409、超窗口 403、有发票不能自助退款、开具必须填发票号 422、后台统计与流水 | 本轮 82/82 |
+| `server:e2e:payments`（92 项） | 假渠道（仅非生产）走通下单 → 扫码 → 回调验签 → 幂等 → 退款 → 开票：坏签 401 且订单一动不动、未知单 404、金额/渠道不符 400、未配置渠道 503、越权读退 404、退款收回会员且二次 409、超窗口 403、有发票不能自助退款、开具必须填发票号 422、后台统计与流水 | 本轮 92/92 |
 | `server:e2e:flags`（45 项） | 运行时灰度开关：代码默认值 / 稳定哈希放量 / 白名单 / 接进支付与退款路径 / reset / 留痕（自带 :4103 后端） | 本轮 45/45 |
 | `server:e2e:alerts`（65 项） | 后台告警大盘：五条规则 / 分母为 0 是 null / 三值一致 / 改阈值只影响触发 / 确认不放行也不出站（自带 :4104 后端） | 本轮 65/65 |
 | `server:e2e:tickets`（69 项） | 客服工单：提交 → 越权 404 → 分派与回复 → 关闭后不可回 → 入口开关 → 删账号级联（自带 :4105 后端） | 本轮 69/69 |

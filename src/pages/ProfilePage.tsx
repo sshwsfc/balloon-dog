@@ -9,6 +9,7 @@ import { MembershipBadge } from '@/components/MembershipGate'
 import { resetOnboarding, useOnboarding } from '@/hooks/useOnboarding'
 import { useMembership } from '@/hooks/useMembership'
 import { formatDateTime } from '@/lib/format'
+import { cn } from '@/lib/utils'
 import { resetTips } from '@/hooks/useFeatureTips'
 import { useAuth } from '@/contexts/AuthContext'
 import { api, toUserMessage } from '@/services/api'
@@ -82,8 +83,28 @@ export function ProfilePage() {
   // 不该逼家长先在脑子里选中某一台才知道有没有人在等他。
   const pendingRequests = devices.reduce((sum, d) => sum + (d.pendingTimeRequests ?? 0), 0)
 
+  /**
+   * 名称面板右上角那粒会员标签的第二行。
+   * 家长最常问的两个问题是「我算不算会员」「还剩几天」，所以这里既给档位也给有效期：
+   * 有精确天数就报天数（一眼可算），没有就退回到期日，绝不写成含糊的「已开通」。
+   */
+  const membershipSummary = (() => {
+    const status = membership.status
+    if (!status && membership.loading) return t('加载中...')
+    if (!membership.isMember || !status) return t('点击开通')
+    if (!status.active) return t('已到期，点击续费')
+    if (status.daysLeft !== null) return t('剩 {{v0}} 天', { v0: status.daysLeft })
+    if (status.expiresAt) return t('有效期至 {{v0}}', { v0: formatDateTime(status.expiresAt) })
+    return t('已开通')
+  })()
+
   const menuItems = [
-    { icon: User, title: t('个人信息'), desc: t('修改昵称、邮箱'), onClick: () => toast.info(t('个人信息编辑即将上线')) },
+    {
+      icon: User,
+      title: t('个人信息'),
+      desc: t('修改昵称、邮箱与登录密码'),
+      onClick: () => navigate('/profile/edit'),
+    },
     {
       icon: Bell,
       title: t('消息中心'),
@@ -114,15 +135,13 @@ export function ProfilePage() {
 
   return (
     <div className="page-shell">
-      <div className="bg-gradient-to-br from-green-400 to-green-600 text-white px-4 py-6">
-        <div className="flex items-center space-x-3">
-          {user?.avatar ? (
-            <img src={user.avatar} alt={t('头像')} className="w-16 h-16 rounded-full bg-white/20" />
-          ) : (
-            <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center">
-              <User className="w-8 h-8" />
-            </div>
-          )}
+      {/*
+        头像去掉了（家长端没有上传入口，一直是同一个占位图），空出来的右侧
+        正好放会员状态：这是家长进「我的」最先想确认的一件事，不该藏在下面第三张卡片里。
+        未开通时用白底绿字（在绿色渐变上最跳），已开通时用金色，点一下进会员中心。
+      */}
+      <div className="bg-gradient-to-br from-green-400 to-green-600 text-white px-4 py-5">
+        <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h1 className="text-xl font-medium truncate">{user?.name || t('家长用户')}</h1>
             <p className="text-xs opacity-80 mt-0.5">{t('家长账户')}</p>
@@ -131,6 +150,28 @@ export function ProfilePage() {
               {user?.wechatBound ? t(' · 已绑定微信') : ''}
             </p>
           </div>
+          <button
+            type="button"
+            onClick={() => navigate('/membership')}
+            className={cn(
+              'shrink-0 rounded-xl px-3 py-2 text-left shadow-sm transition active:scale-95',
+              membership.isMember
+                ? 'bg-gradient-to-br from-amber-200 to-amber-400 text-amber-950'
+                : 'bg-white text-[#07863f]',
+            )}
+          >
+            <span className="flex items-center gap-1 text-[13px] font-semibold leading-none">
+              {membership.isSuper ? (
+                <Sparkles className="h-3.5 w-3.5" />
+              ) : (
+                <Crown className="h-3.5 w-3.5" />
+              )}
+              {membership.isMember ? t(membership.isSuper ? '超级会员' : '会员') : t('未开通会员')}
+            </span>
+            <span className="mt-1 block text-[11px] leading-none opacity-80">
+              {membershipSummary}
+            </span>
+          </button>
         </div>
       </div>
 

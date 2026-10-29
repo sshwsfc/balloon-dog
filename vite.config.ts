@@ -20,7 +20,7 @@ const APP_VERSION: string = JSON.parse(readFileSync('./package.json', 'utf8')).v
  * 对外访问端口，**固定** 2727，由 `vite preview` 提供。
  *
  * 这里跑的是 `npm run build` 的产物（dist/），是静态文件直出，远程访问很快。
- * 外网反向代理（https://ballondog.hd.takin.cc）指的就是这个端口。
+ * 外网反向代理（线上是 https://bdog.gtsiot.cn）指的就是这个端口。
  *
  * 为什么不用 `vite dev` 对外：dev server 按需转换每个模块、还挂着 HMR websocket，
  * 走公网代理时首屏明显更慢（实测就是这个原因才换过来的）。dev 只服务本机开发，
@@ -70,7 +70,7 @@ export default defineConfig(({ mode }) => {
     host: true,
     /**
      * Vite 会校验请求的 Host 头，默认只放行 localhost 与本机 IP；用域名
-     * （例如 ballondog.hd.takin.cc）访问而没加进白名单，会被回一句
+     * （例如 bdog.gtsiot.cn）访问而没加进白名单，会被回一句
      * "Blocked request. This host is not allowed."。
      */
     ...(serverHost ? { allowedHosts: [serverHost] } : {}),

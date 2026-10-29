@@ -1,0 +1,524 @@
+{
+  "$comment": "端到端自动化测试的机型矩阵（见 docs/PLAN-e2e-automation.md §5）。每个档描述一台可被 scripts/e2e-matrix.mjs 驱动跑设备端套件的设备：kind=emulator 的档可以用 --boot 自动起停 AVD，kind=physical 的档要求设备已经连着 adb 且完成 §6 的预置。capabilities 决定该档「能证明什么」，expectedSkips 里的项必须在报告里如实记为 SKIP，不许算通过。 avd 是本机约定的 AVD 名字；本机没有这个 AVD 时置 null，用 --avd=<name> 覆盖。",
+  "version": 1,
+  "defaults": {
+    "suites": [
+      "agent",
+      "gaps",
+      "mode",
+      "screen"
+    ],
+    "env": {
+      "API_BASE": "http://localhost:4000/api"
+    }
+  },
+  "profiles": [
+    {
+      "id": "avd-33-aosp-arm64",
+      "label": "Android 13 · AOSP 模拟器（arm64）",
+      "kind": "emulator",
+      "avd": "bd-verify",
+      "apiLevel": 33,
+      "release": "13",
+      "brand": "google",
+      "model": "sdk_gphone64_arm64",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 1080,
+        "height": 2340,
+        "dpi": 440
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "emulated",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": false,
+        "oemBackgroundPolicy": false
+      },
+      "suites": [
+        "agent",
+        "gaps",
+        "mode",
+        "screen"
+      ],
+      "expectedSkips": [
+        "厂商自启动/后台清理策略（模拟器没有）",
+        "真实 Doze 深度休眠下的存活",
+        "相机画质与噪点"
+      ],
+      "notes": "主力档；本机唯一已装镜像。e2e-gaps 的屏幕采集需要人工点一次系统授权框，无头模式下会如实 SKIP。 本机现成的 AVD 叫 bd-verify（API 33）；换机器用 --avd 覆盖。"
+    },
+    {
+      "id": "avd-28-aosp-x86_64",
+      "label": "Android 9 · AOSP 模拟器（x86_64）",
+      "kind": "emulator",
+      "avd": null,
+      "apiLevel": 28,
+      "release": "9",
+      "brand": "google",
+      "model": "sdk_gphone_x86_64",
+      "abi": "x86_64",
+      "screen": {
+        "width": 1080,
+        "height": 1920,
+        "dpi": 420
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "emulated",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": false,
+        "oemBackgroundPolicy": false
+      },
+      "suites": [
+        "agent",
+        "mode"
+      ],
+      "expectedSkips": [
+        "Android 14 前台服务类型强制（低版本没有该概念）",
+        "MediaProjection 的新授权流程"
+      ],
+      "notes": "旧机型基线；未安装镜像时 e2e-matrix 会判 BLOCKED。 本机未装该镜像；先 sdkmanager 装 system-image 再建 AVD，或用 --avd 指定。"
+    },
+    {
+      "id": "avd-31-aosp-arm64",
+      "label": "Android 12 · AOSP 模拟器（arm64）",
+      "kind": "emulator",
+      "avd": null,
+      "apiLevel": 31,
+      "release": "12",
+      "brand": "google",
+      "model": "sdk_gphone64_arm64",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 1080,
+        "height": 2340,
+        "dpi": 440
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "emulated",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": false,
+        "oemBackgroundPolicy": false
+      },
+      "suites": [
+        "agent",
+        "gaps",
+        "screen"
+      ],
+      "expectedSkips": [
+        "厂商后台策略",
+        "相机画质"
+      ],
+      "notes": "精确闹钟与前台服务类型的分水岭版本。 本机未装该镜像；先 sdkmanager 装 system-image 再建 AVD，或用 --avd 指定。"
+    },
+    {
+      "id": "avd-34-aosp-arm64",
+      "label": "Android 14 · AOSP 模拟器（arm64）",
+      "kind": "emulator",
+      "avd": null,
+      "apiLevel": 34,
+      "release": "14",
+      "brand": "google",
+      "model": "sdk_gphone64_arm64",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 1080,
+        "height": 2400,
+        "dpi": 420
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "emulated",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": false,
+        "oemBackgroundPolicy": false
+      },
+      "suites": [
+        "agent",
+        "gaps",
+        "mode",
+        "screen"
+      ],
+      "expectedSkips": [
+        "厂商后台策略",
+        "真实 Doze"
+      ],
+      "notes": "前台服务类型强制声明、MediaProjection 收紧；升级 PR 必跑。 本机未装该镜像；先 sdkmanager 装 system-image 再建 AVD，或用 --avd 指定。"
+    },
+    {
+      "id": "avd-35-aosp-arm64",
+      "label": "Android 15 · AOSP 模拟器（arm64）",
+      "kind": "emulator",
+      "avd": null,
+      "apiLevel": 35,
+      "release": "15",
+      "brand": "google",
+      "model": "sdk_gphone64_arm64",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 1080,
+        "height": 2400,
+        "dpi": 420
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "emulated",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": false,
+        "oemBackgroundPolicy": false
+      },
+      "suites": [
+        "agent",
+        "mode"
+      ],
+      "expectedSkips": [
+        "厂商后台策略"
+      ],
+      "notes": "最新行为变更预警；只跑主链路，不跑耗时的 gaps/screen。 本机未装该镜像；先 sdkmanager 装 system-image 再建 AVD，或用 --avd 指定。"
+    },
+    {
+      "id": "avd-33-small-720p",
+      "label": "Android 13 · 720×1280 小屏",
+      "kind": "emulator",
+      "avd": null,
+      "apiLevel": 33,
+      "release": "13",
+      "brand": "google",
+      "model": "sdk_gphone64_arm64",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 720,
+        "height": 1280,
+        "dpi": 320
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "emulated",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": false,
+        "oemBackgroundPolicy": false
+      },
+      "suites": [
+        "agent"
+      ],
+      "expectedSkips": [
+        "厂商后台策略"
+      ],
+      "notes": "验证 Kiosk 倒计时悬浮窗、锁屏覆盖层在小屏上不挡关键按钮；只跑主链路。 用 avd config.ini 改分辨率/尺寸后以 --avd 指定。"
+    },
+    {
+      "id": "avd-33-tablet",
+      "label": "Android 13 · 平板 1280×800",
+      "kind": "emulator",
+      "avd": null,
+      "apiLevel": 33,
+      "release": "13",
+      "brand": "google",
+      "model": "sdk_gphone64_arm64",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 1280,
+        "height": 800,
+        "dpi": 240
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "emulated",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": false,
+        "oemBackgroundPolicy": false
+      },
+      "suites": [
+        "agent"
+      ],
+      "expectedSkips": [
+        "厂商后台策略",
+        "横屏锁屏在手机上的布局"
+      ],
+      "notes": "横屏 + 平板形态；只跑主链路，重点看覆盖层与 Kiosk 的方向适配。 用 avd config.ini 改分辨率/尺寸后以 --avd 指定。"
+    },
+    {
+      "id": "real-xiaomi-hyperos",
+      "label": "小米 / Redmi · HyperOS（Android 14）",
+      "kind": "physical",
+      "apiLevel": 34,
+      "release": "14",
+      "brand": "xiaomi",
+      "model": "2312DRA50C",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 1080,
+        "height": 2400,
+        "dpi": 400
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "real",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": true,
+        "oemBackgroundPolicy": true
+      },
+      "suites": [
+        "agent",
+        "gaps",
+        "mode"
+      ],
+      "expectedSkips": [
+        "无（真机不做跳过；做不到就是失败）"
+      ],
+      "provision": [
+        "关闭 MIUI/HyperOS 优化会改变真实行为，默认状态测（不要关）",
+        "设置 → 应用设置 → 气球狗：自启动、后台弹出界面、省电策略=无限制 逐项记录",
+        "确认 dpm set-device-owner 未被 MIUI 拦截"
+      ],
+      "notes": "`brandOf` 命中 xiaomi 分支；修复步骤必须出现 MIUI 路径。"
+    },
+    {
+      "id": "real-huawei-harmony",
+      "label": "华为 · HarmonyOS 4（Android 12 兼容）",
+      "kind": "physical",
+      "apiLevel": 31,
+      "release": "12",
+      "brand": "huawei",
+      "model": "ANA-AN00",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 1080,
+        "height": 2340,
+        "dpi": 400
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "real",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": true,
+        "oemBackgroundPolicy": true
+      },
+      "suites": [
+        "agent",
+        "gaps",
+        "mode"
+      ],
+      "expectedSkips": [
+        "无"
+      ],
+      "provision": [
+        "无 GMS：确认应用内网络请求不依赖 Play Services",
+        "允许「关联启动」；关闭「智能省电」前后各跑一轮并对比"
+      ],
+      "notes": "`brandOf` 命中 huawei；EMUI/HarmonyOS 的电池优化入口文案与 MIUI 不同。"
+    },
+    {
+      "id": "real-oppo-coloros",
+      "label": "OPPO · ColorOS 14（Android 14）",
+      "kind": "physical",
+      "apiLevel": 34,
+      "release": "14",
+      "brand": "oppo",
+      "model": "PJZ110",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 1080,
+        "height": 2412,
+        "dpi": 400
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "real",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": true,
+        "oemBackgroundPolicy": true
+      },
+      "suites": [
+        "agent",
+        "gaps"
+      ],
+      "expectedSkips": [
+        "无"
+      ],
+      "provision": [
+        "关闭/开启「智能省电」各跑一轮，记录守护被杀的时间点",
+        "悬浮窗权限单独授予（ColorOS 会二次确认）"
+      ],
+      "notes": "`brandOf` 命中 oppo；省电模式是最容易静默失效的一档。"
+    },
+    {
+      "id": "real-vivo-originos",
+      "label": "vivo · OriginOS 4（Android 14）",
+      "kind": "physical",
+      "apiLevel": 34,
+      "release": "14",
+      "brand": "vivo",
+      "model": "V2318A",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 1080,
+        "height": 2400,
+        "dpi": 400
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "real",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": true,
+        "oemBackgroundPolicy": true
+      },
+      "suites": [
+        "agent",
+        "gaps"
+      ],
+      "expectedSkips": [
+        "无"
+      ],
+      "provision": [
+        "i管家 → 后台高耗电 / 自启动 白名单逐项记录",
+        "确认锁屏密码改写后应急密码可离线解锁"
+      ],
+      "notes": "`brandOf` 命中 vivo；密码改写能力要在真机验（模拟器只验流程）。"
+    },
+    {
+      "id": "real-samsung-oneui",
+      "label": "三星 · OneUI 6（Android 14）",
+      "kind": "physical",
+      "apiLevel": 34,
+      "release": "14",
+      "brand": "samsung",
+      "model": "SM-A5460",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 1080,
+        "height": 2340,
+        "dpi": 450
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "real",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": true,
+        "oemBackgroundPolicy": true
+      },
+      "suites": [
+        "agent",
+        "gaps"
+      ],
+      "expectedSkips": [
+        "无"
+      ],
+      "provision": [
+        "不登录 Samsung 账号，避免 Knox 影响 dpm",
+        "确认 Kiosk（LOCK_TASK）在 OneUI 上不被 Knox 策略拦下"
+      ],
+      "notes": "`brandOf` 命中 samsung；Kiosk 行为与国产 ROM 差异最大的一档。"
+    },
+    {
+      "id": "real-generic-old",
+      "label": "通用老机 · Android 8.1",
+      "kind": "physical",
+      "apiLevel": 27,
+      "release": "8.1",
+      "brand": "generic",
+      "model": "AOSP on ARM64",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 720,
+        "height": 1440,
+        "dpi": 320
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "real",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": true,
+        "oemBackgroundPolicy": false
+      },
+      "suites": [
+        "agent"
+      ],
+      "expectedSkips": [
+        "Android 12+ 的前台服务类型",
+        "MediaProjection 新流程"
+      ],
+      "provision": [
+        "确认 minSdk 覆盖；若安装失败，这是产品缺陷而不是测试问题"
+      ],
+      "notes": "`brandOf` 走 generic 分支（修复步骤用通用路径）——这条本身就是断言。"
+    },
+    {
+      "id": "real-lowend",
+      "label": "低端机 · 2GB RAM（Android 12）",
+      "kind": "physical",
+      "apiLevel": 31,
+      "release": "12",
+      "brand": "generic",
+      "model": "LowEnd 2GB",
+      "abi": "arm64-v8a",
+      "screen": {
+        "width": 720,
+        "height": 1600,
+        "dpi": 320
+      },
+      "capabilities": {
+        "deviceOwner": true,
+        "accessibility": true,
+        "camera": "real",
+        "vpn": true,
+        "usageAccess": true,
+        "kiosk": true,
+        "realDoze": true,
+        "oemBackgroundPolicy": true
+      },
+      "suites": [
+        "agent"
+      ],
+      "expectedSkips": [
+        "无"
+      ],
+      "provision": [
+        "开启「内存扩展」后复跑一次保活用例（D-34）",
+        "记录相机降级与上传耗时"
+      ],
+      "notes": "内存压力下守护存活是这一档的唯一目的。"
+    }
+  ]
+}

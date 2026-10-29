@@ -157,14 +157,17 @@ export function assertSessionExists(state: string): void {
 
 /** 微信 oauth2/access_token 的成功/失败响应形状。 */
 interface WechatTokenResponse {
+  access_token?: string;
   openid?: string;
   unionid?: string;
   errcode?: number;
   errmsg?: string;
 }
 
-/** 真实模式：微信授权 code → openid。 */
-export async function exchangeCodeForOpenid(code: string): Promise<{ openid: string; unionid?: string }> {
+/** 真实模式：微信授权 code → openid（顺带把 access_token 带回来，用于拉用户资料）。 */
+export async function exchangeCodeForOpenid(
+  code: string,
+): Promise<{ openid: string; unionid?: string; accessToken?: string }> {
   const appId = config.WECHAT_LOGIN_APP_ID!;
   const secret = config.WECHAT_LOGIN_APP_SECRET!;
   const url =
@@ -182,7 +185,30 @@ export async function exchangeCodeForOpenid(code: string): Promise<{ openid: str
     logger.warn({ msg: 'wechat oauth failed', errcode: data.errcode, errmsg: data.errmsg });
     throw new BadRequestError('微信授权失败，请重试');
   }
-  return { openid: data.openid, unionid: data.unionid };
+  return { openid: data.openid, unionid: data.unionid, accessToken: data.access_token };
+}
+
+/**
+ * 拉取微信用户资料（昵称 / 头像）。
+ *
+ * 只有 `snsapi_userinfo` 的网页授权（微信内置浏览器那条链路）才拿得到；PC 扫码用的是
+ * `snsapi_login`，拿不到资料。**失败一律吞掉**：昵称只是体验优化，绝不能因为它挂掉
+ * 就让用户登不进来 —— 拿不到就沿用「微信用户xxxx」+ 默认头像。
+ */
+export async function fetchUserInfo(
+  accessToken: string,
+  openid: string,
+): Promise<{ nickname?: string; headimgurl?: string }> {
+  try {
+    const data = await fetchWechatApi<{ nickname?: string; headimgurl?: string }>(
+      `${wechatApiBase()}/sns/userinfo?access_token=${accessToken}&openid=${openid}&lang=zh_CN`,
+      'userinfo',
+    );
+    return { nickname: data.nickname, headimgurl: data.headimgurl };
+  } catch (error) {
+    logger.debug({ msg: 'wechat userinfo skipped', err: String(error) });
+    return {};
+  }
 }
 
 /** 联调模式下由 state 推导出的稳定假 openid（同一会话重复调用得到同一用户）。 */

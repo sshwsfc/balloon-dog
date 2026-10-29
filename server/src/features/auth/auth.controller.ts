@@ -124,10 +124,12 @@ export async function wechatCallback(req: Request, res: Response) {
         // 2) 顶层窗口：跳回登录页并带上结果
         if (isTop) {
           var base = ${JSON.stringify(fallback)};
-          var sep = base.indexOf('?') >= 0 ? '&' : '?';
+          // token 放 **fragment**（#wx_token=…）而不是 query：fragment 不会进
+          // Referer、不会进 Nginx/网关的访问日志，也不会留在分享出去的链接里。
+          // 前端消费后立刻 replaceState 清掉。
           var url = ${isSuccess}
-            ? base + sep + 'wx_token=' + encodeURIComponent(payload.token)
-            : base + sep + 'wx_error=' + encodeURIComponent(payload.message || '1');
+            ? base + '#wx_token=' + encodeURIComponent(payload.token)
+            : base + '#wx_error=' + encodeURIComponent(payload.message || '1');
           window.location.replace(url);
           return;
         }

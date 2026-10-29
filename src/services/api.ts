@@ -324,8 +324,19 @@ export const authApi = {
 
   logout: () => http.post<{ success: boolean }>('/auth/logout', {}),
 
+  /**
+   * 修改密码。
+   *
+   * 注意 skipUnauthorizedHandler：「原密码错误」在服务端是 **401**，但这里的 401
+   * 不是「令牌失效」，走全局处理会把家长踢回登录页、顺手清掉本地令牌 —— 明明
+   * 只是输错了一个框。让它跟登录接口一样自己把错误交给调用方显示。
+   */
   changePassword: (data: { oldPassword: string; newPassword: string }) =>
-    http.post<{ success: boolean }>('/auth/change-password', data),
+    request<{ success: boolean }>('/auth/change-password', {
+      method: 'POST',
+      body: data,
+      skipUnauthorizedHandler: true,
+    }),
 
   bindPhone: (data: { phone: string; code: string }) =>
     http.post<{ success: boolean; user: User }>('/auth/bind-phone', data),
@@ -1235,6 +1246,19 @@ export const paymentsApi = {
    */
   createPayment: (orderNo: string) =>
     http.post<PaymentIntentResponse>(`/payments/orders/${orderNo}/pay`, {}),
+
+  /**
+   * 主动查单对账。
+   *
+   * 异步回调会丢（网关抖动、发布重启撞上回调），丢了以后订单就卡在 pending、会员不开。
+   * 这个方法让家长端在「二维码弹出来之后」自动去渠道核一次：渠道侧一旦是 SUCCESS
+   * 就把钱认下来并结算，结算走的仍是后端与回调同一条 `applyPaidOrder()`。
+   */
+  syncPayment: (orderNo: string) =>
+    http.post<{ success: boolean; order: PaymentOrderView; changed: boolean; tradeState: string; reason: string }>(
+      `/payments/orders/${orderNo}/sync`,
+      {},
+    ),
 
   /** 自助退款。超过窗口 / 有待处理发票时后端会拒绝，并把原因写成一句人话。 */
   requestRefund: (orderNo: string, reason: string, amountCents?: number) =>

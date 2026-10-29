@@ -20,7 +20,8 @@
     "smoke": "node scripts/smoke-test.mjs",
     "lint": "eslint .",
     "agent:example": "node scripts/device-agent-example.mjs",
-    "clean:test-data": "tsx scripts/clean-test-data.ts"
+    "clean:test-data": "tsx scripts/clean-test-data.ts",
+    "check:payment-keys": "tsx scripts/check-payment-keys.mts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -36,6 +37,7 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.0",
     "pino": "^9.5.0",
+    "prisma": "^5.22.0",
     "tencentcloud-sdk-nodejs-sms": "^4.1.306",
     "zod": "^3.23.8"
   },
@@ -46,7 +48,6 @@
     "@types/jsonwebtoken": "^9.0.7",
     "@types/multer": "^2.0.0",
     "@types/node": "^22.10.2",
-    "prisma": "^5.22.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   },

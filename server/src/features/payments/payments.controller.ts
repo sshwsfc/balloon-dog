@@ -3,6 +3,7 @@ import { ah } from '../../shared/asyncHandler';
 import { authenticate, authenticateAdmin } from '../../middleware/auth';
 import { currentUserId } from '../../shared/deviceScope';
 import { paymentsService } from './payments.service';
+import { fakeProviderAllowed } from './payments.constants';
 import {
   adminInvoiceUpdateSchema,
   adminPaymentQuerySchema,
@@ -48,6 +49,24 @@ export async function getOrder(req: Request, res: Response) {
   res.json(await paymentsService.orderDetail(currentUserId(req), orderNo));
 }
 
+/** POST /api/payments/orders/:orderNo/sync —— 主动查单对账（回调丢失时的兜底）。 */
+export async function syncOrder(req: Request, res: Response) {
+  const { orderNo } = createPaymentSchema.parse(req.params);
+  res.json({ success: true, ...(await paymentsService.syncOrder(currentUserId(req), orderNo)) });
+}
+
+/**
+ * POST /api/payments/dev/fake-trade-paid —— **测试专用**。
+ *
+ * 把假渠道那一侧的订单改成已支付，用来验证「异步通知丢了，靠主动查单救回来」。
+ * 它只在 `PAYMENT_FAKE_PROVIDER` 且非生产时注册（见 `paymentRoutes` 末尾），
+ * 生产环境这条路由不存在，不是「被开关关掉」而是根本没有。
+ */
+export async function devFakeTradePaid(req: Request, res: Response) {
+  const { orderNo } = createPaymentSchema.parse(req.body);
+  res.json(await paymentsService.devMarkFakeTradePaid(currentUserId(req), orderNo));
+}
+
 /** POST /api/payments/orders/:orderNo/pay —— 向渠道下单（二维码 / 跳转 / 站内调起）。 */
 export async function createPayment(req: Request, res: Response) {
   const { orderNo } = createPaymentSchema.parse(req.params);
@@ -85,10 +104,16 @@ paymentRoutes.get('/catalog', ah(getCatalog));
 paymentRoutes.get('/orders', ah(listOrders));
 paymentRoutes.get('/orders/:orderNo', ah(getOrder));
 paymentRoutes.post('/orders/:orderNo/pay', ah(createPayment));
+paymentRoutes.post('/orders/:orderNo/sync', ah(syncOrder));
 paymentRoutes.post('/refunds', ah(requestRefund));
 paymentRoutes.get('/refunds', ah(listRefunds));
 paymentRoutes.post('/invoices', ah(requestInvoice));
 paymentRoutes.get('/invoices', ah(listInvoices));
+// 测试钩子：只在假渠道真的可用时挂载。生产（PAYMENT_FAKE_PROVIDER 关闭）里
+// 这条路径就是 404，而不是「有路由但被拒绝」。
+if (fakeProviderAllowed()) {
+  paymentRoutes.post('/dev/fake-trade-paid', ah(devFakeTradePaid));
+}
 
 // ============================================================
 // 渠道回调（无登录态、原始报文）

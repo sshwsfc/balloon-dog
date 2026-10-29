@@ -26,7 +26,7 @@ import {
 } from './payments.constants';
 import { channelFlagKey, isKnownFlag } from '../flags/flags.constants';
 import { flagEnabled } from '../flags/flags.service';
-import { getProvider, providerMissing, requireProvider } from './payments.provider';
+import { getProvider, providerMissing, requireProvider, setFakeTradeState } from './payments.provider';
 
 /**
  * 「这个渠道现在对**这个账号**开放吗」—— 配置齐了只说明能收钱，运营开关还可能在放量
@@ -522,6 +522,120 @@ export const paymentsService = {
       logger.error({ msg: 'payment settle failed', orderNo: order.orderNo, err: error });
       return { httpStatus: 500, contentType: verified.ack.contentType, body: verified.ack.body, result: 'error' };
     }
+  },
+
+  /**
+   * 主动查单对账（家长点「核对支付结果」/ 收银台自动轮询都走这里）。
+   *
+   * 存在的理由：微信/支付宝的异步通知**会丢** —— 网关抖动、发布重启撞上回调、
+   * 容器被换掉时正文没写完，渠道重试几次就放弃了。没有主动查单时，这种情况
+   * 就是「家长付了钱、会员没开、只能人工对账」。有它之后，渠道侧一旦是 SUCCESS
+   * 就能把钱找回来，结算仍然走 `applyPaidOrder()`（与回调同一条路径，不存在第二套逻辑）。
+   *
+   * 返回的 `changed` 告诉界面「这一下真的开了会员」，好让它决定要不要弹成功。
+   */
+  async syncOrder(userId: number, orderNo: string) {
+    const order = await prisma.membershipOrder.findFirst({ where: { orderNo, userId } });
+    if (!order) throw new NotFoundError('订单', orderNo);
+
+    const view = await toPaymentOrderView(order);
+    // 已经结算过的单子直接回答，不去骚扰渠道（渠道也会限流）
+    if (order.status === 'paid') {
+      return { order: view, changed: false, tradeState: 'SUCCESS', reason: '' };
+    }
+    if (order.status !== 'pending') {
+      return { order: view, changed: false, tradeState: '', reason: `订单状态是 ${order.status}` };
+    }
+
+    const label = PAY_CHANNEL_LABELS[order.payChannel] ?? order.payChannel;
+    const missing = providerMissing(order.payChannel);
+    if (missing.length > 0) {
+      throw new ServiceUnavailableError(
+        `支付渠道「${label}」尚未配置，缺少：${missing.join('、')}`,
+      );
+    }
+    const provider = requireProvider(order.payChannel);
+
+    let queried;
+    try {
+      queried = await provider.queryPayment({ orderNo });
+    } catch (error) {
+      await recordEvent({
+        orderNo,
+        provider: order.payChannel,
+        kind: 'query',
+        signatureOk: true,
+        result: 'error',
+        detail: String(error),
+      });
+      throw error;
+    }
+
+    await recordEvent({
+      orderNo,
+      provider: order.payChannel,
+      kind: 'query',
+      signatureOk: true,
+      result: queried.paid ? 'paid' : 'unpaid',
+      detail: queried.found
+        ? `渠道状态 ${queried.tradeState}，金额 ${queried.paidCents}`
+        : queried.reason || '渠道查无此单',
+    });
+
+    if (!queried.found || !queried.paid) {
+      return {
+        order: await toPaymentOrderView(order),
+        changed: false,
+        tradeState: queried.tradeState,
+        reason: queried.reason,
+      };
+    }
+
+    // 金额对不上：钱到了但不是这一单该有的数目，绝不能自动开通（要人工看）
+    if (queried.paidCents > 0 && queried.paidCents !== order.amountCents) {
+      await recordEvent({
+        orderNo,
+        provider: order.payChannel,
+        kind: 'query',
+        signatureOk: true,
+        result: 'amount_mismatch',
+        detail: `渠道金额 ${queried.paidCents} 与订单金额 ${order.amountCents} 不一致`,
+      });
+      logger.error({
+        msg: 'payment query amount mismatch',
+        orderNo,
+        expected: order.amountCents,
+        actual: queried.paidCents,
+      });
+      throw new ConflictError('渠道返回的金额与订单不一致，请联系客服核对');
+    }
+
+    const settled = await applyPaidOrder({
+      orderId: order.id,
+      transactionId: queried.transactionId || `QUERY_${order.orderNo}`,
+      paidCents: queried.paidCents || order.amountCents,
+    });
+    const fresh = await prisma.membershipOrder.findUnique({ where: { id: order.id } });
+    return {
+      order: fresh ? await toPaymentOrderView(fresh) : view,
+      changed: settled.changed,
+      tradeState: queried.tradeState,
+      reason: '',
+    };
+  },
+
+  /**
+   * 测试专用：把假渠道那一侧的订单状态改成 `SUCCESS`。
+   *
+   * 只有 `PAYMENT_FAKE_PROVIDER` 且非生产时这条路径才可达（路由层同样把守），
+   * 它让「异步通知丢了、靠主动查单救回」这件事也有端到端证据。
+   */
+  async devMarkFakeTradePaid(userId: number, orderNo: string) {
+    const order = await prisma.membershipOrder.findFirst({ where: { orderNo, userId } });
+    if (!order) throw new NotFoundError('订单', orderNo);
+    if (order.payChannel !== 'fake') throw new BadRequestError('只有测试渠道可以这样操作');
+    setFakeTradeState(orderNo, 'SUCCESS');
+    return { success: true, orderNo, tradeState: 'SUCCESS' };
   },
 
   /** 家长端的支付记录：订单 + 每笔的渠道事件（家长能自己看到「回调失败」而不是只能问客服）。 */

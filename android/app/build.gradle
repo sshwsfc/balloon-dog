@@ -60,6 +60,41 @@ def releaseBaseUrl = toApiBase(overrideUrl ?: readEnvFileServerUrl() ?: LOCAL_AG
 // 打出来，免得「以为读到了 .env 其实没有」这种静默失败
 println "[balloon] 孩子端默认服务器地址： debug=${debugBaseUrl}  release=${releaseBaseUrl}"
 
+// ---------------------------------------------------------------------------
+// 发布签名（release）
+//
+// 正式包必须用**固定的**签名证书：孩子手机上已经装过的包，只有签名一致才允许覆盖升级，
+// 换一次签名等于让所有老用户先卸载再重装（数据全丢）。所以 release 的 keystore 与密码
+// 不写死在仓库里，而是放在 `android/keystore/keystore.properties`（已 gitignore）：
+//
+//     storeFile=keystore/release.keystore
+//     storePassword=…
+//     keyAlias=balloondog
+//     keyPassword=…
+//
+// 找不到这个文件时（别人 clone 下来只想跑 debug / e2e）release 会回落到 debug 签名并
+// **打一行警告**，绝不静默出一版装了 debug 签名的「正式包」。
+// ---------------------------------------------------------------------------
+def releaseSigningProps = rootProject.file('keystore/keystore.properties')
+def releaseSigning = null
+if (releaseSigningProps.exists()) {
+    def props = new Properties()
+    releaseSigningProps.withInputStream { props.load(it) }
+    def storeFile = rootProject.file(props.getProperty('storeFile'))
+    if (storeFile.exists()) {
+        releaseSigning = [
+                storeFile    : storeFile,
+                storePassword: props.getProperty('storePassword'),
+                keyAlias     : props.getProperty('keyAlias'),
+                keyPassword  : props.getProperty('keyPassword'),
+        ]
+    } else {
+        println "[balloon] 警告：keystore.properties 指向的签名文件不存在（${storeFile}），release 将回落到 debug 签名"
+    }
+} else {
+    println "[balloon] 警告：没有 android/keystore/keystore.properties，release 将回落到 debug 签名（不要用这种包装到真机后对外分发）"
+}
+
 android {
     namespace 'com.balloondog.agent'
 
@@ -82,8 +117,10 @@ android {
         // 已按规范声明并在 startForeground 时使用，因此采集类能力在 Android 13 与 14+ 上
         // 都能正常拿到 while-in-use 权限。
         targetSdk 33
-        versionCode 1
-        versionName '1.0.0'
+        // 2 / 1.0.1：内置后端地址从旧 demo 域名换成线上 https://bdog.gtsiot.cn，
+        // 版本号必须往上走 —— 已经装了 1.0.0 的手机才能当成「升级」而不是同版本覆盖。
+        versionCode 2
+        versionName '1.0.1'
     }
 
     // 调试签名固定放在工程内（android/keystore/debug.keystore），
@@ -94,6 +131,18 @@ android {
             storePassword 'android'
             keyAlias 'androiddebugkey'
             keyPassword 'android'
+        }
+        if (releaseSigning != null) {
+            release {
+                storeFile releaseSigning.storeFile
+                storePassword releaseSigning.storePassword
+                keyAlias releaseSigning.keyAlias
+                keyPassword releaseSigning.keyPassword
+                // 让 v1/v2/v3 都签上，兼容 Android 7（minSdk 24）到最新系统
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+            }
         }
     }
 
@@ -106,7 +155,8 @@ android {
         }
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            // 有正式 keystore 就用它；没有则回落 debug（上面已打警告），保证本地/e2e 仍能出包
+            signingConfig releaseSigning != null ? signingConfigs.release : signingConfigs.debug
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             // 对外发布的包，连 .env 里配的公网后端
             buildConfigField 'String', 'DEFAULT_BASE_URL', "\"${releaseBaseUrl}\""
